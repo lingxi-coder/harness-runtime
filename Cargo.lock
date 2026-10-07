@@ -1533,7 +1533,7 @@ dependencies = [
 [[package]]
 name = "device-api"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app?rev=d26b4f767066975f26ce82b0a086d999172c0090#d26b4f767066975f26ce82b0a086d999172c0090"
+source = "git+https://github.com/lingxi-coder/local-app-builder?rev=ce1d7947c50d1d006134ac020252bac5502961f6#ce1d7947c50d1d006134ac020252bac5502961f6"
 dependencies = [
  "async-trait",
  "serde",
@@ -2427,9 +2427,9 @@ dependencies = [
  "jsonrpc",
  "lingxi-llm-client",
  "llm-runtime",
- "local-app-contracts",
- "local-app-plugin",
- "local-app-service",
+ "local-app-builder-contracts",
+ "local-app-builder-plugin",
+ "local-app-builder-service",
  "local-apps",
  "lsp",
  "lsp-types",
@@ -3304,29 +3304,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "local-app-contracts"
+name = "local-app-builder-contracts"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app?rev=d26b4f767066975f26ce82b0a086d999172c0090#d26b4f767066975f26ce82b0a086d999172c0090"
+source = "git+https://github.com/lingxi-coder/local-app-builder?rev=ce1d7947c50d1d006134ac020252bac5502961f6#ce1d7947c50d1d006134ac020252bac5502961f6"
 dependencies = [
  "serde",
 ]
 
 [[package]]
-name = "local-app-plugin"
+name = "local-app-builder-plugin"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app?rev=d26b4f767066975f26ce82b0a086d999172c0090#d26b4f767066975f26ce82b0a086d999172c0090"
+source = "git+https://github.com/lingxi-coder/local-app-builder?rev=ce1d7947c50d1d006134ac020252bac5502961f6#ce1d7947c50d1d006134ac020252bac5502961f6"
 
 [[package]]
-name = "local-app-service"
+name = "local-app-builder-service"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app?rev=d26b4f767066975f26ce82b0a086d999172c0090#d26b4f767066975f26ce82b0a086d999172c0090"
+source = "git+https://github.com/lingxi-coder/local-app-builder?rev=ce1d7947c50d1d006134ac020252bac5502961f6#ce1d7947c50d1d006134ac020252bac5502961f6"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
  "device-api",
  "futures-core",
  "futures-util",
- "local-app-contracts",
+ "local-app-builder-contracts",
  "local-apps",
  "mcp-wire",
  "reqwest",
@@ -3344,11 +3344,11 @@ dependencies = [
 [[package]]
 name = "local-apps"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app?rev=d26b4f767066975f26ce82b0a086d999172c0090#d26b4f767066975f26ce82b0a086d999172c0090"
+source = "git+https://github.com/lingxi-coder/local-app-builder?rev=ce1d7947c50d1d006134ac020252bac5502961f6#ce1d7947c50d1d006134ac020252bac5502961f6"
 dependencies = [
  "async-trait",
  "git2",
- "local-app-contracts",
+ "local-app-builder-contracts",
  "mcp-wire",
  "rand 0.9.4",
  "rooted-fs",
@@ -3534,7 +3534,7 @@ dependencies = [
 [[package]]
 name = "mcp-wire"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app?rev=d26b4f767066975f26ce82b0a086d999172c0090#d26b4f767066975f26ce82b0a086d999172c0090"
+source = "git+https://github.com/lingxi-coder/local-app-builder?rev=ce1d7947c50d1d006134ac020252bac5502961f6#ce1d7947c50d1d006134ac020252bac5502961f6"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -4741,7 +4741,7 @@ dependencies = [
  "async-trait",
  "core",
  "http-client",
- "local-app-contracts",
+ "local-app-builder-contracts",
  "mobile-linux-android",
  "mobile-linux-api",
  "platform-common",
@@ -5590,7 +5590,7 @@ dependencies = [
 [[package]]
 name = "rooted-fs"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app?rev=d26b4f767066975f26ce82b0a086d999172c0090#d26b4f767066975f26ce82b0a086d999172c0090"
+source = "git+https://github.com/lingxi-coder/local-app-builder?rev=ce1d7947c50d1d006134ac020252bac5502961f6#ce1d7947c50d1d006134ac020252bac5502961f6"
 dependencies = [
  "fs2",
  "rustix 0.38.44",

@@ -5,7 +5,7 @@ use client::protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
 };
 use lingxi_core::host::{Clock, FileSystem, OrchestratorHandle, Platform};
-use local_app_service::broker::canonical_cwd_string;
+use local_app_builder_service::broker::canonical_cwd_string;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;

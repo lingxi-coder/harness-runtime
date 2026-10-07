@@ -19,8 +19,8 @@ use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
 use llm_runtime::auth::anthropic::{OAuthCredentialProvider, OAuthHandle, RefreshDriver};
 use llm_runtime::auth::openai as openai_oauth;
 use llm_runtime::{CredentialProvider, ModelRuntime, Transport};
-use local_app_service::broker::{LocalAppsAgentExecutor, LocalAppsHostBroker};
-use local_app_service::mcp_server::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY};
+use local_app_builder_service::broker::{LocalAppsAgentExecutor, LocalAppsHostBroker};
+use local_app_builder_service::mcp_server::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY};
 use mcp::registry::OAuthDeps;
 use mcp::{ConfigScope as McpConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
 use orchestrator::model::user_agent::UserAgentEnv;
@@ -309,7 +309,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // `ToolUseResult`, so the observation rides the same connection-scoped
     // listener the adapter sinks already use — no permission-gate decorator, no
     // second session read. See `crate::mobile::plan_approval`.
-    let plan_approval_log = Arc::new(local_app_service::plan_approval::PlanApprovalLog::default());
+    let plan_approval_log = Arc::new(local_app_builder_service::plan_approval::PlanApprovalLog::default());
     let observed_listener: Arc<dyn ClientEventListener> =
         Arc::new(crate::mobile::plan_approval::PlanApprovalWatcher::new(
             listener.clone(),
@@ -2992,7 +2992,7 @@ pub fn build_mobile_engine_inner(
         firer_cfg.local_apps_runtime_root.clone(),
         firer_cfg.physical_memory_bytes,
         inner.local_apps_llm.clone(),
-        local_app_service::device_capabilities::DeviceCapabilities {
+        local_app_builder_service::device_capabilities::DeviceCapabilities {
             camera: firer_platform.camera(),
             audio: firer_platform.audio_service(),
             location: firer_platform.location(),

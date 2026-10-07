@@ -85,7 +85,7 @@ pub mod builtin_bundle;
 #[cfg(feature = "mobile")]
 mod local_app_plugin_binding;
 #[cfg(feature = "mobile")]
-use local_app_service::template_catalog as local_app_template_catalog;
+use local_app_builder_service::template_catalog as local_app_template_catalog;
 // Live per-connection device handles (camera / audio / location /
 // notifications) behind a SharedLlm-style swap cell — see the module doc for
 // why a bare OnceLock would pin a torn-down engine's Swift objects.
@@ -96,7 +96,7 @@ use local_app_service::template_catalog as local_app_template_catalog;
 mod local_apps_llm;
 #[cfg(feature = "mobile")]
 mod local_apps_profile;
-// The edge between the Local App service's vocabulary (`local_app_contracts`)
+// The edge between the Local App service's vocabulary (`local_app_builder_contracts`)
 // and the client protocol DTOs. Every crossing goes through it.
 #[cfg(feature = "mobile")]
 mod local_apps_adapters;

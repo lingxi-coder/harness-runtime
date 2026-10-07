@@ -43,7 +43,7 @@ use tool_api::tool_trait::{
     ToolStaticContext,
 };
 
-use local_app_service::mcp_server::LocalAppsMcpTransport;
+use local_app_builder_service::mcp_server::LocalAppsMcpTransport;
 
 /// `(builtin name, provider operation, read-only)` for every host operation.
 ///
@@ -53,7 +53,7 @@ use local_app_service::mcp_server::LocalAppsMcpTransport;
 /// `read_only` drives [`Tool::is_read_only`]/[`Tool::is_concurrency_safe`]; the
 /// PROMPT default for each name lives in `permission::defaults_per_tool` — one
 /// table for every tool in the product, rather than a second policy here.
-pub use local_app_service::tool_names::LOCAL_APP_TOOLS;
+pub use local_app_builder_service::tool_names::LOCAL_APP_TOOLS;
 
 /// One host operation exposed as a builtin tool.
 ///

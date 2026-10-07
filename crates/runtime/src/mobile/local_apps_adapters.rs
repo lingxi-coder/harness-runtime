@@ -1,25 +1,25 @@
 //! The engine's side of the Local App service's host interfaces.
 //!
-//! `local_app_service::host` says what the service needs from whoever hosts it;
+//! `local_app_builder_service::host` says what the service needs from whoever hosts it;
 //! the types here provide it from the engine's own components. The service
 //! never names them. [`local_apps_wire`](super::local_apps_wire) is the other
 //! half of the edge: it maps the service's vocabulary onto the client protocol.
 
 use async_trait::async_trait;
 use lingxi_core::host::{CostSnapshot, OutputStream};
-use local_app_contracts::diagnostics::{
+use local_app_builder_contracts::diagnostics::{
     Diagnostic, DiagnosticSeverity, DiagnosticsSettleState, DiagnosticsSettleStatus,
     FileDiagnostics,
 };
-use local_app_contracts::execution::{
+use local_app_builder_contracts::execution::{
     CommandOutcome, Enforcement, IsolatedCommand, Mount, MountKind, NetworkPolicy, ResourceLimits,
 };
-use local_app_service::broker::AgentOutputStream;
-use local_app_service::host::{BuildExecutor, DiagnosticsProvider};
-use local_app_service::publication::{
+use local_app_builder_service::broker::AgentOutputStream;
+use local_app_builder_service::host::{BuildExecutor, DiagnosticsProvider};
+use local_app_builder_service::publication::{
     Exposure, ManagedApp, ManagedRuntime, McpPublisher, Published, WidgetResource,
 };
-use local_app_service::template_catalog::PluginBundle;
+use local_app_builder_service::template_catalog::PluginBundle;
 use lsp::diagnostic_registry::{DiagnosticFreshness, DiagnosticSettleState};
 use mobile_linux_api::MobileLinuxRuntime;
 use serde_json::Value;
@@ -848,7 +848,7 @@ mod tests {
 
     fn registry() -> Arc<mcp::McpRegistry> {
         Arc::new(mcp::McpRegistry::new(Arc::new(
-            local_app_service::mcp_server::LocalAppsMcpTransport::new(std::path::PathBuf::from(
+            local_app_builder_service::mcp_server::LocalAppsMcpTransport::new(std::path::PathBuf::from(
                 "/nonexistent-local-apps-root",
             )),
         )))

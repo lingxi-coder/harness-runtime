@@ -18,7 +18,7 @@ use lingxi_core::host::subagent_spawn::{SubagentObservation, SubagentSpawnObserv
 use lingxi_core::host::{
     OrchestratorHandle as _, SlashCommandDispatcher as _, SlashDispatchResult,
 };
-use local_app_service::mcp_server::LocalAppsMcpTransport;
+use local_app_builder_service::mcp_server::LocalAppsMcpTransport;
 use tokio::sync::Notify;
 use tool_skill::skill::SkillCommandType;
 
@@ -8805,7 +8805,7 @@ async fn mint_forks_from_the_recorded_origin_cwd_not_the_callers_cwd() {
         .expect("mint");
 
     let workspace_cwd =
-        local_app_service::broker::canonical_cwd_string(&data_root.join(&record.workspace_rel));
+        local_app_builder_service::broker::canonical_cwd_string(&data_root.join(&record.workspace_rel));
     let forked = std::fs::read_to_string(orchestrator::transcript_paths::main_transcript_path(
         &lingxi_home,
         &workspace_cwd,
@@ -8890,7 +8890,7 @@ async fn chat_origin_mint_forks_the_source_conversation() {
     // nearest existing ancestor, so on a symlink-split platform this is
     // `/private/var/...` where the raw join says `/var/...`.
     let workspace_cwd =
-        local_app_service::broker::canonical_cwd_string(&data_root.join(&record.workspace_rel));
+        local_app_builder_service::broker::canonical_cwd_string(&data_root.join(&record.workspace_rel));
     let fork_path = orchestrator::transcript_paths::main_transcript_path(
         &lingxi_home,
         &workspace_cwd,
@@ -9756,7 +9756,7 @@ fn delete_app_removes_the_apps_session_catalog() {
         // Derived independently of the production helper, and while the
         // workspace still exists, so this test cannot agree with the code
         // by simply calling the same function.
-        let workspace_cwd = local_app_service::broker::canonical_cwd_string(
+        let workspace_cwd = local_app_builder_service::broker::canonical_cwd_string(
             &tmp.path().join("apps").join(&app_id).join("workspace"),
         );
         let catalog_dir = tmp

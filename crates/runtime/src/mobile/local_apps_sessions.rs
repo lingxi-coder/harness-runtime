@@ -8,8 +8,8 @@
 //! that: it is told, through [`ConversationHost`], that a scaffold committed.
 
 use async_trait::async_trait;
-use local_app_service::broker::canonical_cwd_string;
-use local_app_service::host::ConversationHost;
+use local_app_builder_service::broker::canonical_cwd_string;
+use local_app_builder_service::host::ConversationHost;
 use serde_json::Value;
 use std::sync::Arc;
 

@@ -100,10 +100,10 @@ mobile = [
     "workflow",
     "dep:provider-config",
     "dep:local-apps",
-    "dep:local-app-contracts",
-    "dep:local-app-plugin",
+    "dep:local-app-builder-contracts",
+    "dep:local-app-builder-plugin",
     "dep:mcp-wire",
-    "dep:local-app-service",
+    "dep:local-app-builder-service",
     "dep:rooted-fs",
     "dep:jsonrpc",
     "dep:tool-mcp",
@@ -195,9 +195,9 @@ futures-core = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 hooks = { path = "../hooks", optional = true }
 jsonrpc = { path = "../jsonrpc", optional = true }
-local-app-contracts = { workspace = true, optional = true }
-local-app-plugin = { workspace = true, optional = true }
-local-app-service = { workspace = true, optional = true }
+local-app-builder-contracts = { workspace = true, optional = true }
+local-app-builder-plugin = { workspace = true, optional = true }
+local-app-builder-service = { workspace = true, optional = true }
 local-apps = { workspace = true, optional = true }
 lsp = { path = "../lsp", optional = true }
 lsp-types = { version = "0.95", optional = true }
@@ -259,7 +259,7 @@ uuid = { version = "1.10", optional = true }
 workflow = { path = "../workflow", optional = true }
 
 [build-dependencies]
-local-app-plugin = { workspace = true, optional = true }
+local-app-builder-plugin = { workspace = true, optional = true }
 local-apps = { workspace = true, optional = true }
 serde_json = { workspace = true }
 

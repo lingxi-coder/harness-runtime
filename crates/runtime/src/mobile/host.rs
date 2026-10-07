@@ -211,11 +211,11 @@ use crate::mobile::{
     skill_loader::command_visible_in_session_mode,
     turn_durability::{DurableTurnStore, DurableTurnStoreError, ResumeDisposition},
 };
-use local_app_service::broker::{
+use local_app_builder_service::broker::{
     canonical_cwd_string, AgentOutputStream, AgentTurnUsageState, LocalAppsAgentExecutor,
     LocalAppsHostBroker,
 };
-use local_app_service::mcp_server::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY};
+use local_app_builder_service::mcp_server::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY};
 
 /// Everything a mobile host needs to drive a conversation, built deterministically
 /// by [`build_mobile`] from a [`MobileConfig`] + an `Arc<dyn Platform>`.
@@ -457,7 +457,7 @@ struct MobileAppAgentExecutor {
             (
                 Arc<ConversationOrchestrator>,
                 Arc<AgentOutputRouter>,
-                Arc<local_app_service::mcp_server::AgentCallBudget>,
+                Arc<local_app_builder_service::mcp_server::AgentCallBudget>,
             ),
         >,
     >,
@@ -501,7 +501,7 @@ impl MobileAppAgentExecutor {
     ) -> Result<
         (
             Arc<ToolRegistry>,
-            Arc<local_app_service::mcp_server::AgentCallBudget>,
+            Arc<local_app_builder_service::mcp_server::AgentCallBudget>,
         ),
         String,
     > {
@@ -555,7 +555,7 @@ impl MobileAppAgentExecutor {
         (
             Arc<ConversationOrchestrator>,
             Arc<AgentOutputRouter>,
-            Arc<local_app_service::mcp_server::AgentCallBudget>,
+            Arc<local_app_builder_service::mcp_server::AgentCallBudget>,
         ),
         String,
     > {
@@ -4268,7 +4268,7 @@ impl MobileEngineHandle {
                         // `LocalAppCreate` gate in `mcp_server.rs` raises
                         // the SAME constant, so the two create entry points
                         // cannot drift into two explanations of one condition.
-                        local_app_service::mcp_server::LOCAL_APP_PLUGIN_UNAVAILABLE.into(),
+                        local_app_builder_service::mcp_server::LOCAL_APP_PLUGIN_UNAVAILABLE.into(),
                     ),
                     request_id,
                 )

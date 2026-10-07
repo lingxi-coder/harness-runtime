@@ -64,9 +64,9 @@ impl AndroidProotRuntime {
 
 fn product_build_profile() -> mobile_linux_android::IsolatedBuildProfile {
     mobile_linux_android::IsolatedBuildProfile {
-        guest_root: local_app_contracts::guest_paths::LOCAL_APP_BUILD_ROOT.into(),
-        project_directory: local_app_contracts::guest_paths::LOCAL_APP_BUILD_PROJECT_DIR.into(),
-        dependency_store: local_app_contracts::guest_paths::LOCAL_APP_DEPENDENCY_STORE.into(),
+        guest_root: local_app_builder_contracts::guest_paths::LOCAL_APP_BUILD_ROOT.into(),
+        project_directory: local_app_builder_contracts::guest_paths::LOCAL_APP_BUILD_PROJECT_DIR.into(),
+        dependency_store: local_app_builder_contracts::guest_paths::LOCAL_APP_DEPENDENCY_STORE.into(),
         state_directory: ".lingxi-build-state".into(),
         host_apps_directory: "apps".into(),
         host_build_directory: "build".into(),
@@ -261,7 +261,7 @@ mod tests {
     /// SAME literals — drift on either side fails one of the twins.
     #[test]
     fn atlas_atoms_are_pinned() {
-        use local_app_contracts::guest_paths as product;
+        use local_app_builder_contracts::guest_paths as product;
         use mobile_linux_api::guest_paths as sdk;
         assert_eq!(sdk::HOME, "/root");
         assert_eq!(sdk::SCRATCH, &["/tmp", "/var/tmp"]);

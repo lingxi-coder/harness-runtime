@@ -332,7 +332,7 @@ fn derive_workflow_state(app_data_root: &Path, record: &AppRecord) -> AppWorkflo
         Ok(manifest) => manifest,
         Err(_) => return AppWorkflowStateDto::Draft,
     };
-    let active_build_id = match local_app_service::app_build::active_build_id(&layout) {
+    let active_build_id = match local_app_builder_service::app_build::active_build_id(&layout) {
         Ok(value) => value,
         Err(_) => return AppWorkflowStateDto::Draft,
     };
@@ -452,28 +452,28 @@ fn lower_surface(surface: AppSurface) -> AppSurfaceDto {
 }
 
 fn lower_runtime_profile_status(
-    status: local_app_service::app_build::AppRuntimeProfileStatus,
+    status: local_app_builder_service::app_build::AppRuntimeProfileStatus,
 ) -> AppRuntimeProfileStatusDto {
     match status {
-        local_app_service::app_build::AppRuntimeProfileStatus::Verified => {
+        local_app_builder_service::app_build::AppRuntimeProfileStatus::Verified => {
             AppRuntimeProfileStatusDto::Verified
         }
-        local_app_service::app_build::AppRuntimeProfileStatus::DependenciesDirty => {
+        local_app_builder_service::app_build::AppRuntimeProfileStatus::DependenciesDirty => {
             AppRuntimeProfileStatusDto::DependenciesDirty
         }
-        local_app_service::app_build::AppRuntimeProfileStatus::CoreDependencyDrift => {
+        local_app_builder_service::app_build::AppRuntimeProfileStatus::CoreDependencyDrift => {
             AppRuntimeProfileStatusDto::CoreDependencyDrift
         }
-        local_app_service::app_build::AppRuntimeProfileStatus::RebuildRequired => {
+        local_app_builder_service::app_build::AppRuntimeProfileStatus::RebuildRequired => {
             AppRuntimeProfileStatusDto::RebuildRequired
         }
-        local_app_service::app_build::AppRuntimeProfileStatus::MigrationAvailable => {
+        local_app_builder_service::app_build::AppRuntimeProfileStatus::MigrationAvailable => {
             AppRuntimeProfileStatusDto::MigrationAvailable
         }
-        local_app_service::app_build::AppRuntimeProfileStatus::RuntimeBundleMissing => {
+        local_app_builder_service::app_build::AppRuntimeProfileStatus::RuntimeBundleMissing => {
             AppRuntimeProfileStatusDto::RuntimeBundleMissing
         }
-        local_app_service::app_build::AppRuntimeProfileStatus::RuntimeContractCorrupt => {
+        local_app_builder_service::app_build::AppRuntimeProfileStatus::RuntimeContractCorrupt => {
             AppRuntimeProfileStatusDto::RuntimeContractCorrupt
         }
     }
@@ -570,7 +570,7 @@ pub(crate) fn lower_details(
     Ok(AppDetailsDto {
         app: lower_record(root, record),
         manifest: load_manifest_snapshot(root, &record.id)?,
-        runtime_profile_status: local_app_service::app_build::derive_runtime_profile_status(
+        runtime_profile_status: local_app_builder_service::app_build::derive_runtime_profile_status(
             root, record,
         )
         .map(lower_runtime_profile_status),

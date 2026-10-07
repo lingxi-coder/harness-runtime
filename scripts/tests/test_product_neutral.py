@@ -49,7 +49,7 @@ class ProductNeutral(unittest.TestCase):
     def test_manifests_and_json_are_scanned_too(self):
         for name in ("Cargo.toml", "snapshot.json", "NOTES.md"):
             with self.subTest(name=name):
-                result = self.run_gate({"crates/tasks/" + name: "local-app-contracts = 1\n", "crates/tasks/src/a.rs": ""})
+                result = self.run_gate({"crates/tasks/" + name: "local-app-builder-contracts = 1\n", "crates/tasks/src/a.rs": ""})
                 self.assertEqual(result.returncode, 1)
 
     def test_a_crate_that_may_name_the_product_is_not_scanned(self):

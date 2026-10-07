@@ -3,13 +3,13 @@
 //! what its boot sweep repairs afterwards.
 //!
 //! The service's half of the seam (it reports the committed record once and
-//! survives a host that cannot rename) is tested in `local-app-service`; these
+//! survives a host that cannot rename) is tested in `local-app-builder-service`; these
 //! tests run the real transcript writer and the real sweep against real files.
 
 use super::*;
 use async_trait::async_trait;
-use local_app_service::broker::LocalAppsHostBroker;
-use local_app_service::host::{HostEvent, HostEventSink};
+use local_app_builder_service::broker::LocalAppsHostBroker;
+use local_app_builder_service::host::{HostEvent, HostEventSink};
 use local_apps::test_support::FixedClock;
 use local_apps::{AppLayout, AppService, NoopAppEventObserver};
 use serde_json::json;
@@ -31,7 +31,7 @@ impl HostEventSink for DiscardSink {
 /// writing them here stands in for the build the service's own tests run.
 fn seed_commit_readiness(root: &std::path::Path, record: &local_apps::AppRecord) {
     let layout = AppLayout::new(root.to_path_buf(), record.id.clone()).expect("layout");
-    let binding = local_app_service::runtime_profiles::current_binding_for_family(
+    let binding = local_app_builder_service::runtime_profiles::current_binding_for_family(
         local_apps::AppRuntimeProfile::ReactDom,
     )
     .expect("published react-dom runtime profile");
@@ -41,7 +41,7 @@ fn seed_commit_readiness(root: &std::path::Path, record: &local_apps::AppRecord)
         lockfile_sha256: "2".repeat(64),
         dependency_tree_sha256: "3".repeat(64),
         sbom_sha256: "4".repeat(64),
-        toolchain_key: local_app_service::runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
+        toolchain_key: local_app_builder_service::runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
             .to_string(),
         verified_profile_contract_sha256: binding.contract_sha256.clone(),
     };

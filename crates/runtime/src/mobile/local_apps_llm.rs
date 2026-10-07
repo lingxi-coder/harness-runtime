@@ -21,7 +21,7 @@ use sidequery::{
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 
-pub use local_app_service::llm::{
+pub use local_app_builder_service::llm::{
     ChatMessage, ChatOutcome, ChatPart, ChatRequest, ChatRole, ChatStreamEvent, LocalAppsLlm,
     LocalAppsModel, ModelStream,
 };

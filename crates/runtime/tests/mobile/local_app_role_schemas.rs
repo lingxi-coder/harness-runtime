@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 
 fn role_schema(role: &str) -> Value {
-    let document: Value = serde_json::from_str(local_app_plugin::schemas::WORKFLOW_AGENT_RESULTS)
+    let document: Value = serde_json::from_str(local_app_builder_plugin::schemas::WORKFLOW_AGENT_RESULTS)
         .expect("valid checked-in role schemas");
     let mut schema = document["$defs"][role].clone();
     schema["$defs"] = document["$defs"].clone();
@@ -71,7 +71,7 @@ fn local_app_union_schemas_preserve_success_and_failure_constraints() {
 #[test]
 fn local_app_operator_schema_requires_complete_host_qa_projection() {
     let document: serde_json::Value =
-        serde_json::from_str(local_app_plugin::schemas::WORKFLOW_AGENT_RESULTS)
+        serde_json::from_str(local_app_builder_plugin::schemas::WORKFLOW_AGENT_RESULTS)
             .expect("parse checked-in Local App workflow role schemas");
     let mut schema = document["$defs"]["operator_result"].clone();
     schema["$defs"] = document["$defs"].clone();

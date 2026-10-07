@@ -444,7 +444,7 @@ mod tests {
         ];
         let mut accepted = 0;
         for id in corpus {
-            let expected = local_app_contracts::ids::is_valid_app_id(id);
+            let expected = local_app_builder_contracts::ids::is_valid_app_id(id);
             for made in [
                 tasks::scope::ManagedWorkflowScope::for_build(id),
                 tasks::scope::ManagedWorkflowScope::for_use_test(id),

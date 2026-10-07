@@ -25,11 +25,11 @@ API_CRATES = {"tool-api", "skill-api", "command-api"}
 # is listed here, which keeps the engine's use of the project to the shared primitives it re-exports and to the one
 # composition root that assembles it. The project's own graph (primitives at the bottom, no engine) is checked in its
 # repository.
-LOCAL_APP_PRIMITIVES = {"device-api", "local-app-contracts", "mcp-wire", "rooted-fs"}
-LOCAL_APP_CRATES = LOCAL_APP_PRIMITIVES | {"local-app-plugin", "local-app-service", "local-apps"}
+LOCAL_APP_PRIMITIVES = {"device-api", "local-app-builder-contracts", "mcp-wire", "rooted-fs"}
+LOCAL_APP_CRATES = LOCAL_APP_PRIMITIVES | {"local-app-builder-plugin", "local-app-builder-service", "local-apps"}
 LOCAL_APP_CONSUMERS = {
-    "core": LOCAL_APP_PRIMITIVES - {"local-app-contracts"},  # re-exports the shared device/MCP/fs primitives only
-    "platform-android": {"local-app-contracts"},  # the Android build profile's guest paths
+    "core": LOCAL_APP_PRIMITIVES - {"local-app-builder-contracts"},  # re-exports the shared device/MCP/fs primitives only
+    "platform-android": {"local-app-builder-contracts"},  # the Android build profile's guest paths
     "mcp": {"mcp-wire"},
     "harness-runtime": LOCAL_APP_CRATES,  # the composition root: adapters, build script, bundle
 }

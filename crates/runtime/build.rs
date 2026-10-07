@@ -33,8 +33,8 @@ mod mobile {
 
     pub fn build() {
         // Where the plugin tree is comes from the crate that ships it, not from a path out of this one.
-        let inventory_path = local_app_plugin::inventory_path().to_path_buf();
-        let plugin_root = local_app_plugin::root().to_path_buf();
+        let inventory_path = local_app_builder_plugin::inventory_path().to_path_buf();
+        let plugin_root = local_app_builder_plugin::root().to_path_buf();
 
         // Watching the directory as well as the explicit descriptor is load-bearing:
         // a newly-added, undeclared file must rerun this build script so pack() can

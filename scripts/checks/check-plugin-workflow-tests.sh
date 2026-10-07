@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The engine-side half of the plugin's contract: the engine's workflow runtime validators and orchestration
-# run the Local App plugin's checked-in workflow scripts (read through `local-app-plugin`). The tests live in the
+# run the Local App plugin's checked-in workflow scripts (read through `local-app-builder-plugin`). The tests live in the
 # runtime (the composition root), the only place that may name both. The plugin's own
 # content is checked in its repository (scripts/checks/check-phase2-plugin.sh there).
 set -euo pipefail

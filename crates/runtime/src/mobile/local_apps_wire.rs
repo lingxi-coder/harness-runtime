@@ -1,7 +1,7 @@
 //! The edge between the Local App service's vocabulary and the client
 //! protocol.
 //!
-//! The service speaks the types in `local_app_contracts`; the native client
+//! The service speaks the types in `local_app_builder_contracts`; the native client
 //! speaks the `UniFFI` DTOs in `client::protocol::local_apps`, whose enum
 //! ordinals are locked and append-only. Neither may import the other, so every
 //! crossing goes through a function here. A mapping that drifts would show up
@@ -23,19 +23,19 @@ use client::protocol::local_apps::{
     LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto, ManagedLocalAppMcpStatusDto,
     McpAppWidgetDto,
 };
-use local_app_contracts::approvals::{
+use local_app_builder_contracts::approvals::{
     AgentProfileProposal, AuthorizationDecision, CapabilityKind, CapabilityRequest,
     DependencyChangeConfirmationRequest, DependencyChangeKind, DependencyChangeReview, GateStatus,
     McpProposalApprovalRequest, McpToolChangeKind, McpToolDiff, McpToolField, McpToolSurface,
     UiActionKind, UiRequest, UiTarget, VerificationStatus, VerificationSummary,
 };
-use local_app_contracts::bridge::{
+use local_app_builder_contracts::bridge::{
     BridgeOperation, BridgeRequest, BridgeResponse, BridgeStreamFrame,
 };
-use local_app_contracts::events::{
+use local_app_builder_contracts::events::{
     ManagedMcpServer, ManagedMcpStatus, McpAppWidget, PluginErrorCode, PublicationState,
 };
-use local_app_service::host::{HostEvent, HostEventSink};
+use local_app_builder_service::host::{HostEvent, HostEventSink};
 use std::sync::Arc;
 
 /// The operation the service knows by this DTO's name, or `None` for one this
@@ -741,7 +741,7 @@ pub(crate) fn plugin_error_code_from_dto(
 
 /// The record the native scheduler adapters receive for one background task.
 pub(crate) fn background_run_to_dto(
-    outcome: local_app_contracts::events::BackgroundRunOutcome,
+    outcome: local_app_builder_contracts::events::BackgroundRunOutcome,
 ) -> crate::mobile::host::LocalAppBackgroundRunDto {
     crate::mobile::host::LocalAppBackgroundRunDto {
         app_id: outcome.app_id,
@@ -887,8 +887,8 @@ pub(crate) fn broker_with_client_sink(
     mobile_linux: Option<Arc<dyn mobile_linux_api::MobileLinuxRuntime>>,
     full_runtime: bool,
     runtime_root: Option<std::path::PathBuf>,
-) -> Arc<local_app_service::broker::LocalAppsHostBroker> {
-    let broker = local_app_service::broker::LocalAppsHostBroker::new_with_physical_memory(
+) -> Arc<local_app_builder_service::broker::LocalAppsHostBroker> {
+    let broker = local_app_builder_service::broker::LocalAppsHostBroker::new_with_physical_memory(
         root,
         ClientSinkAdapter::sink(sink),
         mobile_linux.map(crate::mobile::local_apps_adapters::MobileLinuxExecutor::executor),

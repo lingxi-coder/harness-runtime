@@ -1,6 +1,6 @@
 //! The engine's side of the plan-approval record: a transparent listener that
 //! feeds every approved `ExitPlanMode` to the service's
-//! [`PlanApprovalLog`](local_app_service::plan_approval::PlanApprovalLog).
+//! [`PlanApprovalLog`](local_app_builder_service::plan_approval::PlanApprovalLog).
 //!
 //! The engine has exactly one writer of "this plan is approved": the success
 //! branch of `ExitPlanMode` (`tools/plan/src/plan_mode.rs`), which only runs
@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use client::adapter::ClientEventListener;
 use client::protocol::events::ClientEvent;
-use local_app_service::plan_approval::PlanApprovalLog;
+use local_app_builder_service::plan_approval::PlanApprovalLog;
 
 /// Transparent listener that records every approved `ExitPlanMode`.
 pub(crate) struct PlanApprovalWatcher {
@@ -90,7 +90,7 @@ impl ClientEventListener for PlanApprovalWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use local_app_service::plan_approval::test_support::{exit_result, good_plan};
+    use local_app_builder_service::plan_approval::test_support::{exit_result, good_plan};
 
     #[tokio::test]
     async fn the_watcher_forwards_every_event_and_records_the_approval() {

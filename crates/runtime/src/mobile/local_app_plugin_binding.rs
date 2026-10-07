@@ -23,7 +23,7 @@
 //! compares the strings itself (Phase -1's original point) and in the sense
 //! that no name lives outside this file (§18 Phase -1 step 4 / §19.3's gate).
 
-use local_app_service::app_build::LocalAppBuildTarget;
+use local_app_builder_service::app_build::LocalAppBuildTarget;
 
 /// Canonical Plugin-qualified workflow identities.  Keeping these reserved
 /// names in the composition binding lets the workflow launcher avoid a second
@@ -308,7 +308,7 @@ mod tests {
     }
     /// The service tests that its prose names none of the workflows the host
     /// reserves, against a list of its own
-    /// (`local_app_plugin::WORKFLOW_IDS`, the plugin crate's list of its workflow
+    /// (`local_app_builder_plugin::WORKFLOW_IDS`, the plugin crate's list of its workflow
     /// ids). That list mirrors this module's registry, so a workflow added here
     /// and not there would be a name the service's prose could start using
     /// without any test noticing.
@@ -319,7 +319,7 @@ mod tests {
             PLUGIN_USE_TEST_WORKFLOW_ID,
             PLUGIN_MCP_AUTHORING_WORKFLOW_ID,
         ];
-        let mut listed = local_app_plugin::WORKFLOW_IDS.to_vec();
+        let mut listed = local_app_builder_plugin::WORKFLOW_IDS.to_vec();
         registry.sort_unstable();
         listed.sort_unstable();
         assert_eq!(

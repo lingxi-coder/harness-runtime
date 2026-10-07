@@ -468,7 +468,7 @@ mod tests {
     const LOCAL_APP_PLUGIN: &str = "lingxi-local-app";
 
     fn local_app_plugin_root() -> std::path::PathBuf {
-        local_app_plugin::root().to_path_buf()
+        local_app_builder_plugin::root().to_path_buf()
     }
 
     async fn loaded_local_app_skill_registry() -> MobileDiskSkillLoader {

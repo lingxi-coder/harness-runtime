@@ -54,11 +54,11 @@ where
 
 /// 签入的 plugin workflow 脚本目录。
 fn workflow_dir() -> PathBuf {
-    local_app_plugin::root().join("workflows")
+    local_app_builder_plugin::root().join("workflows")
 }
 
 fn authoring_spec() -> serde_json::Value {
-    serde_json::from_str(local_app_plugin::fixtures::AUTHORING_SPEC_VALID_NULL_CANVAS)
+    serde_json::from_str(local_app_builder_plugin::fixtures::AUTHORING_SPEC_VALID_NULL_CANVAS)
         .expect("parse the Host-valid checked-in AuthoringSpec fixture")
 }
 
@@ -215,7 +215,7 @@ fn qa_candidate_report(
         }])
     };
     let mut result: serde_json::Value =
-        serde_json::from_str(local_app_plugin::fixtures::QA_RESULT_VALID)
+        serde_json::from_str(local_app_builder_plugin::fixtures::QA_RESULT_VALID)
             .expect("parse the Host-valid checked-in QA result fixture");
     result["identity"]["app_id"] = serde_json::Value::String("aaaa1111".into());
     result["identity"]["workflow_run_id"] = serde_json::Value::String(workflow_run_id.into());
@@ -316,7 +316,7 @@ fn verification_scope_schema_rejects_empty_required_target_lists() {
     let workflow_root = workflow_dir();
     let plugin_root = workflow_root.parent().expect("plugin root");
     let invalid_fixture: serde_json::Value =
-        serde_json::from_str(local_app_plugin::fixtures::QA_RESULT_INVALID_EMPTY_SCOPE)
+        serde_json::from_str(local_app_builder_plugin::fixtures::QA_RESULT_INVALID_EMPTY_SCOPE)
             .expect("parse the negative empty verification scope fixture");
     let fixture_scope = invalid_fixture["verification_scope"]
         .as_object()
@@ -1171,7 +1171,7 @@ fn mcp_promotion_uses_a_dedicated_tools_only_agent() {
         "verifier must not own MCP promotion"
     );
     let inventory =
-        std::fs::read_to_string(local_app_plugin::inventory_path()).expect("plugin inventory");
+        std::fs::read_to_string(local_app_builder_plugin::inventory_path()).expect("plugin inventory");
     assert!(
         inventory
             .lines()
