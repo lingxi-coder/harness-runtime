@@ -47,6 +47,7 @@ tokio = { workspace = true, features = ["time"] }
 # graph transitively (via objc2/xcap's macOS bindings), pinned here directly
 # since this crate calls its types by name.
 core-foundation = "0.10"
+core-graphics = "0.24"
 
 [lints]
 workspace = true

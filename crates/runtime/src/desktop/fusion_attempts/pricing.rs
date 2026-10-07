@@ -226,6 +226,7 @@ pub(super) fn quote_body(
         P::OpenAiChat
         | P::OpenAiResponses
         | P::GeminiGenerateContent
+        | P::GeminiInteractions
         | P::VertexGemini
         | P::AzureOpenAi => cost::AttemptUsageContract::StandardDisjointTokensV1,
         P::AnthropicMessages | P::VertexClaude | P::BedrockClaude | P::FoundryClaude => {

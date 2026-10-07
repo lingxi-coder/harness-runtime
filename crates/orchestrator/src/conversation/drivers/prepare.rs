@@ -134,95 +134,229 @@ pub(crate) struct TurnReminders {
 
 impl ConversationOrchestrator {
     /// Collect reminder producers in their model-facing order exactly once.
-    pub(crate) async fn collect_turn_reminders(&self, in_human_turn: bool) -> TurnReminders {
-        let mut transient = Vec::new();
+    pub(crate) fn collect_turn_reminders<'a>(
+        &'a self,
+        in_human_turn: bool,
+        is_regular_user_prompt: bool,
+        user_cancel: Option<&'a CancellationToken>,
+    ) -> futures::future::BoxFuture<'a, TurnReminders> {
+        // Reminder fan-out has a large state machine; allocate it here so
+        // preparing a turn does not embed or copy that state through its callers.
+        Box::pin(async move {
+            let mut transient = Vec::new();
+            let mut model_reminders = Vec::new();
+            let mut guarded_async_hook_reminders = Vec::new();
 
-        if let Some(reminder) = self.brief_mode_reminder_message() {
-            transient.push(reminder);
-        }
-        if let Some(reminder) = self.output_style_reminder_message().await {
-            transient.push(reminder);
-        }
-
-        transient.extend(self.plan_mode_turn_messages().await);
-        if let Some(reminder) = self.plan_mode_exit_message().await {
-            transient.push(reminder);
-        }
-        if let Some(reminder) = self.skill_listing_reminder_message().await {
-            transient.push(reminder);
-        }
-        if let Some(reminder) = self.conditional_rules_reminder_message().await {
-            transient.push(reminder);
-        }
-        // Nested memory runs directly AFTER conditional rules, and the order is
-        // load-bearing, not cosmetic: both consult the same
-        // `sent_conditional_rules` set, and a `paths:`-gated rule already
-        // claimed by the conditional-rules producer is skipped here. Swapping
-        // the two changes WHICH mechanism reports such a rule, and therefore
-        // the bytes the model sees.
-        if let Some(reminder) = self.nested_memory_reminder_message().await {
-            transient.push(reminder);
-        }
-        if let Some(reminder) = self.new_diagnostics_reminder_message().await {
-            transient.push(reminder);
-        }
-        if let Some(reminder) = self.agent_listing_reminder_message().await {
-            transient.push(reminder);
-        }
-        // DIVERGENCE (position, deliberate): the oracle's attachment fan-out
-        // (@296520120) emits `changed_files` immediately after
-        // `agent_listing_delta` and immediately BEFORE `nested_memory`. This
-        // port injects `nested_memory` above — it has to, to read the
-        // `sent_conditional_rules` claims noted there — so `changed_files`
-        // sits directly after `agent_listing_delta` instead, which preserves
-        // its order relative to everything downstream. `crate::prompt::changed_files`
-        // carries the same note from the renderer's side.
-        transient.extend(self.changed_files_reminder_messages().await);
-
-        // `todo_reminder_message` already returns a system-reminder envelope.
-        let todo_reminder = self.todo_reminder_message().await;
-        let todo_reminder_fired = todo_reminder.is_some();
-        if let Some(reminder) = todo_reminder {
-            transient.push(reminder);
-        }
-        if let Some(reminder) = self
-            .tool_search_usage_reminder_message(todo_reminder_fired)
-            .await
-        {
-            transient.push(reminder);
-        }
-        if let Some(reminder) = self.async_hook_response_reminder_message().await {
-            transient.push(reminder);
-        }
-
-        let task_notifications = self
-            .task_notification_reminder_messages_in_turn(in_human_turn)
-            .await;
-        for notification in &task_notifications {
-            {
-                let mut session = self.session.lock().await;
-                session.history.push(notification.clone());
+            if let Some(reminder) = self.brief_mode_reminder_message() {
+                transient.push(reminder);
             }
-            self.persist_message_to_jsonl(notification).await;
-        }
+            if let Some(reminder) = self.agent_listing_reminder_message().await {
+                self.push_engine_attachment(&mut transient, "agent_listing_delta", reminder)
+                    .await;
+            }
+            for reminder in self.changed_files_reminder_messages(user_cancel).await {
+                self.push_engine_attachment(&mut transient, "edited_text_file", reminder)
+                    .await;
+            }
+            for reminder in self.nested_memory_reminder_messages().await {
+                if let Some(reminder) = self
+                    .mod_prompt_attachment(
+                        "nested_memory",
+                        reminder,
+                        serde_json::json!({"kind":"engine"}),
+                    )
+                    .await
+                {
+                    model_reminders.push((transient.len(), reminder));
+                }
+            }
+            if let Some(reminder) = self.skill_discovery_reminder_message().await {
+                self.push_engine_attachment(&mut transient, "skill_discovery", reminder)
+                    .await;
+            }
+            if let Some(reminder) = self.skill_listing_reminder_message().await {
+                self.push_engine_attachment(&mut transient, "skill_listing", reminder)
+                    .await;
+            }
+            let mcp_instructions_position = transient.len();
+            // DIVERGENCE (position, deliberate): the oracle's attachment fan-out
+            // (@296520120) emits `changed_files` immediately after
+            // `agent_listing_delta` and immediately BEFORE `nested_memory`. This
+            // port injects `nested_memory` above — it has to, to read the
+            // ReadState claims made above — so `changed_files`
+            // sits directly after `agent_listing_delta` instead, which preserves
+            // its order relative to everything downstream. `crate::prompt::changed_files`
+            // carries the same note from the renderer's side.
+            transient.extend(self.changed_files_reminder_messages(user_cancel).await);
 
-        // Task completion can enqueue memory updates, so this must follow the
-        // notification drain and persistence above.
-        transient.extend(self.memory_update_reminder_messages().await);
-        transient.extend(self.relevant_memory_reminder_messages().await);
-        if let Some(reminder) = self.skill_discovery_reminder_message().await {
-            transient.push(reminder);
-        }
-        if let Some(reminder) = self.silent_turn_reminder_message().await {
-            transient.push(reminder);
-        }
-        if let Some(reminder) = self.total_tokens_reminder_message().await {
-            transient.push(reminder);
-        }
+            let plan_reminders = self.plan_mode_turn_messages().await;
+            let has_reentry = plan_reminders.len() > 1;
+            let plan_detail = if plan_reminders.is_empty() {
+                None
+            } else {
+                let session_id = self.session.lock().await.session_id;
+                let plan_file_path = self.session_plan_file_path(&session_id);
+                let has_plan = std::path::Path::new(&plan_file_path).exists();
+                let emitted = self
+                    .prompt_runtime
+                    .plan_reminder_cadence
+                    .lock()
+                    .await
+                    .attachments_emitted;
+                let reminder = if emitted % PLAN_FULL_REMINDER_EVERY_N_ATTACHMENTS == 1 {
+                    "full"
+                } else {
+                    "sparse"
+                };
+                Some((plan_file_path, has_plan, reminder))
+            };
+            for (index, reminder) in plan_reminders.into_iter().enumerate() {
+                let kind = if has_reentry && index == 0 {
+                    "plan_mode_reentry"
+                } else {
+                    "plan_mode"
+                };
+                let detail = plan_detail.as_ref().map(|(path, exists, cadence)| {
+                    if kind == "plan_mode_reentry" {
+                        serde_json::json!({"planFilePath":path})
+                    } else {
+                        serde_json::json!({
+                            "reminder":cadence,
+                            "planFilePath":path,
+                            "hasPlan":exists
+                        })
+                    }
+                });
+                if let Some(reminder) = self
+                    .mod_prompt_attachment_with_detail(
+                        kind,
+                        reminder,
+                        serde_json::json!({"kind":"engine"}),
+                        detail,
+                    )
+                    .await
+                {
+                    transient.push(reminder);
+                }
+            }
+            if let Some(reminder) = self.plan_mode_exit_message().await {
+                let session_id = self.session.lock().await.session_id;
+                let plan_file_path = self.session_plan_file_path(&session_id);
+                let has_plan = std::path::Path::new(&plan_file_path).exists();
+                if let Some(reminder) = self
+                    .mod_prompt_attachment_with_detail(
+                        "plan_mode_exit",
+                        reminder,
+                        serde_json::json!({"kind":"engine"}),
+                        Some(serde_json::json!({"planFilePath":plan_file_path,"hasPlan":has_plan})),
+                    )
+                    .await
+                {
+                    transient.push(reminder);
+                }
+            }
+            // `todo_reminder_message` already returns a system-reminder envelope.
+            let todo_reminder = self.todo_reminder_message().await;
+            let todo_reminder_fired = todo_reminder.is_some();
+            if let Some(reminder) = todo_reminder {
+                self.push_engine_attachment(&mut transient, "todo_reminder", reminder)
+                    .await;
+            }
+            if let Some(reminder) = self
+                .tool_search_usage_reminder_message(todo_reminder_fired)
+                .await
+            {
+                self.push_engine_attachment(&mut transient, "tool_search_usage_reminder", reminder)
+                    .await;
+            }
+            if let Some(reminder) = self.silent_turn_reminder_message().await {
+                self.push_engine_attachment(&mut transient, "silent_turn_reminder", reminder)
+                    .await;
+            }
+            let task_notifications = self
+                .task_notification_reminder_messages_in_turn(in_human_turn)
+                .await;
+            for notification in &task_notifications {
+                {
+                    let mut session = self.session.lock().await;
+                    session.history.push(notification.clone());
+                }
+                self.persist_message_to_jsonl(notification).await;
+            }
 
-        TurnReminders {
-            transient,
-            task_notifications,
-        }
+            for reminder in self.async_hook_response_mod_messages().await {
+                if let Some(guard) = reminder.publication_guard {
+                    guarded_async_hook_reminders.push((reminder.message.id(), guard));
+                }
+                transient.push(reminder.message);
+            }
+            // PostToolBatch additionalContext is already present in durable
+            // session history. Carry only its private generation authority through
+            // the same final request-admission filter as async hook reminders.
+            guarded_async_hook_reminders.extend(
+                self.prompt_runtime
+                    .take_guarded_prompt_message_guards()
+                    .await,
+            );
+
+            // Task completion can enqueue memory updates, so this must follow the
+            // notification drain and persistence above.
+            for reminder in self.memory_update_reminder_messages().await {
+                self.push_engine_attachment(&mut transient, "memory_update", reminder)
+                    .await;
+            }
+            for reminder in self.relevant_memory_reminder_messages().await {
+                self.push_engine_attachment(&mut transient, "relevant_memories", reminder)
+                    .await;
+            }
+            if let Some(reminder) = self.output_style_reminder_message().await {
+                self.push_engine_attachment(&mut transient, "output_style", reminder)
+                    .await;
+            }
+            if let Some(reminder) = self.new_diagnostics_reminder_message().await {
+                self.push_engine_attachment(&mut transient, "diagnostics", reminder)
+                    .await;
+            }
+            let total_tokens = self
+                .total_tokens_reminder_message(is_regular_user_prompt)
+                .await;
+            if let Some(reminder) = self.mcp_instructions_reminder_message().await {
+                model_reminders.push((mcp_instructions_position, reminder));
+            }
+            if let Some(reminder) = total_tokens {
+                let content = reminder.text_content();
+                let text = content
+                    .strip_prefix("<system-reminder>\n")
+                    .and_then(|text| text.strip_suffix("\n</system-reminder>"))
+                    .unwrap_or(&content);
+                let attachment = serde_json::json!({"type":"total_tokens_reminder", "text":text});
+                model_reminders.push((
+                    transient.len(),
+                    self.persist_model_reminder(reminder, attachment).await,
+                ));
+            }
+
+            TurnReminders {
+                transient,
+                task_notifications,
+                model_reminders,
+                guarded_async_hook_reminders,
+            }
+        })
+    }
+    fn push_engine_attachment<'a>(
+        &'a self,
+        output: &'a mut Vec<ConversationMessage>,
+        kind: &'a str,
+        message: ConversationMessage,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            if let Some(message) = self
+                .mod_prompt_attachment(kind, message, serde_json::json!({"kind":"engine"}))
+                .await
+            {
+                output.push(message);
+            }
+        })
     }
 }

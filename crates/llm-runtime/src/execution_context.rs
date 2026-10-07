@@ -23,6 +23,14 @@ pub struct ExecutionContext {
     pub thinking_recovery_scope: Option<crate::thinking_scope::ThinkingRecoveryScope>,
     /// Trusted account identity for provider continuations and hosted resources.
     pub account_scope: Option<String>,
+    /// Capture live request credentials for host-selected native computer state.
+    pub computer_request: bool,
+    /// This request declares native computer controls rather than management functions.
+    pub computer_native: bool,
+    /// Original native receipt binding that the captured current request must match.
+    pub expected_computer_binding: Option<lingxi_core::host::NativeContinuationBinding>,
+    /// Durable receipt submission immediately before a prepared SDK dispatch.
+    pub computer_submission: Option<Arc<crate::computer::ComputerReceiptSubmission>>,
     /// Trusted host account identity for provider-owned file references.
     pub file_account_scope: Option<String>,
     /// Whether the host response should include per-call retry accounting.

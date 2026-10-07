@@ -4097,6 +4097,7 @@ pub async fn build_with_credential_stack(
                 .map(|scheduler| scheduler as Arc<dyn lingxi_core::host::LoopUsageProvider>),
         )
         .with_cost_session_switcher_opt(Some(session_state_manager.clone()))
+            .with_tool_execution_journal(session_state_manager.clone())
         .with_session_activation_observer(Arc::new(ProcessSessionActivationObserver))
         // (review #12) Wire the /goal trust + hooks-restricted gates (resolved
         // above) into the orchestrator, replacing the hardcoded trusted=true /

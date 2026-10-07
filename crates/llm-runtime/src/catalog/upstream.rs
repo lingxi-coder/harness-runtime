@@ -28,7 +28,7 @@ pub fn builtin_presets() -> BuiltinCatalog {
                 {
                     ProviderId::OpenAI
                 }
-                wire::ProtocolFamily::GeminiGenerateContent => ProviderId::Gemini,
+                wire::ProtocolFamily::GeminiGenerateContent | wire::ProtocolFamily::GeminiInteractions => ProviderId::Gemini,
                 wire::ProtocolFamily::VertexGemini => ProviderId::VertexGemini,
                 wire::ProtocolFamily::VertexClaude => ProviderId::VertexClaude,
                 wire::ProtocolFamily::BedrockClaude => ProviderId::BedrockClaude,

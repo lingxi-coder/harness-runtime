@@ -491,6 +491,7 @@ async fn scoped_continuation_transport_failure_is_dispatched_once() {
         let mut request = LlmRequest::new("gpt-4.1").with_user_text("Continue");
         request.execution.account_scope = Some("account".into());
         request.input.continuation = Some(wire::ContinuationRef {
+            protocol: wire::ProtocolFamily::OpenAiResponses,
             response_id: wire::ResponseId::new("resp_previous"),
             provider_id: wire::ProviderId::new("openai"),
             profile_name: "hosted-retry-0".into(),
@@ -538,6 +539,7 @@ fn native_execution_history_and_continuations_disable_replay() {
     }
     request.input.messages.clear();
     request.input.continuation = Some(wire::ContinuationRef {
+        protocol: wire::ProtocolFamily::OpenAiResponses,
         response_id: wire::ResponseId::new("resp_previous"),
         provider_id: wire::ProviderId::new("openai"),
         profile_name: "openai".into(),

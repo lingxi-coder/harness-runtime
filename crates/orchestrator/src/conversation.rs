@@ -404,6 +404,23 @@ pub trait OrchestratorApiClient: Send + Sync {
     async fn close_responses_websocket_session(&self) -> Result<(), LlmError> {
         Ok(())
     }
+
+    /// Provider wire chosen by the host route, independent of model name guesses.
+    fn native_computer_provider(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Option<lingxi_llm_client::protocol::computer::NativeComputerProvider> {
+        None
+    }
+
+    /// Buffer the provider stream until a terminal response before desktop dispatch.
+    async fn messages_create_buffered_stream(
+        &self,
+        request: llm_runtime::MessagesCreateRequest,
+    ) -> Result<HistoryResponse, LlmError> {
+        self.messages_create(OrchestratorApiRequest::Main(request)).await
+    }
 }
 
 /// Re-map a terminal `RateLimited` turn error onto the user-facing copy
@@ -789,7 +806,7 @@ pub(crate) fn request_too_large_notice(interactive: bool) -> String {
 /// retained on `provider_metadata` (byte-faithful to claude-code's persisted
 /// `BetaMessage.usage`); falls back to a reconstruction from the normalized
 /// billable buckets only when no raw object is present (unusual).
-fn assistant_usage_value(usage: &llm_runtime::ExecutionUsage) -> serde_json::Value {
+pub(crate) fn assistant_usage_value(usage: &llm_runtime::ExecutionUsage) -> serde_json::Value {
     if usage.provider_metadata.is_object() {
         return usage.provider_metadata.clone();
     }
@@ -1196,6 +1213,8 @@ pub struct ConversationOrchestrator {
     /// caller can mix batched and streaming turns transparently.
     pub(crate) streaming_api: Arc<dyn StreamingApiClient>,
     pub(crate) tools: Arc<ToolRegistry>,
+    pub(crate) computer_runtime: crate::native_computer::ComputerRuntime,
+    pub(crate) tool_execution_journal: Option<Arc<dyn lingxi_core::host::ToolExecutionJournal>>,
     pub(crate) hooks: Arc<HookExecutor>, // = hooks::HookExecutorImpl (M5-06)
     pub(crate) perms: Arc<dyn PermissionGate>,
     pub(crate) output: Arc<dyn OutputStream>,

@@ -391,7 +391,12 @@ fn build_state_from_jsonl(
         match m.message_type.as_str() {
             "user" => {
                 flush_pending_assistant(&mut state, pending_assistant.take());
-                let content_blocks = extract_content_blocks(&m.message);
+                let mut content_blocks = extract_content_blocks(&m.message, true);
+                if restore_main_handback_content(m, &mut content_blocks).is_err() {
+                    tracing::warn!(uuid = %m.uuid, "skipping invalid native Peer handback row");
+                    continue;
+                }
+                restore_exact_history_strings(m, &mut content_blocks);
                 // Restore the `isMeta` outer-envelope flag (claude-code persists
                 // it as a top-level field; we read it back from `extra`) so a
                 // resumed Stop-hook-feedback message stays meta/hidden.
@@ -452,7 +457,8 @@ fn build_state_from_jsonl(
                 last_uuid = Some(msg_uuid);
             }
             "assistant" => {
-                let content_blocks = extract_content_blocks(&m.message);
+                let mut content_blocks = extract_content_blocks(&m.message, false);
+                restore_exact_history_strings(m, &mut content_blocks);
                 // Recover the session's active model: each assistant line records
                 // the model that produced it, so the LAST one is the model the
                 // session was on at save time. Restoring it (over the
@@ -816,13 +822,13 @@ fn tool_result_ids(message: &JsonlMessage) -> impl Iterator<Item = &str> {
 /// capped model-facing text; carrying all of them measured 2.0x-34.5x growth on
 /// real transcripts for a payload that crosses as ONE `SessionResumed` frame.
 ///
-/// * `Agent` / `Task` / `Skill` — the payload's `agentId` is the only structural
+/// * `Agent` / `Skill` — the payload's `agentId` is the only structural
 ///   link from a subagent card back to the call that spawned it.
 /// * `ExitPlanMode` — the payload's `plan` is the plan document and its
 ///   `model_content` is the approval wording. Without them a resumed plan card
 ///   has no body and falls back to its `submitted` placeholder, so a plan the
 ///   user actually approved reads as still being prepared.
-pub const CLIENT_STATE_TOOLS: &[&str] = &["Agent", "Task", "Skill", "ExitPlanMode"];
+pub const CLIENT_STATE_TOOLS: &[&str] = &["Agent", "Skill", "ExitPlanMode"];
 
 /// Recover the [`CLIENT_STATE_TOOLS`] results from the persisted MAIN-CHAIN
 /// transcript, keyed by the `tool_use_id` each one answers.
@@ -1007,7 +1013,7 @@ async fn replay_deferred_tool_after_resume(
     // Applied per tool, before the next one is dispatched: a context modifier
     // is about the model's context, not about message shape, and the following
     // replay has to see it.
-    crate::turn_loop::apply_model_context_modifiers(orch, context_modifiers).await;
+    crate::turn_loop::apply_model_context_modifiers(orch, context_modifiers).await?;
     Ok(DeferredReplayOutcome {
         tool_use_id,
         tool_results,
@@ -1671,5 +1677,203 @@ impl ConversationOrchestrator {
             .map_err(|error| ResumeError::DeferredReplay(error.to_string()))?;
         }
         Ok(orch)
+    }
+}
+
+#[cfg(test)]
+mod mod_session_turn_resume_tests {
+
+    #[tokio::test]
+    async fn restored_hook_attachment_keeps_origin_and_can_be_omitted_from_model_copy() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+
+        let session_id = Uuid::new_v4();
+        let attachment_id = Uuid::new_v4();
+        let rows = vec![hook_attachment_row(
+            session_id,
+            attachment_id,
+            serde_json::json!({
+                "type":"hook_additional_context",
+                "hookName":"SessionStart",
+                "hookEvent":"SessionStart",
+                "content":["RESTORED SECRET"]
+            }),
+        )];
+        let state = state_from_messages(session_id, &rows);
+        assert_eq!(state.history.len(), 1);
+        assert_eq!(state.history[0].id(), MessageId::from_uuid(attachment_id));
+        let descriptors = mod_attachment_descriptors_from_messages(&rows);
+        assert_eq!(
+            descriptors.get(&MessageId::from_uuid(attachment_id)),
+            Some(&(
+                "hook_additional_context".into(),
+                serde_json::json!({"kind":"hook","event":"SessionStart"})
+            ))
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("omit-restored.js");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+              on('prompt.attachment', { type: 'hook_additional_context' }, ($, e, next) =>
+                e.origin.kind === 'hook' && e.origin.event === 'SessionStart'
+                  ? { text: null } : next(e));
+            }"#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("omit-restored", dir.path(), &module, serde_json::json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        *orch.session.lock().await = state;
+        orch.restore_resume_prompt_metadata(&rows).await;
+        let is_regular_user_prompt = orch.regular_user_prompt_for_model_step().await;
+        let prepared = orch
+            .prepare_turn_step(
+                crate::conversation::ModelCallPath::Batched,
+                None,
+                true,
+                is_regular_user_prompt,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            prepared
+                .snapshot
+                .iter()
+                .all(|message| !message.text_content().contains("RESTORED SECRET"))
+        );
+        assert!(
+            orch.session
+                .lock()
+                .await
+                .history
+                .iter()
+                .any(|message| message.text_content().contains("RESTORED SECRET"))
+        );
+    }}
+
+fn restore_exact_history_strings(message: &JsonlMessage, content: &mut [ContentBlock]) {
+    let overrides = session::jsonl::exact_json::message_utf16_overrides(message);
+    if overrides.is_empty() {
+        return;
+    }
+    let raw = message.message.get("content");
+    let paths: Vec<_> = match raw {
+        Some(Value::String(_)) => vec!["/message/content".to_owned()],
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, block)| {
+                block["type"] != "text" || block.get("text").is_some_and(Value::is_string)
+            })
+            .map(|(index, _)| format!("/message/content/{index}"))
+            .collect(),
+        _ => return,
+    };
+    for (block, path) in content.iter_mut().zip(paths) {
+        match block {
+            ContentBlock::Text { text, citations } => {
+                let pointer = if raw.is_some_and(Value::is_string) {
+                    path
+                } else {
+                    format!("{path}/text")
+                };
+                if let Some(units) = overrides.get(&pointer).filter(|units| {
+                    String::from_utf16(units).is_err() && String::from_utf16_lossy(units) == *text
+                }) {
+                    *block = ContentBlock::TextJsUtf16 {
+                        text: text.clone(),
+                        utf16_code_units: units.clone(),
+                        citations: citations.clone(),
+                    };
+                }
+            }
+            ContentBlock::ToolResult {
+                content,
+                content_blocks,
+                ..
+            } => {
+                if let Some(units) = overrides.get(&format!("{path}/content")).filter(|units| {
+                    String::from_utf16(units).is_err()
+                        && String::from_utf16_lossy(units) == *content
+                }) {
+                    *content_blocks = Some(lingxi_core::types::js_utf16::tool_result_sidecar(
+                        units.clone(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod exact_history_string_tests {
+    use super::*;
+
+    fn row(role: &str, content: &str) -> JsonlMessage {
+        let id = Uuid::new_v4();
+        let source = format!(
+            r#"{{"type":"{role}","uuid":"{id}","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"11111111-2222-3333-4444-555555555555","message":{{"id":"{id}","role":"{role}","content":{content}}}}}"#
+        );
+        let exact = session::jsonl::exact_json::parse_exact_json(&source).unwrap();
+        let mut row = serde_json::from_value(exact.value).unwrap();
+        session::jsonl::exact_json::set_message_utf16_overrides(&mut row, exact.utf16_overrides);
+        row
+    }
+
+    #[test]
+    fn cold_history_restores_exact_text_and_tool_strings_after_filtering_damaged_blocks() {
+        let messages = vec![
+            row(
+                "user",
+                r#"[{"type":"text","text":"\ud800"},{"type":"text","text":1},{"type":"text","text":"\ud801"},{"type":"tool_result","tool_use_id":"call","content":"\ud802","is_error":false}]"#,
+            ),
+            row("assistant", r#""\ud803""#),
+        ];
+        let state = state_from_messages(Uuid::new_v4(), &messages);
+        let ConversationMessage::User { content, .. } = &state.history[0] else {
+            panic!()
+        };
+        assert_eq!(content.len(), 3);
+        for (index, units) in [vec![0xd800], vec![0xd801]].iter().enumerate() {
+            assert!(
+                matches!(&content[index], ContentBlock::TextJsUtf16 {utf16_code_units,..} if utf16_code_units==units)
+            );
+        }
+        let ContentBlock::ToolResult {
+            content_blocks: Some(blocks),
+            ..
+        } = &content[2]
+        else {
+            panic!()
+        };
+        assert_eq!(
+            lingxi_core::types::js_utf16::tool_result_units(&serde_json::json!(blocks)),
+            Some(vec![0xd802])
+        );
+        assert!(
+            matches!(&state.history[1], ConversationMessage::Assistant {content,..}
+            if matches!(content.as_slice(), [ContentBlock::TextJsUtf16 {utf16_code_units,..}] if utf16_code_units==&vec![0xd803]))
+        );
     }
 }

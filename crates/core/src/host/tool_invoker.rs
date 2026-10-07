@@ -273,6 +273,14 @@ pub trait ToolInvoker: Send + Sync + Any {
     /// Cast to `&dyn Any` for downcast-based test introspection.
     /// Default impl works for all `Sized + 'static` implementors.
     fn as_any(&self) -> &dyn Any;
+    /// Release this Agent's computer inputs after its loop has settled.
+    async fn cleanup_computer_inputs(
+        &self,
+        _agent_id: AgentId,
+        _origin_session_id: Option<SessionId>,
+    ) -> Result<(), ToolInvokerError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

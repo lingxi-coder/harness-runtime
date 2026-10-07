@@ -513,6 +513,60 @@ impl ToolInvoker for RegistryToolInvoker {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+    async fn cleanup_computer_inputs(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        origin_session_id: Option<lingxi_core::types::SessionId>,
+    ) -> Result<(), ToolInvokerError> {
+        let Some(tool) = self
+            .registry
+            .find_registered("computer")
+            .filter(|tool| !tool.is_mcp())
+        else {
+            return Ok(());
+        };
+        let ctx = crate::context::ToolUseContext {
+            options: crate::context::ToolUseOptions {
+                debug: false,
+                verbose: false,
+                main_loop_model: "subagent".into(),
+                model_profile: None,
+                max_budget_nano_usd: None,
+                mcp_clients: vec![],
+                is_non_interactive_session: true,
+                custom_system_prompt: None,
+                append_system_prompt: None,
+            },
+            messages: vec![],
+            tool_use_id: None,
+            assistant_message_id: None,
+            assistant_message: None,
+            same_turn_tool_uses: vec![],
+            agent_id: Some(agent_id),
+            origin_session_id,
+            agent_spawn_provenance: Default::default(),
+            nested_memory_triggers: Arc::default(),
+            agent_name: None,
+            team_name: None,
+            instruction_context: None,
+            tool_execution_policy: Default::default(),
+            trusted_effective_permission_mode: None,
+            classifier_only_review: None,
+            content_replacement_state: None,
+            session: None,
+            subagent_registry: None,
+            cancel: None,
+            fork_parent_system_prompt: None,
+            cwd: None,
+            depth: 0,
+            observer: None,
+            observer_pairings: None,
+            file_history: None,
+        };
+        tool.cleanup_computer_inputs(&ctx)
+            .await
+            .map_err(|error| ToolInvokerError::Internal(error.to_string()))
+    }
 }
 
 #[cfg(test)]

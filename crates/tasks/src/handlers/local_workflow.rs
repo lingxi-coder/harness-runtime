@@ -601,6 +601,15 @@ impl ToolInvoker for WorkspaceLeaseToolInvoker {
     fn as_any(&self) -> &dyn Any {
         self
     }
+    async fn cleanup_computer_inputs(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        origin_session_id: Option<lingxi_core::types::SessionId>,
+    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
+        self.inner
+            .cleanup_computer_inputs(agent_id, origin_session_id)
+            .await
+    }
 }
 
 /// Build a throw-channel result slot carrying `message`.

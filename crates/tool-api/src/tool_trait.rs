@@ -363,6 +363,60 @@ pub trait Tool: Send + Sync {
     fn user_facing_name_background_color(&self, _input: &Value) -> Option<String> {
         None
     }
+
+    /// Provider-native desktop adaptation for this registered tool, when supported.
+    fn native_computer_capabilities(
+        &self,
+    ) -> Option<lingxi_llm_client::protocol::computer::ComputerCapabilities> {
+        None
+    }
+
+    /// Convert protocol data into this tool's ordinary input without executing it.
+    fn lower_computer_operation(
+        &self,
+        _operation: &lingxi_llm_client::protocol::computer::ComputerOperation,
+        _frame: &lingxi_llm_client::protocol::computer::ComputerFrame,
+    ) -> Result<Value, ToolError> {
+        Err(ToolError::InvalidInput("native computer adaptation unavailable".into()))
+    }
+
+    /// Return an authorized, current observation belonging to the calling owner.
+    async fn native_computer_frame(
+        &self,
+        _ctx: &ToolUseContext,
+    ) -> Result<Option<lingxi_llm_client::protocol::computer::ComputerFrame>, ToolError> {
+        Ok(None)
+    }
+
+    /// Retain desktop ownership across an ordered native sequence and its observation.
+    async fn begin_computer_sequence(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// End a sequence while retaining ownership of inputs still held by the owner.
+    async fn end_computer_sequence(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// Release inputs held by this owner at cancellation or lifecycle completion.
+    async fn cleanup_computer_inputs(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// Apply the final model-visible observation after output hooks and Mods.
+    async fn computer_model_output(
+        &self,
+        _ctx: &ToolUseContext,
+        _content: &str,
+        _blocks: Option<&[Value]>,
+    ) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// Require a fresh observation after recovery or a host geometry reset.
+    async fn invalidate_computer_observation(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
+        Ok(())
+    }
 }
 
 /// Static context passed to [`Tool::is_enabled`]: feature flags and other

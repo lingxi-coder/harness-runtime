@@ -197,6 +197,7 @@ impl SessionStateCoordinator {
     fn retirement_projection_idle(&self) -> bool {
         !self.admission_closed.load(AtomicOrdering::Acquire)
             && self.durability_gate().frozen_reason().is_none()
+            && !self.tool_projection_pending()
             && self.fusion_outboxes().iter().all(|outbox| {
                 matches!(
                     outbox.receipt.status,
@@ -562,7 +563,7 @@ mod tests {
 
     #[tokio::test]
     async fn queued_maintenance_cannot_retain_writer_claim_after_shutdown_returns() {
-        use std::future::{poll_fn, Future};
+        use std::future::{Future, poll_fn};
         use std::task::Poll;
 
         let f = Fixture::new().await;

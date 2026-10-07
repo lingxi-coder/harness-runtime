@@ -46,6 +46,7 @@ impl Codec {
             wire::ProtocolFamily::OpenAiChat => Arc::new(client::OpenAiChatCodec),
             wire::ProtocolFamily::OpenAiResponses => Arc::new(client::OpenAiResponsesCodec),
             wire::ProtocolFamily::GeminiGenerateContent => Arc::new(client::GeminiCodec),
+            wire::ProtocolFamily::GeminiInteractions => Arc::new(client::GeminiInteractionsCodec),
             wire::ProtocolFamily::AzureOpenAi => Arc::new(client::AzureOpenAiCodec),
             wire::ProtocolFamily::BedrockClaude => Arc::new(client::BedrockClaudeCodec),
             wire::ProtocolFamily::VertexClaude => Arc::new(client::VertexClaudeCodec),

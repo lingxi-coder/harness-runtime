@@ -205,6 +205,12 @@ fn guard_max_tokens_adjustment(
 /// The SDK classifies provider execution state; the host combines that fact
 /// with its transport, settlement, and retry policy before any repeat dispatch.
 fn allows_automatic_replay(request: &LlmRequest) -> bool {
+    if request.execution.computer_submission.is_some()
+        || request.execution.expected_computer_binding.is_some()
+        || request.execution.input_protocol == Some(crate::ProtocolFamily::GeminiInteractions)
+    {
+        return false;
+    }
     lingxi_llm_client::execution_safety::request_replay_safety(&request.input)
         == lingxi_llm_client::execution_safety::RequestReplaySafety::Stateless
 }
@@ -1398,256 +1404,21 @@ impl ApiService {
         stream: bool,
         max_tokens: Option<u32>,
     ) -> Result<LlmRequest, LlmError> {
-        // Pre-wire pipeline (claude-code order): strip_excess_media →
-        // normalizeMessagesForAPI (consecutive-role merge) → ensureToolResultPairing
-        // (SEND-time repair of orphaned/missing/duplicate tool_use↔tool_result on
-        // resumed/interrupted transcripts; strict no-op on a clean turn).
-        // Session-scoped tool-search gate (Claude Code `$U()`), published by the
-        // orchestrator. NOT inferred from whether THIS request's toolset carries
-        // a `ToolSearch` declaration: `$U()` reads only the session mode +
-        // provider, and the branch site `if(!$U())W=j6s(W);else W=xPy(W,a)` runs
-        // for main-loop AND side-query requests alike. A side query assembled
-        // with an empty toolset (compaction summarizer, recap) in a
-        // tool-search-enabled session must therefore still take the ENABLED
-        // branch — emitting "[…tools no longer available]" rather than the
-        // disabled branch's "[…tool search not enabled]". The request's `tools`
-        // remain the availability set (`a`) below.
-        let mut msgs = msgs;
-        let thinking_source_message_ids: Vec<_> = msgs
-            .iter()
-            .filter_map(|message| {
-                if let ConversationMessage::Assistant { id, content, .. } = message {
-                    content
-                        .iter()
-                        .any(|block| {
-                            matches!(
-                                block,
-                                lingxi_core::types::ContentBlock::Thinking { .. }
-                                    | lingxi_core::types::ContentBlock::RedactedThinking { .. }
-                            )
-                        })
-                        .then_some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let thinking_recovery_scope = self.thinking_recovery_scope();
-        thinking_recovery_scope.capture(&thinking_source_message_ids);
-        if !crate::model::thinking_signature::thinking_must_round_trip(model, profile) {
-            crate::model::thinking_signature::strip_marked_conversation_thinking(
-                &mut msgs,
-                &thinking_recovery_scope.messages(),
-            );
-        }
-        let tool_search_enabled = lingxi_core::host::session_flags::tool_search_enabled();
-        let available_tool_names: std::collections::HashSet<String> = tools
-            .iter()
-            .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
-            .map(str::to_string)
-            .collect();
-        let normalize = |messages| {
-            to_llm_messages(ensure_tool_result_pairing(
-                normalize_messages_for_api_with_tool_search(
-                    strip_excess_media(messages, MAX_MEDIA_PER_REQUEST),
-                    tool_search_enabled,
-                    Some(&available_tool_names),
-                ),
-            ))
-        };
-        let mut messages = normalize(msgs)?;
-        let mut system_blocks = Vec::new();
-        let tool_decls = to_tool_declarations(tools)?;
-
-        let mut req = LlmRequest::new(model);
-        if let Some(p) = profile {
-            req = req.with_profile(p);
-        }
-
-        // Prompt-cache breakpoints (parity: claude-code getPromptCachingEnabled +
-        // buildSystemPromptBlocks + addCacheBreakpoints). Anthropic permits at most
-        // 4 ephemeral breakpoints per request; we place at most 3 — up to two on
-        // the system blocks (prefix + rest, per splitSysPromptPrefix /
-        // buildSystemPromptBlocks) and one on the last content block of the last
-        // message — matching the TS baseline (the tools array gets none on the
-        // non-global-cache path). The Anthropic codec serializes
-        // Some(CacheControl::Ephemeral) as {"type":"ephemeral"}; non-Anthropic
-        // codecs ignore the field, so this is a no-op for them.
-        let enable_caching = prompt_caching_enabled(model);
-
-        if let Some(s) = system {
-            // Split the assembled system string into up-to-3 cache blocks
-            // (here ≤2 — the attribution bucket is always empty for LingXi),
-            // marking only the org-scoped buckets, per
-            // `prompt::split_system_blocks`. Replaces the previous single
-            // collapsed block.
-            //
-            // 1P global-cache path (dormant): when the experimental gate is on
-            // we take splitSysPromptPrefix's global mode. LingXi does not yet
-            // assemble SYSTEM_PROMPT_DYNAMIC_BOUNDARY into the prompt, so this
-            // degenerates to the org default (boundaryIndex===-1 fallthrough) —
-            // the scope:'global'/ttl:'1h' serialization is wired and ready but
-            // inert until a boundary marker is assembled. See module residual.
-            let split_opts = crate::prompt_format::SplitOptions {
-                global_scope: self.should_use_global_cache_scope(),
-                ttl_1h: self.should_1h_cache_ttl(),
-            };
-            system_blocks =
-                crate::prompt_format::split_system_blocks_with(s, enable_caching, split_opts);
-        }
-        req.execution.thinking_source_message_ids = thinking_source_message_ids;
-        req.execution.thinking_recovery_scope = Some(thinking_recovery_scope);
-
-        // Exactly one message-level breakpoint, on the last cache-eligible content
-        // block of the last message (claude.ts addCacheBreakpoints markerIndex =
-        // len-1). Skip reasoning/redacted blocks (assistantMessageToMessageParam).
-        if enable_caching {
-            use crate::ContentBlock as LlmContentBlock;
-            if let Some(last) = messages.last_mut() {
-                if let Some(block) = last.content.iter_mut().rev().find(|b| {
-                    !matches!(
-                        b,
-                        LlmContentBlock::Reasoning { .. }
-                            | LlmContentBlock::RedactedThinking { .. }
-                    )
-                }) {
-                    match block {
-                        LlmContentBlock::Text { cache_control, .. }
-                        | LlmContentBlock::ToolResult { cache_control, .. } => {
-                            *cache_control = Some(CacheControl::Ephemeral);
-                        }
-                        // Image / ToolCall / etc.: no cache_control slot — skip.
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        // 1P experimental cache-editing pass (claude.ts addCacheBreakpoints,
-        // 3108-3208). Gated behind `useCachedMC` (`should_use_cache_editing`):
-        // when OFF (the default), this is a no-op and the request is
-        // byte-identical to the pre-feature path. When ARMED it (a) re-inserts
-        // previously-pinned cache_edits at their original positions, (b) inserts
-        // the new cache_edits into the last user message, and (c) stamps
-        // `cache_reference` onto every tool_result strictly before the last
-        // cache_control marker — all with cross-block delete-ref dedup.
-        if self.should_use_cache_editing() {
-            apply_cache_editing(
-                &mut messages,
-                enable_caching,
-                &self.cache_editing_inputs.new_edits,
-                &self.cache_editing_inputs.pinned,
-            );
-        }
-
-        let family = self
-            .client
-            .protocol_for_model(model, profile)
-            .unwrap_or(lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages);
-        let (input, overrides) =
-            crate::convert::history_input(model, &messages, &system_blocks, &tool_decls, family)?;
-        req.input = input;
-        req.execution.input_protocol = Some(family);
-        req.execution.message_json_string_overrides = overrides;
-        // No tool-array breakpoint (matches TS baseline).
-        // Forced tool choice (e.g. `--json-schema` → `StructuredOutput`). Unset
-        // for every normal turn, so the request carries no `tool_choice` and the
-        // model chooses freely — byte-identical to the pre-feature request.
-        if let Some(choice) = &self.forced_tool_choice {
-            req.set_tool_choice(Some(choice.clone()));
-        }
-        if req.input.model.contains("deepseek") || req.profile.as_deref() == Some("deepseek") {
-            tracing::debug!(
-                event = "build_request",
-                model = %req.input.model,
-                profile = req.profile.as_deref().unwrap_or("<none>"),
-                messages = messages.len(),
-                tools = req.input.tools.len(),
-                forced_tool_choice = self.forced_tool_choice.is_some(),
-                active_tool_choice = ?req.input.tool_choice,
-                stream = req.stream,
-            );
-        }
-        req.stream = stream;
-
-        // max_tokens (DIV-3): an explicit escalation wins; ordinary turns use a
-        // model-aware request default. Catalog `limit.output` is a hard ceiling,
-        // not a request default (notably OpenRouter GLM Free advertises 230.4k
-        // output inside a 256k total context window).
-        let requested_max_tokens = max_tokens.unwrap_or_else(|| {
-            u32::try_from(crate::model::context_window::default_output_tokens_for_model(model))
-                .unwrap_or(u32::MAX)
-        });
-        req.input.max_tokens = Some(
-            crate::model::context_window::known_output_token_limit_for_model(model)
-                .map(|limit| u32::try_from(limit).unwrap_or(u32::MAX))
-                .map_or(requested_max_tokens, |limit| {
-                    requested_max_tokens.min(limit)
-                }),
-        );
-
-        // Bound max_tokens so input + output fit the model's context window.
-        // Even a safe ordinary output default may not fit beside a long prompt;
-        // reserve the structured input estimate (system + messages + tools)
-        // plus provider-formatting headroom. Claude models (output << context)
-        // are unaffected unless the input is near-full.
-        let context_window =
-            crate::model::context_window::context_window_for_model(model, &self.custom_cli_betas);
-        let input_est = crate::model::count_tokens::approximate_tokens(&req);
-        if let Some(mt) = req.input.max_tokens {
-            let bounded = bound_output_to_context(mt, context_window, input_est);
-            if bounded == 0 {
-                return Err(LlmError::ContextOverflow {
-                    token_gap: input_est.saturating_sub(context_window),
-                });
-            }
-            req.input.max_tokens = Some(bounded);
-        }
-
-        // thinking (DIV-1) + temperature (DIV-4), mirroring claude.ts:1596-1630
-        // and claude.ts:1693. Computed AFTER max_tokens is known (the fixed-
-        // budget cap clamps to max_tokens-1).
-        {
-            use crate::model::thinking::{model_sends_temperature, session_thinking_active};
-
-            let thinking = self.thinking();
-            let has_thinking = session_thinking_active(thinking);
-
-            // The claude/non-claude branch, the env kill switches and the
-            // budget clamp live in `model::thinking::reasoning_for_request` —
-            // the SAME session-config resolution the compaction side-query
-            // path inherits (cc 2.1.198). Behavior is byte-identical to the
-            // previous inline block.
-            req.set_reasoning(crate::model::thinking::reasoning_for_request(
-                thinking,
+        // Auxiliary builders share normal policy, but the main turn alone
+        // owns its computer continuation and durable receipt submission.
+        crate::computer::without_computer_request(|| {
+            self.build_main_request(
                 model,
-                req.input.max_tokens,
-            ));
-
-            // temperature:1 ONLY when thinking is disabled AND the model is in the
-            // `rhn` temperature-gate set (binary @205866168:
-            // `!xs && rhn(u) ? temperatureOverride ?? 1 : void 0`). The default
-            // opus-4-8 (and 4-7/fable-5/mythos-5/unknowns) are NOT in `rhn` → the
-            // field is omitted. The Anthropic codec emits temperature on Some only.
-            req.input.temperature = if !has_thinking
-                && !matches!(thinking, crate::model::thinking::ThinkingConfig::Automatic)
-                && model_sends_temperature(model)
-            {
-                Some(1.0)
-            } else {
-                None
-            };
-        }
-
-        // metadata.user_id (DIV-2): claude-code always sends it. `None` (no
-        // identity wired) omits the object — byte-identical to the prior request.
-        req.input.metadata = self
-            .request_metadata
-            .as_ref()
-            .map(|m| serde_json::json!({"user_id":m.user_id}))
-            .unwrap_or(serde_json::Value::Null);
-
-        Ok(req)
+                profile,
+                system,
+                msgs,
+                tools,
+                stream,
+                max_tokens,
+                skip_global_cache_for_system_prompt,
+                query_source,
+            )
+        })
     }
 
     fn log_deepseek_prepared_request(model: &str, prepared: &crate::PreparedLlmCall, stream: bool) {
@@ -2959,6 +2730,11 @@ impl ApiService {
             // Pause the provider deadline while waiting for host admission.
             let remaining = timeout.saturating_sub(preparing.elapsed());
             let mut attempt = self.begin_model_attempt(&req, &prepared).await?;
+            let dispatch_started = tokio::time::Instant::now();
+            let admission = req.execution.request_dispatch_admission.clone();
+            let mut admission_rejected = false;
+            let mut dispatch_callback_rejected = false;
+            let cache_snapshot = crate::prompt_cache::snapshot_prepared(&prepared);
             let call = prepared.wire_call.take().expect("sealed call");
             let pricing =
                 (self.estimator.is_some() || req.execution.model_attempt.is_some()).then(|| {
@@ -2974,17 +2750,48 @@ impl ApiService {
                     )
                 });
             let resp_result = crate::execution::non_stream_bound(remaining, async {
+                if req.execution.computer_submission.is_some()
+                    && admission
+                        .as_ref()
+                        .is_some_and(|admission| !admission.is_admitted())
+                {
+                    admission_rejected = true;
+                    return Err(LlmError::InvalidRequest {
+                        message: "host rejected request dispatch admission".into(),
+                    });
+                }
+                prepared.before_computer_submit().await?;
                 let received = call
                     .dispatch_once_with(|| {
-                        attempt
-                            .mark_dispatched()
-                            .map_err(crate::execution::wire_error)
+                        if admission
+                            .as_ref()
+                            .is_some_and(|admission| !admission.is_admitted())
+                        {
+                            admission_rejected = true;
+                            dispatch_callback_rejected = true;
+                            return Err(crate::execution::wire_error(LlmError::InvalidRequest {
+                                message: "host rejected request dispatch admission".into(),
+                            }));
+                        }
+                        if let Err(error) = attempt.mark_dispatched() {
+                            dispatch_callback_rejected = true;
+                            return Err(crate::execution::wire_error(error));
+                        }
+                        any_dispatched = true;
+                        crate::prompt_cache::observe_snapshot(cache_snapshot.clone());
+                        Ok(())
                     })
                     .await
                     .map_err(crate::upstream::error)?;
                 received.collect().await.map_err(crate::upstream::error)
             })
             .await;
+
+            if dispatch_callback_rejected {
+                if let Some(submission) = req.execution.computer_submission.as_ref() {
+                    submission.not_submitted().await?;
+                }
+            }
 
             match resp_result {
                 Err(transport_err) => {
@@ -3099,6 +2906,13 @@ impl ApiService {
                     collected.finish().await;
                     match decoded {
                         Ok(mut response) => {
+                            if let Some(binding) = prepared.computer_binding.as_ref() {
+                                crate::history_projection::attach_computer_binding(
+                                    &mut response.provider_metadata,
+                                    binding,
+                                );
+                            }
+                            Self::settle_thinking_display_probe(&prepared, &retry_scope);
                             // Feed rate-limit headers from every 2xx success response.
                             self.record_rate_limit_from_headers(
                                 &provider_resp.headers,
@@ -3424,15 +3238,8 @@ impl ApiService {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<HistoryResponse, LlmError> {
-        let req = self.build_request(model, profile, system, messages, tools, false, None)?;
-        let ctl = resolve_retry_control_with_settings(
-            model,
-            None,
-            self.effective_subscriber().is_subscriber,
-            &ResolveRetryEnv::from_process_env(),
-            self.settings_max_retries,
-        );
-        self.drive_non_stream(req, ctl, DispatchHeaderState::default())
+        let (req, retry) = self.build_main_message_request(request, false)?;
+        self.execute_non_stream_request(req, NonStreamingRequestClass::Main, retry)
             .await
     }
 
@@ -4127,13 +3934,36 @@ impl ApiService {
                 // Budget/queue admission is host work, outside the network
                 // watchdog. Its wait must not masquerade as a provider timeout.
                 attempt = self.begin_model_attempt(&req, &prepared).await?;
-                crate::execution::first_byte_bound(
-                    remaining,
+                let cache_snapshot = crate::prompt_cache::snapshot_prepared(&prepared);
+                crate::execution::first_byte_bound(remaining, async {
+                    if req.execution.computer_submission.is_some()
+                        && admission
+                            .as_ref()
+                            .is_some_and(|admission| !admission.is_admitted())
+                    {
+                        admission_rejected = true;
+                        return Err(LlmError::InvalidRequest {
+                            message: "host rejected request dispatch admission".into(),
+                        });
+                    }
                     self.client
                         .open_shared_stream(prepared, responses_ws_session, &mut || {
-                            attempt.mark_dispatched()
-                        }),
-                )
+                            if admission
+                                .as_ref()
+                                .is_some_and(|admission| !admission.is_admitted())
+                            {
+                                admission_rejected = true;
+                                return Err(LlmError::InvalidRequest {
+                                    message: "host rejected request dispatch admission".into(),
+                                });
+                            }
+                            attempt.mark_dispatched()?;
+                            any_dispatched = true;
+                            crate::prompt_cache::observe_snapshot(cache_snapshot.clone());
+                            Ok(())
+                        })
+                        .await
+                })
                 .await
             }
             .await;
@@ -4417,6 +4247,24 @@ impl ApiService {
                     let decoder = crate::history_projection::HistoryProjector::projection(
                         crate::upstream::family(&prepared.route.protocol),
                         crate::stream_provider_metadata_from_headers(&response_headers),
+                    );
+                    if let Some(binding) = prepared.computer_binding.as_ref() {
+                        crate::history_projection::attach_computer_binding(
+                            &mut decoder.metadata,
+                            binding,
+                        );
+                    }
+                    decoder.admit_server_fallback(
+                        prepared.server_fallback_lane.clone(),
+                        prepared.route.resolved_route.profile_name.clone(),
+                        prepared.route.resolved_route.request_model.clone(),
+                        crate::execution::extract_response_request_id(
+                            prepared.route.protocol,
+                            crate::execution::response_provider_id(
+                                &prepared.route.resolved_route.provider_id,
+                            ),
+                            &response_headers,
+                        ),
                     );
                     let mut frames = streaming
                         .into_stream()
@@ -4770,7 +4618,18 @@ impl ApiService {
         effort: Option<serde_json::Value>,
         speed: Option<String>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let mut req = self.build_request(model, profile, system, messages, tools, true, None)?;
+        let system = custom_system_prompt(system);
+        let mut req = self.build_main_request(
+            model,
+            profile,
+            system.as_ref(),
+            messages,
+            tools,
+            true,
+            None,
+            false,
+            PromptCacheQuerySource::Unspecified,
+        )?;
         req.set_effort(effort)?;
         // (fast mode) `Some("fast")` from the main loop lights the fast-mode
         // beta via `beta_context`; `None` keeps the body byte-identical.
@@ -4945,6 +4804,363 @@ impl ApiService {
             temperature,
             query_source,
         )?;
+        self.drive_stream(req).await
+    }
+
+    fn build_main_request(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        stream: bool,
+        max_tokens: Option<u32>,
+        skip_global_cache_for_system_prompt: bool,
+        query_source: PromptCacheQuerySource<'_>,
+    ) -> Result<LlmRequest, LlmError> {
+        // Pre-wire pipeline (claude-code order): strip_excess_media →
+        // normalizeMessagesForAPI (consecutive-role merge) → ensureToolResultPairing
+        // (SEND-time repair of orphaned/missing/duplicate tool_use↔tool_result on
+        // resumed/interrupted transcripts; strict no-op on a clean turn).
+        // Session-scoped tool-search gate (Claude Code `$U()`), published by the
+        // orchestrator. NOT inferred from whether THIS request's toolset carries
+        // a `ToolSearch` declaration: `$U()` reads only the session mode +
+        // provider, and the branch site `if(!$U())W=j6s(W);else W=xPy(W,a)` runs
+        // for main-loop AND side-query requests alike. A side query assembled
+        // with an empty toolset (compaction summarizer, recap) in a
+        // tool-search-enabled session must therefore still take the ENABLED
+        // branch — emitting "[…tools no longer available]" rather than the
+        // disabled branch's "[…tool search not enabled]". The request's `tools`
+        // remain the availability set (`a`) below.
+        let mut msgs = msgs;
+        let thinking_source_message_ids: Vec<_> = msgs
+            .iter()
+            .filter_map(|message| {
+                if let ConversationMessage::Assistant { id, content, .. } = message {
+                    content
+                        .iter()
+                        .any(|block| {
+                            matches!(
+                                block,
+                                lingxi_core::types::ContentBlock::Thinking { .. }
+                                    | lingxi_core::types::ContentBlock::RedactedThinking { .. }
+                            )
+                        })
+                        .then_some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let thinking_recovery_scope = self.thinking_recovery_scope();
+        thinking_recovery_scope.capture(&thinking_source_message_ids);
+        if !crate::model::thinking_signature::thinking_must_round_trip(model, profile) {
+            crate::model::thinking_signature::strip_marked_conversation_thinking(
+                &mut msgs,
+                &thinking_recovery_scope.messages(),
+            );
+        }
+        let tool_search_enabled = lingxi_core::host::session_flags::tool_search_enabled();
+        let available_tool_names: std::collections::HashSet<String> = tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+            .collect();
+        let messages = ensure_tool_result_pairing_with_sources(
+            normalize_messages_for_api_with_tool_search_and_sources(
+                strip_excess_media_with_sources(
+                    ConversationMessagesWithSources::new(msgs),
+                    MAX_MEDIA_PER_REQUEST,
+                ),
+                tool_search_enabled,
+                Some(&available_tool_names),
+            ),
+        );
+        let request_message_source_ids = messages.contributing_message_ids();
+        let mut messages = to_llm_messages(messages.messages)?;
+        let tool_decls = to_tool_declarations(tools)?;
+
+        let mut req = LlmRequest::new(model);
+        req.execution.request_message_source_ids = request_message_source_ids;
+        req.execution.refusal_fallback_context =
+            lingxi_core::host::refusal_driver::current_fallback_target();
+        if let Some(p) = profile {
+            req = req.with_profile(p);
+        }
+
+        use lingxi_llm_client::providers::anthropic::system_prompt as prompt_cache;
+        let family = self
+            .client
+            .protocol_for_model(model, profile)
+            .ok()
+            .unwrap_or(lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages);
+        let cache_policy = prompt_cache::CachePolicy::from_process(
+            lingxi_core::host::compliance_taints::is_tainted("hipaa"),
+            agent_prompt_cache_ttl_override(),
+            skip_global_cache_for_system_prompt,
+            query_source,
+            self.prompt_cache_ttl_settings_source
+                .as_ref()
+                .map(|source| sdk_prompt_cache_ttl_settings(source()))
+                .unwrap_or_default(),
+            self.prompt_cache_ttl_inputs(),
+        );
+        let enable_caching = prompt_cache::prompt_caching_enabled(model, family);
+        let prompt_cache_overage = self.prompt_cache_overage.clone();
+        let prompt_cache_epoch = prompt_cache_overage.clone();
+        req.execution.prompt_cache = Some(crate::PromptCacheRequestContext {
+            system: system.cloned(),
+            policy: cache_policy,
+            current_account_epoch: Arc::new(move || prompt_cache_epoch.account_epoch()),
+            native_bare_mode: native_prompt_cache_bare_mode(),
+            native_unix_socket: native_anthropic_unix_socket_enabled(),
+            overage_for_scope: Arc::new(move |scope, account_epoch| {
+                prompt_cache_overage.is_using_overage(scope, account_epoch)
+            }),
+            pending_overage: Arc::new(Mutex::new(None)),
+        });
+        req.execution.thinking_source_message_ids = thinking_source_message_ids;
+        req.execution.thinking_recovery_scope = Some(thinking_recovery_scope);
+
+        // 1P experimental cache-editing pass (claude.ts addCacheBreakpoints,
+        // 3108-3208). Gated behind `useCachedMC` (`should_use_cache_editing`):
+        // when OFF (the default), this is a no-op and the request is
+        // byte-identical to the pre-feature path. When ARMED it (a) re-inserts
+        // previously-pinned cache_edits at their original positions, (b) inserts
+        // the new cache_edits into the last user message, and (c) stamps
+        // `cache_reference` onto every tool_result strictly before the last
+        // cache_control marker — all with cross-block delete-ref dedup.
+        if self.should_use_cache_editing() {
+            apply_cache_editing(
+                &mut messages,
+                enable_caching,
+                &self.cache_editing_inputs.new_edits,
+                &self.cache_editing_inputs.pinned,
+            );
+        }
+
+        let (mut input, overrides) =
+            crate::convert::history_input(model, &messages, &[], &tool_decls, family)?;
+        req.input = input;
+        req.execution.input_protocol = Some(family);
+        req.execution.message_json_string_overrides = overrides;
+        crate::computer::apply_request_projection(&mut req)?;
+        // No tool-array breakpoint (matches TS baseline).
+        // Forced tool choice (e.g. `--json-schema` → `StructuredOutput`). Unset
+        // for every normal turn, so the request carries no `tool_choice` and the
+        // model chooses freely — byte-identical to the pre-feature request.
+        if let Some(choice) = &self.forced_tool_choice {
+            req.set_tool_choice(Some(choice.clone()));
+        }
+        if req.input.model.contains("deepseek") || req.profile.as_deref() == Some("deepseek") {
+            tracing::debug!(
+                event = "build_request",
+                model = %req.input.model,
+                profile = req.profile.as_deref().unwrap_or("<none>"),
+                messages = messages.len(),
+                tools = req.input.tools.len(),
+                forced_tool_choice = self.forced_tool_choice.is_some(),
+                active_tool_choice = ?req.input.tool_choice,
+                stream = req.stream,
+            );
+        }
+        req.stream = stream;
+
+        // max_tokens (DIV-3): an explicit escalation wins; ordinary turns use a
+        // model-aware request default. Catalog `limit.output` is a hard ceiling,
+        // not a request default (notably OpenRouter GLM Free advertises 230.4k
+        // output inside a 256k total context window).
+        let requested_max_tokens = max_tokens.unwrap_or_else(|| {
+            u32::try_from(crate::model::context_window::default_output_tokens_for_model(model))
+                .unwrap_or(u32::MAX)
+        });
+        req.input.max_tokens = Some(
+            crate::model::context_window::known_output_token_limit_for_model(model)
+                .map(|limit| u32::try_from(limit).unwrap_or(u32::MAX))
+                .map_or(requested_max_tokens, |limit| {
+                    requested_max_tokens.min(limit)
+                }),
+        );
+
+        // Bound max_tokens so input + output fit the model's context window.
+        // Even a safe ordinary output default may not fit beside a long prompt;
+        // reserve the structured input estimate (system + messages + tools)
+        // plus provider-formatting headroom. Claude models (output << context)
+        // are unaffected unless the input is near-full.
+        let context_window =
+            crate::model::context_window::context_window_for_model(model, &self.custom_cli_betas);
+        let input_est = crate::model::count_tokens::approximate_tokens(&req);
+        if let Some(mt) = req.input.max_tokens {
+            let bounded = bound_output_to_context(mt, context_window, input_est);
+            if bounded == 0 {
+                return Err(LlmError::ContextOverflow {
+                    token_gap: input_est.saturating_sub(context_window),
+                });
+            }
+            req.input.max_tokens = Some(bounded);
+        }
+
+        // thinking (DIV-1) + temperature (DIV-4), mirroring claude.ts:1596-1630
+        // and claude.ts:1693. Computed AFTER max_tokens is known (the fixed-
+        // budget cap clamps to max_tokens-1).
+        {
+            use crate::model::thinking::{model_sends_temperature, session_thinking_active};
+
+            let thinking = self.thinking();
+            let has_thinking = session_thinking_active(thinking);
+
+            // The claude/non-claude branch, the env kill switches and the
+            // budget clamp live in `model::thinking::reasoning_for_request` —
+            // the SAME session-config resolution the compaction side-query
+            // path inherits (cc 2.1.198). Behavior is byte-identical to the
+            // previous inline block.
+            req.set_reasoning(crate::model::thinking::reasoning_for_request(
+                thinking,
+                model,
+                req.input.max_tokens,
+            ));
+
+            // temperature:1 ONLY when thinking is disabled AND the model is in the
+            // `rhn` temperature-gate set (binary @205866168:
+            // `!xs && rhn(u) ? temperatureOverride ?? 1 : void 0`). The default
+            // opus-4-8 (and 4-7/fable-5/mythos-5/unknowns) are NOT in `rhn` → the
+            // field is omitted. The Anthropic codec emits temperature on Some only.
+            req.input.temperature = if !has_thinking
+                && !matches!(thinking, crate::model::thinking::ThinkingConfig::Automatic)
+                && model_sends_temperature(model)
+            {
+                Some(1.0)
+            } else {
+                None
+            };
+        }
+
+        // metadata.user_id (DIV-2): claude-code always sends it. `None` (no
+        // identity wired) omits the object — byte-identical to the prior request.
+        req.input.metadata = self
+            .request_metadata
+            .as_ref()
+            .map(|m| serde_json::json!({"user_id":m.user_id}))
+            .unwrap_or(serde_json::Value::Null);
+
+        if let Ok(effort) = MOD_REQUEST_EFFORT.try_with(Clone::clone) {
+            req.set_effort(Some(effort))?;
+        }
+        Ok(req)
+    }
+
+    /// Use the ordinary streaming driver, admitting output only after its full
+    /// assistant response completes. Native computer callers share the normal
+    /// completed-response dispatcher and never act on partial stream blocks.
+    pub async fn messages_create_buffered_stream(
+        &self,
+        request: MessagesCreateRequest,
+    ) -> Result<HistoryResponse, LlmError> {
+        let (req, _retry) = self.build_main_message_request(request, true)?;
+        let stream = self.drive_stream(req).await?;
+        crate::stream_accumulator::accumulate_stream_salvaging(stream)
+            .await
+            .map_err(|(_, error)| error)
+    }
+
+    fn build_main_message_request(
+        &self,
+        request: MessagesCreateRequest,
+        stream: bool,
+    ) -> Result<(LlmRequest, NonStreamingRetryOptions), LlmError> {
+        let MessagesCreateRequest {
+            model,
+            profile,
+            system,
+            messages,
+            tools,
+            opts,
+        } = request;
+        let mut req = self.build_main_request(
+            &model,
+            profile.as_deref(),
+            system.as_ref(),
+            messages,
+            tools,
+            stream,
+            opts.max_output_tokens,
+            opts.skip_global_cache_for_system_prompt,
+            prompt_cache_query_source(opts.query_source.as_deref()),
+        )?;
+        req.input.controls.anthropic.context_hint = opts.context_hint;
+        req.execution.context_hint_beta = opts.context_hint_beta;
+        req.execution.model_attempt = opts.model_attempt;
+        req.execution
+            .set_request_dispatch_admission(opts.request_dispatch_admission);
+        req.execution.query_source = opts.query_source;
+        req.execution.failed_stream_outlasted_timeout = opts.failed_stream_outlasted_timeout;
+        req.execution.stream_fallback = opts.initial_consecutive_overloaded.is_some();
+        Ok((
+            req,
+            NonStreamingRetryOptions {
+                initial_consecutive_overloaded: opts.initial_consecutive_overloaded,
+                fallback: opts.fallback,
+            },
+        ))
+    }
+
+    /// Build a scheduled main turn with its own reasoning policy. The turn
+    /// retains its computer scope even though scheduled wire policy is auxiliary.
+    pub fn build_scheduled_request(
+        &self,
+        request: MessagesCreateRequest,
+        thinking: crate::model::thinking::ThinkingConfig,
+        effort: Option<serde_json::Value>,
+    ) -> Result<LlmRequest, LlmError> {
+        let model = request.model.clone();
+        let (mut req, _) =
+            crate::thinking_scope::isolated(|| self.build_main_message_request(request, false))?;
+        if MOD_REQUEST_EFFORT.try_with(|_| ()).is_ok() {
+            if let Some(thinking) = req.input.thinking.as_mut() {
+                thinking.effort = None;
+            }
+        }
+        req.set_tool_choice(None);
+        req.execution.capture_retry_count = true;
+        req.execution.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
+        self.apply_side_query_thinking(&mut req, &model, Some(thinking), None);
+        req.set_effort(effort)?;
+        Ok(req)
+    }
+
+    /// Stream the current host-owned Native source vector without flattening
+    /// marker elements or section boundaries in the orchestrator.
+    /// The sanitized Native query source selects the SDK's main/subagent TTL
+    /// environment branch before provider serialization.
+    pub async fn stream_with_system_prompt(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        effort: Option<serde_json::Value>,
+        speed: Option<String>,
+        skip_global_cache_for_system_prompt: bool,
+        query_source: Option<&str>,
+        request_dispatch_admission: Option<crate::RequestDispatchAdmission>,
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        let mut req = self.build_main_request(
+            model,
+            profile,
+            system,
+            messages,
+            tools,
+            true,
+            None,
+            skip_global_cache_for_system_prompt,
+            prompt_cache_query_source(query_source),
+        )?;
+        req.set_effort(effort)?;
+        req.set_speed(speed)?;
+        req.execution
+            .set_request_dispatch_admission(request_dispatch_admission);
         self.drive_stream(req).await
     }
 }
@@ -5226,3 +5442,7 @@ mod service_test;
 #[cfg(test)]
 #[path = "service_hosted_retry_test.rs"]
 mod service_hosted_retry_test;
+
+#[cfg(test)]
+#[path = "buffered_stream_test.rs"]
+mod buffered_stream_test;

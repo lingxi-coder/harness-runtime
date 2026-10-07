@@ -222,3 +222,156 @@ mod tests {
         assert_eq!(check(&dir, std::process::id() as i32), Holder::Free);
     }
 }
+
+/// An OS advisory lock remains attached to the open file description. Never
+/// unlink its pathname: doing so would permit another process to lock a new inode.
+pub struct DesktopLease {
+    file: std::fs::File,
+    path: PathBuf,
+}
+static LOCAL_LEASES: once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+impl DesktopLease {
+    pub fn acquire(home: &Path) -> std::io::Result<Self> {
+        use fs2::FileExt;
+        std::fs::create_dir_all(home)?;
+        let path = std::fs::canonicalize(home)?.join("computer-use.atomic.lock");
+        let mut local = LOCAL_LEASES
+            .lock()
+            .map_err(|_| std::io::Error::other("desktop lock poisoned"))?;
+        if local.contains(&path) {
+            return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        file.try_lock_exclusive()?;
+        local.insert(path.clone());
+        Ok(Self { file, path })
+    }
+
+    /// Read only while holding this desktop's exclusive lease. The old empty
+    /// lock file represents generation zero; the inode is never replaced.
+    pub fn generation(&self) -> std::io::Result<u64> {
+        use std::io::{Read, Seek, SeekFrom};
+        if self.file.metadata()?.len() == 0 {
+            return Ok(0);
+        }
+        if self.file.metadata()?.len() != 8 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid desktop generation",
+            ));
+        }
+        let mut file = self.file.try_clone()?;
+        file.seek(SeekFrom::Start(0))?;
+        let mut bytes = [0; 8];
+        file.read_exact(&mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    /// Invalidate observations before input is posted, including partial failures.
+    /// Kernel-visible writes suffice: observations never survive an OS restart.
+    pub fn advance_generation(&self) -> std::io::Result<u64> {
+        use std::io::{Seek, SeekFrom, Write};
+        let next = self
+            .generation()?
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("desktop generation overflow"))?;
+        let mut file = self.file.try_clone()?;
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(&next.to_le_bytes())?;
+        Ok(next)
+    }
+}
+impl Drop for DesktopLease {
+    fn drop(&mut self) {
+        use fs2::FileExt;
+        let _ = FileExt::unlock(&self.file);
+        if let Ok(mut local) = LOCAL_LEASES.lock() {
+            local.remove(&self.path);
+        }
+    }
+}
+
+#[cfg(test)]
+mod atomic_tests {
+    use super::*;
+    #[test]
+    fn same_process_leases_are_exclusive_until_drop() {
+        let home =
+            std::env::temp_dir().join(format!("computer-atomic-local-{}", std::process::id()));
+        let lease = DesktopLease::acquire(&home).unwrap();
+        assert_eq!(
+            DesktopLease::acquire(&home).err().unwrap().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        drop(lease);
+        assert!(DesktopLease::acquire(&home).is_ok());
+    }
+    #[test]
+    fn child_process_holder() {
+        let Some(path) = std::env::var_os("COMPUTER_ATOMIC_TEST_HOME") else {
+            return;
+        };
+        let home = PathBuf::from(path);
+        let lease = DesktopLease::acquire(&home).unwrap();
+        lease.advance_generation().unwrap();
+        std::fs::write(home.join("ready"), "ready").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(10));
+    }
+    #[test]
+    fn another_process_is_excluded_and_crash_releases_lock() {
+        let home =
+            std::env::temp_dir().join(format!("computer-atomic-process-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let _ = std::fs::remove_file(home.join("ready"));
+        let lease = DesktopLease::acquire(&home).unwrap();
+        let generation = lease.generation().unwrap();
+        drop(lease);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "lock::atomic_tests::child_process_holder",
+                "--nocapture",
+            ])
+            .env("COMPUTER_ATOMIC_TEST_HOME", &home)
+            .spawn()
+            .unwrap();
+        for _ in 0..200 {
+            if home.join("ready").exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(home.join("ready").exists(), "child did not claim lock");
+        assert_eq!(
+            DesktopLease::acquire(&home).err().unwrap().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        let lease = DesktopLease::acquire(&home).unwrap();
+        assert_eq!(lease.generation().unwrap(), generation + 1);
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+    #[test]
+    fn a_new_owner_reads_the_previous_owners_generation() {
+        let scope =
+            std::env::temp_dir().join(format!("computer-generation-lock-{}", std::process::id()));
+        let first = DesktopLease::acquire(&scope).unwrap();
+        let before = first.generation().unwrap();
+        assert_eq!(first.advance_generation().unwrap(), before + 1);
+        drop(first);
+        let peer = DesktopLease::acquire(&scope).unwrap();
+        assert_eq!(peer.generation().unwrap(), before + 1);
+        assert_eq!(peer.advance_generation().unwrap(), before + 2);
+    }
+}

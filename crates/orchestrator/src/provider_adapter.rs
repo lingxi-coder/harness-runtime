@@ -99,20 +99,27 @@ impl ProviderApiAdapter {
         tools: Vec<serde_json::Value>,
         max_tokens: Option<u32>,
     ) -> Result<llm_runtime::LlmRequest, LlmError> {
-        self.service.build_side_query_request_with_thinking(
+        let route = crate::query_model::current();
+        if let Some(route) = route.as_ref() {
+            settings.model.clone_from(&route.model);
+        }
+        let profile = route
+            .as_ref()
+            .map_or(Some(settings.provider.as_str()), |route| {
+                route.profile.as_deref()
+            });
+        let mut request = llm_runtime::MessagesCreateRequest::new(
             &settings.model,
-            Some(&settings.provider),
-            system,
+            profile,
+            system.cloned(),
             messages,
             tools,
-            max_tokens,
-            None,
-            Vec::new(),
-            Some(settings.thinking),
-            settings.effort,
-            None,
-            Some("scheduled_task"),
-        )
+        );
+        request.opts.max_output_tokens = max_tokens;
+        request.opts.skip_global_cache_for_system_prompt = skip_global_cache_for_system_prompt;
+        request.opts.query_source = Some("scheduled_task".into());
+        self.service
+            .build_scheduled_request(request, settings.thinking, settings.effort)
     }
 
     /// Return the most recently observed rate-limit header snapshot (the internal
@@ -502,6 +509,27 @@ impl OrchestratorApiClient for ProviderApiAdapter {
 
     async fn close_responses_websocket_session(&self) -> Result<(), LlmError> {
         self.service.close_responses_websocket_session().await
+    }
+
+    fn native_computer_provider(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Option<lingxi_llm_client::protocol::computer::NativeComputerProvider> {
+        use lingxi_llm_client::protocol::{ProtocolFamily, computer::NativeComputerProvider};
+        match self.service.protocol_for_model(model, profile).ok()? {
+            ProtocolFamily::OpenAiResponses => Some(NativeComputerProvider::OpenAi),
+            ProtocolFamily::AnthropicMessages => Some(NativeComputerProvider::Anthropic),
+            ProtocolFamily::GeminiInteractions => Some(NativeComputerProvider::Gemini),
+            _ => None,
+        }
+    }
+
+    async fn messages_create_buffered_stream(
+        &self,
+        request: llm_runtime::MessagesCreateRequest,
+    ) -> Result<HistoryResponse, LlmError> {
+        self.service.messages_create_buffered_stream(request).await
     }
 }
 

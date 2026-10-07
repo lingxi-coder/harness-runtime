@@ -385,6 +385,163 @@ impl ModelRuntime {
             }
             owned = Some(r);
         }
+
+        let mut computer_binding = None;
+        let interactions = effective_protocol == ProtocolFamily::GeminiInteractions;
+        if request.execution.computer_request || interactions {
+            let credential = authenticator.captured_credential().await?;
+            let account_required = interactions
+                || request.execution.computer_native
+                || request.input.continuation.is_some()
+                || request.execution.expected_computer_binding.is_some()
+                || request.execution.computer_submission.is_some();
+            if credential.is_some() || account_required {
+                let account_scope = crate::computer::credential_account_scope(credential.as_ref())?;
+                if request
+                    .input
+                    .continuation
+                    .as_ref()
+                    .is_some_and(|reference| reference.account_scope != account_scope)
+                {
+                    return Err(LlmError::InvalidRequest {
+                        message:
+                            "native computer continuation belongs to a different captured account"
+                                .into(),
+                    });
+                }
+                let binding = lingxi_core::host::NativeContinuationBinding {
+                    account: account_scope.clone(),
+                    profile: resolved_route.profile_name.clone(),
+                    model: resolved_route.request_model.clone(),
+                    endpoint: lingxi_llm_client::files::provider_file_endpoint_fingerprint(
+                        &entry.base_url,
+                    ),
+                    protocol: serde_json::to_value(effective_protocol)
+                        .map_err(|error| LlmError::InvalidRequest {
+                            message: error.to_string(),
+                        })?
+                        .as_str()
+                        .expect("protocol serializes as string")
+                        .into(),
+                };
+                if request
+                    .execution
+                    .expected_computer_binding
+                    .as_ref()
+                    .is_some_and(|expected| expected != &binding)
+                {
+                    return Err(LlmError::InvalidRequest { message: "native computer receipt does not match the current account, profile, model, endpoint or protocol".into() });
+                }
+                if request.execution.computer_request {
+                    computer_binding = Some(binding);
+                }
+                owned
+                    .get_or_insert_with(|| request.clone())
+                    .execution
+                    .account_scope = Some(account_scope);
+            }
+        }
+
+        let mut prepared_prompt_cache = None;
+        if let Some(context) = request.execution.prompt_cache.as_ref() {
+            use lingxi_llm_client::providers::anthropic::system_prompt::{
+                project_system_prompt, PromptCacheSubscriberState,
+            };
+
+            // The logical request may have been assembled before an account
+            // change. Read the live Host generation immediately before the
+            // request-scoped credential await, then again afterward. A stable
+            // pair binds this call to the current account; a changed pair
+            // keeps the earlier epoch so late responses cannot be attributed
+            // to the new account using credential material captured mid-swap.
+            let account_epoch_before = (context.current_account_epoch)();
+            let subscriber = if context.native_bare_mode {
+                PromptCacheSubscriberState::NotSubscriber
+            } else if context.native_unix_socket {
+                // Native resolves this path directly from the OAuth token env;
+                // the selected Host credential scope does not prove that source.
+                PromptCacheSubscriberState::Unknown
+            } else if resolved_route.provider_id == ProviderId::AnthropicFirstParty
+                && effective_protocol == ProtocolFamily::AnthropicMessages
+                && entry.auth == AuthStrategy::OAuthBearer
+                && entry.base_url.trim_end_matches('/') == "https://api.anthropic.com"
+            {
+                let selected_credential = authenticator.captured_credential().await?;
+                match selected_credential.as_ref() {
+                    Some(Credential::AnthropicOAuth {
+                        access_token,
+                        scopes,
+                    }) if !access_token.is_empty()
+                        && lingxi_llm_client::auth::oauth::anthropic::subscription_from_scopes(
+                            scopes,
+                        ) =>
+                    {
+                        PromptCacheSubscriberState::Subscriber
+                    }
+                    Some(Credential::AnthropicOAuth { .. }) | Some(_) | None => {
+                        PromptCacheSubscriberState::NotSubscriber
+                    }
+                }
+            } else if matches!(
+                resolved_route.provider_id,
+                ProviderId::Custom { .. } | ProviderId::OpenAICompatible { .. }
+            ) || (resolved_route.provider_id == ProviderId::AnthropicFirstParty
+                && effective_protocol == ProtocolFamily::AnthropicMessages
+                && entry.auth == AuthStrategy::OAuthBearer)
+            {
+                PromptCacheSubscriberState::Unknown
+            } else {
+                PromptCacheSubscriberState::NotSubscriber
+            };
+            let account_epoch_after = (context.current_account_epoch)();
+            let account_epoch_stale = account_epoch_before != account_epoch_after;
+            let account_epoch = if account_epoch_stale {
+                account_epoch_before
+            } else {
+                account_epoch_after
+            };
+            let is_subscriber = subscriber == PromptCacheSubscriberState::Subscriber;
+            let mut cache_policy = context.policy.clone();
+            cache_policy.prompt_cache_ttl_inputs.subscriber = subscriber;
+            cache_policy.prompt_cache_ttl_inputs.is_using_overage = is_subscriber
+                && !account_epoch_stale
+                && (context.overage_for_scope)(&prompt_cache_scope, account_epoch);
+
+            let request_for_encoding = owned.get_or_insert_with(|| request.clone());
+            request_for_encoding.input.system.clear();
+            if let Some(system) = context.system.as_ref() {
+                let projection = project_system_prompt(
+                    system,
+                    Some(&entry.profile),
+                    &request.input.model,
+                    effective_protocol,
+                    cache_policy,
+                );
+                request_for_encoding.input.system =
+                    projection.iter().map(|item| item.block.clone()).collect();
+                request_for_encoding.input.prompt_cache.breakpoints.extend(
+                    projection
+                        .into_iter()
+                        .filter_map(|item| item.cache_breakpoint),
+                );
+            }
+            let caching_enabled =
+                lingxi_llm_client::providers::anthropic::system_prompt::prompt_caching_enabled(
+                    &request.input.model,
+                    effective_protocol,
+                );
+            lingxi_llm_client::providers::anthropic::system_prompt::apply_last_message_breakpoint(
+                &mut request_for_encoding.input,
+                caching_enabled,
+            );
+            prepared_prompt_cache = Some(PreparedPromptCacheContext {
+                scope: prompt_cache_scope.clone(),
+                account_epoch,
+                account_epoch_stale,
+                is_subscriber,
+                pending_overage: context.pending_overage.clone(),
+            });
+        }
         let request = owned.as_ref().unwrap_or(request);
 
         validate_capabilities(request, resolved_route.capabilities)?;
@@ -442,6 +599,34 @@ impl ModelRuntime {
         }
 
         Ok(PreparedLlmCall {
+            computer_binding,
+            computer_submission: request.execution.computer_submission.clone(),
+            server_fallback_lane: None,
+            server_fallback: request.execution.server_fallback.clone(),
+            server_fallback_betas: request
+                .execution
+                .thinking_recovery_scope
+                .as_ref()
+                .map(|scope| {
+                    scope.server_fallback_betas(
+                        &resolved_route.provider_id,
+                        &resolved_route.profile_name,
+                        effective_protocol,
+                    )
+                })
+                .unwrap_or_default(),
+            refusal_fallback_context: request.execution.refusal_fallback_context.clone(),
+            prompt_cache: prepared_prompt_cache,
+            thinking_display_probe: Default::default(),
+            computed_beta_headers: Vec::new(),
+            beta_rejection_state: request
+                .execution
+                .thinking_recovery_scope
+                .as_ref()
+                .map(|scope| scope.beta_rejections())
+                .unwrap_or_default(),
+            authenticator,
+            fast_account_binding: None,
             host_failure,
             wire_draft: Some(wire_draft),
             wire_call: None,
@@ -472,6 +657,7 @@ impl ModelRuntime {
             )
             .await?;
         self.seal_prepared(&mut prepared).await?;
+        prepared.before_computer_submit().await?;
         let call = prepared.wire_call.take().expect("sealed");
         let raw = transport.clone();
         let collected = call
@@ -507,6 +693,7 @@ impl ModelRuntime {
             )
             .await?;
         self.seal_prepared(&mut prepared).await?;
+        prepared.before_computer_submit().await?;
         let call = prepared.wire_call.take().expect("sealed");
         let received = call
             .dispatch_once_using(transport.as_ref(), || Ok(()))
@@ -665,6 +852,7 @@ impl ModelRuntime {
             .seal()
             .await
             .map_err(|error| crate::execution::restore_error(error, &prepared.host_failure))?;
+        prepared.before_computer_submit().await?;
         let received = if websocket {
             session
                 .dispatch_using(call, || Ok(()), Some(raw.as_ref()))
@@ -997,6 +1185,34 @@ fn validate_provider_profile(provider: &crate::ProviderProfile) -> Result<(), Ll
 }
 
 pub struct PreparedLlmCall {
+    pub(crate) computer_binding: Option<lingxi_core::host::NativeContinuationBinding>,
+    pub(crate) computer_submission: Option<Arc<crate::computer::ComputerReceiptSubmission>>,
+    pub(crate) server_fallback_lane:
+        Option<lingxi_llm_client::providers::anthropic::fallback_request::ServerLane>,
+    pub(crate) server_fallback:
+        Option<lingxi_llm_client::providers::anthropic::fallback_request::RequestPolicy>,
+    pub(crate) server_fallback_betas:
+        lingxi_llm_client::providers::anthropic::fallback_request::ServerBetaState,
+    pub(crate) refusal_fallback_context:
+        Option<lingxi_core::host::refusal_driver::FallbackTargetContext>,
+    /// Selected credential scope, subscriber fact and account generation used
+    /// by the late prompt projection for response observations.
+    pub(crate) prompt_cache: Option<PreparedPromptCacheContext>,
+    pub(crate) thinking_display_probe:
+        lingxi_llm_client::providers::anthropic::thinking_display::DisplayProbe,
+    pub(crate) computed_beta_headers: Vec<String>,
+    pub(crate) beta_rejection_state:
+        lingxi_llm_client::providers::anthropic::beta_repair::ConversationBetaState,
+    pub(crate) authenticator: Arc<crate::execution::HostAuthenticator>,
+    pub(crate) fast_account_binding: Option<crate::model::fast_admission::Binding>,
+    /// Native Fast admission captured before SDK validation and credential work.
+    pub(crate) fast_mode_allowed: bool,
+    pub(crate) effort_policy:
+        Option<lingxi_llm_client::providers::anthropic::request_policy::AnthropicEffortPolicy>,
+    pub(crate) anthropic_request_kind:
+        lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind,
+    pub(crate) stream_fallback: bool,
+    pub(crate) extra_body: Option<serde_json::Map<String, serde_json::Value>>,
     pub(crate) host_failure: crate::execution::HostFailure,
     pub(crate) wire_draft: Option<lingxi_llm_client::RequestDraft>,
     pub(crate) wire_call: Option<lingxi_llm_client::PreparedCall>,
@@ -1245,13 +1461,25 @@ impl ModelRuntime {
             .ok_or_else(|| LlmError::InvalidRequest {
                 message: "request must be sealed before dispatch".into(),
             })?;
-        let mark = || on_dispatch().map_err(crate::execution::wire_error);
+        let mut callback_rejected = false;
+        let mark = || {
+            on_dispatch().map_err(|error| {
+                callback_rejected = true;
+                crate::execution::wire_error(error)
+            })
+        };
+        prepared.before_computer_submit().await?;
         let received = if websocket {
             session.dispatch(call, mark).await
         } else {
             call.dispatch_once_with(mark).await
+        };
+        if callback_rejected {
+            if let Some(submission) = prepared.computer_submission.as_ref() {
+                submission.not_submitted().await?;
+            }
         }
-        .map_err(crate::upstream::error)?;
+        let received = received.map_err(crate::upstream::error)?;
         Ok((prepared, received))
     }
 }
@@ -1326,6 +1554,12 @@ impl PreparedLlmCall {
                 )
                 .ok()
             })
+    }
+    pub(crate) async fn before_computer_submit(&self) -> Result<(), LlmError> {
+        if let Some(submission) = self.computer_submission.as_ref() {
+            submission.before_submit().await?;
+        }
+        Ok(())
     }
 }
 

@@ -94,6 +94,8 @@ impl ConversationOrchestrator {
             prompt_runtime: PromptRuntime::new(),
             compaction_runtime: CompactionRuntime::new(),
             lifecycle_runtime: LifecycleRuntime::new(),
+            computer_runtime: crate::native_computer::ComputerRuntime::default(),
+            tool_execution_journal: None,
             model_runtime: ModelRuntime::new(
                 current_effort,
                 current_reasoning_selection,

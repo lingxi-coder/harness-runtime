@@ -470,13 +470,9 @@ impl SideQueryClient for ProviderSideQueryClient {
 
         let query_source = request.query_source.as_str().to_string();
         let family = client.protocol_for_model(&request.model, request.profile.as_deref())?;
-        let (input, overrides) = llm_runtime::convert::history_input(
-            &request.model,
-            &messages,
-            &system,
-            &tools,
-            family,
-        )?;
+        let (input, overrides) = llm_runtime::computer::without_computer_request(|| {
+            llm_runtime::convert::history_input(&request.model, &messages, &system, &tools, family)
+        })?;
         let mut llm_req = LlmRequest {
             input,
             profile: request.profile,
@@ -584,13 +580,15 @@ impl SideQueryClient for ProviderSideQueryClient {
                 let family = client
                     .protocol_for_model(&request.model, request.profile.as_deref())
                     .map_err(map_structured_llm_error)?;
-                let (input, overrides) = llm_runtime::convert::history_input(
-                    &request.model,
-                    &messages,
-                    &system,
-                    &[],
-                    family,
-                )
+                let (input, overrides) = llm_runtime::computer::without_computer_request(|| {
+                    llm_runtime::convert::history_input(
+                        &request.model,
+                        &messages,
+                        &system,
+                        &[],
+                        family,
+                    )
+                })
                 .map_err(map_structured_llm_error)?;
                 let mut llm_req = LlmRequest {
                     input,
@@ -2156,3 +2154,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "computer_scope_tests.rs"]
+mod computer_scope_tests;

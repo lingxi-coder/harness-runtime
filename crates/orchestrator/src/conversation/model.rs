@@ -478,7 +478,7 @@ impl ConversationOrchestrator {
     /// the turn's last assistant block uuid when the id is missing (a
     /// defensive, in-practice-unreachable branch), and writing a uuid that is
     /// not the tool_use's own line would be worse than omitting the key.
-    pub(super) async fn take_source_tool_assistant_uuid(
+    pub(crate) async fn take_source_tool_assistant_uuid(
         &self,
         msg: &ConversationMessage,
     ) -> Option<String> {
