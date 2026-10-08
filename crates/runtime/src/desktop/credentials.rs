@@ -8,21 +8,83 @@ use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
 use platform_posix::{PosixClock, PosixHttp, PosixRuntime};
 #[cfg(windows)]
-use platform_windows::process::supervisor as shell_supervisor;
-#[cfg(windows)]
 use platform_windows::WindowsMcpTransport;
+#[cfg(windows)]
+use platform_windows::process::supervisor as shell_supervisor;
 use secret::CredentialManager;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub(crate) struct SubscriptionRefreshGeneration {
+    state: std::sync::Mutex<SubscriptionRefreshState>,
+}
+
+struct SubscriptionRefreshState {
+    epoch: u64,
+    slot: lingxi_core::host::subscription::SharedSubscription,
+}
+
+impl SubscriptionRefreshGeneration {
+    fn new(slot: lingxi_core::host::subscription::SharedSubscription) -> Self {
+        Self {
+            state: std::sync::Mutex::new(SubscriptionRefreshState { epoch: 0, slot }),
+        }
+    }
+
+    fn epoch(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .epoch
+    }
+
+    fn is_current(&self, epoch: u64) -> bool {
+        self.epoch() == epoch
+    }
+
+    fn publish_if_current(
+        &self,
+        epoch: u64,
+        snapshot: lingxi_core::host::subscription::SubscriptionSnapshot,
+    ) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.epoch != epoch {
+            return false;
+        }
+        let mut slot = state
+            .slot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(snapshot);
+        true
+    }
+}
+
+impl lingxi_core::host::auth::AccountChangeObserver for SubscriptionRefreshGeneration {
+    fn account_changed(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.epoch = state.epoch.wrapping_add(1);
+        let mut slot = state
+            .slot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(lingxi_core::host::subscription::SubscriptionSnapshot::default());
+    }
+}
+
 use super::{
-    anthropic_models_for, api_provider, connected_provider_fallback, desktop_fusion_catalog_row,
-    filter_fusion_catalog, fusion_route_flag, load_effective_settings_for_config,
-    managed_model_policy_source, managed_model_setting_for_config, model_provenance_for_config,
-    provider_profile_label, register_fusion_catalog_refresher, subscription_seed,
-    subscription_snapshot_from, ApiProvider, BuildError, DefaultModelFallbackNotice, DesktopConfig,
-    FusionCatalogClearingAuth, FusionCatalogModelSource, FusionCatalogRefresher,
-    FusionCatalogRegistry,
+    ApiProvider, BuildError, DefaultModelFallbackNotice, DesktopConfig, FusionCatalogClearingAuth,
+    FusionCatalogModelSource, FusionCatalogRefresher, FusionCatalogRegistry, anthropic_models_for,
+    api_provider, connected_provider_fallback, desktop_fusion_catalog_row, filter_fusion_catalog,
+    fusion_route_flag, load_effective_settings_for_config, managed_model_policy_source,
+    managed_model_setting_for_config, model_provenance_for_config, provider_profile_label,
+    register_fusion_catalog_refresher, subscription_seed, subscription_snapshot_from,
 };
 
 /// Desktop [`ClaudeAiAuthProvider`](tool_cron::ClaudeAiAuthProvider) backed by
@@ -104,6 +166,9 @@ pub struct LlmStack {
     pub auth: Arc<dyn AuthHandle>,
     /// See [`build`] for the resolution rules behind `subscription`.
     pub subscription: lingxi_core::host::subscription::SharedSubscription,
+    /// Generation guard owned with the auth root while startup profile refresh
+    /// work is in flight. The API service keeps this observer alive.
+    pub(crate) subscription_refresh_generation: Arc<SubscriptionRefreshGeneration>,
     /// See [`build`] for the resolution rules behind `resolved_anthropic_api_key`.
     pub resolved_anthropic_api_key: Option<String>,
     /// See [`build`] for the resolution rules behind `is_subscriber`.
@@ -139,8 +204,6 @@ pub struct LlmStack {
     pub default_model_id: String,
     /// See [`build`] for the resolution rules behind `default_model_profile`.
     pub default_model_profile: Option<String>,
-    /// See [`build`] for the resolution rules behind `profile_first_party`.
-    pub profile_first_party: std::collections::BTreeMap<String, bool>,
     /// Claude auto-mode provider tag for each configured profile.
     pub profile_auto_mode_provider: std::collections::BTreeMap<String, String>,
     /// Provider tag applied to the built-in Anthropic profile after env routing.
@@ -156,12 +219,14 @@ pub struct LlmStack {
         Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
     /// See [`build`] for the resolution rules behind `model_setting_for_spawns`.
     pub model_setting_for_spawns: String,
-    /// See [`build`] for the resolution rules behind `session_provider_first_party`.
-    pub session_provider_first_party: bool,
     /// Resolved provider tag for the session's boot auto-mode gate.
     pub session_auto_mode_provider: String,
     /// See [`build`] for the resolution rules behind `llm_runtime`.
     pub llm_runtime: Arc<ModelRuntime>,
+    /// Shared route-context provider used by Agent and direct teammate model
+    /// postprocessing. It resolves against the same configured ModelRuntime.
+    pub model_resolution_context_provider:
+        Arc<dyn agent::model_resolution::ModelResolutionContextProvider>,
     /// See [`build`] for the resolution rules behind `llm_transport`.
     pub llm_transport: Arc<dyn Transport>,
     /// See [`build`] for the resolution rules behind `cost_estimator`.
@@ -393,9 +458,9 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     );
     // Defer client construction to step 3.1 where we know whether OAuth is
     // active (determines auth strategy + credential config). Placeholder: the
-    // resolved OAuth `AuthState` (`Some` only for an OAuth-effective subscriber
-    // session) that step (2) bridges into the assembled client's credential
-    // seam as an `oauth_delegate`.
+    // resolved OAuth `AuthState` that step (2) bridges into the credential seam
+    // as an `oauth_delegate`. Status retains this source even when the model
+    // uses an API key.
     let mut oauth_auth_state: Option<Arc<llm_runtime::auth::anthropic::refresh::AuthState>> = None;
     let mut openai_oauth_state: Option<Arc<openai_oauth::AuthState>> = None;
     // (3) Credential manager + OAuth client (used by /login, /logout).
@@ -409,6 +474,8 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         std::sync::Arc::new(std::sync::RwLock::new(Some(
             lingxi_core::host::subscription::SubscriptionSnapshot::default(),
         )));
+    let subscription_refresh_generation =
+        Arc::new(SubscriptionRefreshGeneration::new(subscription.clone()));
     // `mcp_oauth_storage` and `credentials` originate from the same shared
     // stack, so provider keys and MCP OAuth never split across backends.
     // (M13) Track WHERE the key came from — the auth resolver ranks an
@@ -437,6 +504,9 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         credentials.clone(),
         clock.clone(),
     ));
+    let subscription_observer: Arc<dyn lingxi_core::host::auth::AccountChangeObserver> =
+        subscription_refresh_generation.clone();
+    auth.register_account_change_observer(Arc::downgrade(&subscription_observer));
 
     // (3.1) M5-13 / Task 10: build the OAuth refresh driver when the keychain
     //        already holds a logged-in OAuth token.  `init_refresh_driver` spawns
@@ -456,8 +526,65 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     // OAuth credential.
     let mut credential_origin = orchestrator::api_error_copy::CredentialOrigin::Other;
     let mut has_oauth_token = false;
-    match credentials.get_oauth_tokens().await {
+    let environment_oauth =
+        llm_runtime::auth::anthropic::environment::EnvironmentOAuthCredentialProvider::capture();
+    let environment_oauth_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>>;
+    if let Some(environment) = environment_oauth.as_ref() {
+        let auth_source = llm_runtime::auth::anthropic::resolver::resolve(
+            &llm_runtime::auth::anthropic::resolver::ResolverContext {
+                managed_oauth_only: cfg.managed_oauth_only
+                    || llm_runtime::auth::anthropic::resolver::host_managed_oauth_only(),
+                env_auth_token: std::env::var("ANTHROPIC_AUTH_TOKEN")
+                    .ok()
+                    .filter(|value| !value.is_empty()),
+                env_api_key: (!stored_anthropic_api_key)
+                    .then(|| resolved_anthropic_api_key.clone())
+                    .flatten(),
+                fd_present: cfg.anthropic_key_fd_present,
+                has_stored_oauth: true,
+                has_stored_api_key: stored_anthropic_api_key,
+                settings_api_key: None,
+                api_key_helper_script: cfg.api_key_helper.as_ref().map(std::path::PathBuf::from),
+                aws_present: false,
+            },
+        );
+        has_oauth_token = true;
+        credential_origin = match &auth_source {
+            llm_runtime::auth::anthropic::resolver::AuthSource::EnvApiKey => {
+                orchestrator::api_error_copy::CredentialOrigin::EnvApiKey {
+                    var: "ANTHROPIC_API_KEY".to_string(),
+                }
+            }
+            llm_runtime::auth::anthropic::resolver::AuthSource::ApiKeyHelper { .. } => {
+                orchestrator::api_error_copy::CredentialOrigin::ApiKeyHelper
+            }
+            _ => orchestrator::api_error_copy::CredentialOrigin::Other,
+        };
+        let seed = subscription_seed(
+            &auth_source,
+            environment.scopes(),
+            environment.subscription_type.as_ref(),
+            environment.rate_limit_tier.as_ref(),
+        );
+        is_subscriber = seed.is_subscriber;
+        persisted_subscription_type.clone_from(&seed.subscription_type);
+        if let Ok(mut slot) = subscription.write() {
+            *slot = Some(seed);
+        }
+    }
+    // Native vK returns environmental material without consulting stored OAuth.
+    let stored_oauth = if environment_oauth.is_some() {
+        Ok(None)
+    } else {
+        credentials.get_oauth_tokens().await
+    };
+    environment_oauth_delegate = environment_oauth
+        .map(|provider| Arc::new(provider) as Arc<dyn llm_runtime::CredentialProvider>);
+    match stored_oauth {
         Ok(Some(tokens)) => {
+            let captured_subscription_epoch = subscription_refresh_generation.epoch();
+            let subscription_account_org = tokens.org_id.clone();
+            let subscription_account_email = tokens.email.clone();
             // (M13) Drive the documented auth-source resolver with the full
             // context instead of a hand-rolled two-flag exclusion: HOST-forced
             // OAuth makes the stored session the effective auth EVEN with an
@@ -547,6 +674,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                 tokens.access_token,
                 tokens.refresh_token,
                 tokens.expires_at,
+                tokens.scopes,
                 llm_transport.clone(),
                 clock.clone(),
                 Some(Arc::new(telemetry::AnalyticsBus::new())),
@@ -556,13 +684,11 @@ pub(super) async fn resolve_llm_stack_with_credentials(
             .await
             {
                 Ok(auth_state) => {
-                    // Task 10: capture the OAuth `AuthState` so the assembled
-                    // client gets an `OAuthBearer` credential delegate below.
-                    // Only active when the subscriber flag confirms OAuth is the
-                    // effective auth source (API-key overrides it).
+                    // Keep the OAuth state available to independent status
+                    // queries. Subscriber admission below still controls the
+                    // model's OAuth strategy and profile background fetch.
+                    oauth_auth_state = Some(auth_state);
                     if is_subscriber {
-                        oauth_auth_state = Some(auth_state);
-
                         // Task 4: background OAuth profile + roles fetch — the
                         // FRESHENER over the persisted-tier seed above (closes
                         // the RENDERING half of the profile-fetch PARITY-GAP
@@ -585,7 +711,10 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                         // exposed (`expose_secret`) only into the two fetch
                         // calls and never logged or formatted.
                         {
-                            let slot = subscription.clone();
+                            let refresh_generation = subscription_refresh_generation.clone();
+                            let captured_epoch = captured_subscription_epoch;
+                            let expected_org_id = subscription_account_org;
+                            let expected_email = subscription_account_email;
                             let transport: Arc<dyn Transport> = llm_transport.clone();
                             let creds = credentials.clone();
                             // Move (not copy) the token into the task — its
@@ -612,21 +741,30 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                                     Some(&profile),
                                     roles.as_ref(),
                                 );
+                                if !refresh_generation.is_current(captured_epoch) {
+                                    return;
+                                }
                                 // (M13) Freshen the persisted tier too, so
                                 // pre-M13 logins self-heal and the NEXT boot
                                 // seeds from up-to-date values. `new ?? old`
                                 // merge — never clears a stored tier.
-                                if let Err(error) = creds
-                                    .update_oauth_subscription(
+                                match creds
+                                    .update_oauth_subscription_for_account(
+                                        &expected_org_id,
+                                        &expected_email,
                                         snap.subscription_type.as_deref(),
                                         snap.rate_limit_tier.as_deref(),
                                     )
                                     .await
                                 {
-                                    tracing::warn!(%error, "could not persist freshened subscription tier");
+                                    Ok(true) => {}
+                                    Ok(false) => return,
+                                    Err(error) => {
+                                        tracing::warn!(%error, "could not persist freshened subscription tier")
+                                    }
                                 }
-                                if let Ok(mut guard) = slot.write() {
-                                    *guard = Some(snap);
+                                if !refresh_generation.publish_if_current(captured_epoch, snap) {
+                                    return;
                                 }
                             });
                         }
@@ -750,20 +888,23 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     //       dep. A bad settings entry only emits a warning — the engine still boots
     //       with every well-formed profile (incl. the built-in Anthropic one).
     let has_api_key = resolved_anthropic_api_key.is_some();
-    // OAuth bridges into the client exactly when the auth RESOLVER made the
-    // stored session the effective source (M13): `oauth_auth_state` is only
-    // captured for an OAuth-effective subscriber session, which outranks a
+    // Model OAuth is selected when the auth resolver made the stored session
+    // the effective source (M13). Independent status OAuth remains available
+    // even when a model API key wins. Effective subscriber OAuth outranks a
     // keychain-stored key and — under HOST forcing (`KWr()` @228931361) — even
     // an env key. `has_oauth` selects `AuthStrategy::OAuthBearer`, which
     // is what injects the required `oauth-2025-04-20` beta on Anthropic routes;
     // the assemble input below drops the key claim when OAuth is effective so
     // the ApiKey strategy can't shadow it.
-    let has_oauth = oauth_auth_state.is_some();
+    let has_oauth =
+        is_subscriber && (oauth_auth_state.is_some() || environment_oauth_delegate.is_some());
     let oauth_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>> =
-        oauth_auth_state.clone().map(|state| {
-            let driver = Arc::new(RefreshDriver::new(state));
-            Arc::new(OAuthCredentialProvider::new(driver))
-                as Arc<dyn llm_runtime::CredentialProvider>
+        environment_oauth_delegate.or_else(|| {
+            oauth_auth_state.clone().map(|state| {
+                let driver = Arc::new(RefreshDriver::new(state));
+                Arc::new(OAuthCredentialProvider::new(driver))
+                    as Arc<dyn llm_runtime::CredentialProvider>
+            })
         });
 
     let provider_region = match effective_settings_for_model
@@ -792,29 +933,37 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         tracing::warn!(warning = %w, "provider-config assembly");
     }
 
-    // (Phase 2a I1/I2) Authoritative `request_model -> (profile_name,
-    // provider_label)` map for the `/model` picker, built from the assembled
-    // multi-provider config BEFORE `client_config` is consumed by `from_config`.
-    // Every profile (anthropic + presets + USER providers) contributes its
-    // `models[].request_model`. First-profile-wins on a duplicate request_model
-    // (anthropic + presets come before user profiles in `assemble`).
-    let mut model_providers: std::collections::BTreeMap<String, (String, String)> =
+    // Model-id lookup is used only when there is exactly one configured
+    // profile. Duplicate ids are left unqualified; the actual ModelRuntime
+    // resolver below reports ambiguity instead of first/last-profile guessing.
+    let mut model_provider_matches: std::collections::BTreeMap<String, Vec<(String, String)>> =
         std::collections::BTreeMap::new();
     for profile in &assembled.client_config.providers {
         let label = provider_profile_label(&profile.profile_name);
         for model in &profile.models {
-            model_providers
+            let matches = model_provider_matches
                 .entry(model.request_model.clone())
-                .or_insert_with(|| (profile.profile_name.clone(), label.clone()));
+                .or_default();
+            let candidate = (profile.profile_name.clone(), label.clone());
+            if !matches.contains(&candidate) {
+                matches.push(candidate);
+            }
         }
     }
+    let model_providers = model_provider_matches
+        .into_iter()
+        .filter_map(|(model, matches)| (matches.len() == 1).then(|| (model, matches[0].clone())))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let fusion_catalog = assembled
         .client_config
         .providers
         .iter()
         .flat_map(|provider| {
+            // Keep absent mode distinct from an explicit Unknown override;
+            // the Fusion projection only applies a subscription hint when a
+            // real source resolved the owning profile as Subscription.
             let billing_mode = provider.pricing.billing_mode;
-            let protocol = provider.protocol.clone();
+            let protocol = provider.protocol;
             provider.models.iter().map(move |model| {
                 desktop_fusion_catalog_row(&provider.profile_name, model, billing_mode, &protocol)
             })
@@ -871,13 +1020,25 @@ pub(super) async fn resolve_llm_stack_with_credentials(
             (p.profile_name.clone(), provider.to_string())
         })
         .collect();
-    let profile_first_party = profile_auto_mode_provider
-        .iter()
-        .map(|(profile, provider)| (profile.clone(), provider == "firstParty"))
-        .collect();
-
+    let model_resolution_client_config = assembled.client_config.clone();
     let mut client = ModelRuntime::from_config(assembled.client_config)
         .map_err(|e| BuildError::ApiBase(format!("llm-runtime config: {e}")))?;
+    let model_resolution_context_provider: Arc<
+        dyn agent::model_resolution::ModelResolutionContextProvider,
+    > = Arc::new(
+        crate::model_resolution::RuntimeModelResolutionProvider::new(
+            Arc::new(client.clone()),
+            &model_resolution_client_config,
+        ),
+    );
+
+    // Establish the configured route before fallback or provider policy uses
+    // it. Automatic catalog defaults carry their owning profile; an explicit
+    // duplicate unqualified model is still a startup selection error.
+    let selected_model_context = model_resolution_context_provider
+        .context_for_route(&default_model_id, default_model_profile.as_deref())
+        .map_err(|error| BuildError::ApiBase(format!("default model route: {error}")))?;
+    default_model_profile = selected_model_context.route.profile.clone();
     // §6.1: ONE composite credential slot for ALL providers (anthropic api-key /
     // oauth-delegate + every per-profile credential source).
     let mut oauth_delegates: std::collections::BTreeMap<
@@ -1068,10 +1229,11 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                 if let Some(picked) =
                     allowlist::first_allowed_model(al, &candidates, Some(overrides))
                 {
-                    let picked_profile = default_listings
-                        .iter()
-                        .find(|m| m.request_model == picked)
-                        .map(|m| m.provider_id.clone());
+                    let picked_context = model_resolution_context_provider
+                        .context_for_route(&picked, None)
+                        .map_err(|error| {
+                            BuildError::ApiBase(format!("managed default model route: {error}"))
+                        })?;
                     tracing::warn!(
                         from = %default_model_id,
                         to = %picked,
@@ -1081,7 +1243,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                     model_provenance =
                         lingxi_core::host::ModelProvenance::ManagedAdministratorDefault;
                     default_model_id = picked;
-                    default_model_profile = picked_profile.or(default_model_profile);
+                    default_model_profile = picked_context.route.profile;
                 }
             }
         }
@@ -1092,14 +1254,15 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     // selected provider here makes authorization deterministic at session
     // entry without decrypting every unrelated saved key. Anthropic's resolved
     // auth was already loaded earlier in this build path.
-    let boot_profile = default_model_profile
+    let selected_model_context = model_resolution_context_provider
+        .context_for_route(&default_model_id, default_model_profile.as_deref())
+        .map_err(|error| BuildError::ApiBase(format!("selected model route: {error}")))?;
+    default_model_profile = selected_model_context.route.profile.clone();
+    let boot_profile = selected_model_context
+        .route
+        .profile
         .clone()
-        .or_else(|| {
-            model_providers
-                .get(&default_model_id)
-                .map(|(profile, _)| profile.clone())
-        })
-        .unwrap_or_else(|| "anthropic".to_string());
+        .ok_or_else(|| BuildError::ApiBase("selected model route has no profile".into()))?;
     if boot_profile != "anthropic" {
         if let Some(source) = assembled
             .credential_sources
@@ -1138,33 +1301,24 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         .as_ref()
         .map_or_else(|| configured_model.clone(), |n| n.to.clone());
 
-    // (M10 cc2.1.198) LingXi multi-provider half of the Explore `GAe`/`obm`
-    // firstParty gate: `false` when the session's default model routes to a
-    // NON-Anthropic provider profile (OpenAI/Gemini/…) so the built-in Explore
-    // agent resolves to `inherit` (the opus cap never fires for a foreign
-    // provider — same behavior as the TS `fr() !== "firstParty"` branch). The
-    // env half (Bedrock/Vertex/Foundry) is checked inside
-    // `agent::model_resolution::resolve_builtin_explore_model`. Evaluated over
-    // the POST-fallback default (the model the session actually boots on),
-    // via the `profile_first_party` capture taken before `from_config`.
-    let session_profile_auto_mode_provider = {
-        let profile_name = default_model_profile.clone().or_else(|| {
-            model_providers
-                .get(&default_model_id)
-                .map(|(profile, _)| profile.clone())
-        });
-        match profile_name {
-            // Unknown profile name → the built-in Anthropic route.
-            Some(name) => profile_auto_mode_provider
-                .get(&name)
-                .cloned()
-                .unwrap_or_else(|| "firstParty".to_string()),
-            // No configured profile serves the default model → the built-in
-            // Anthropic route (plain api-key / OAuth install).
-            None => "firstParty".to_string(),
-        }
-    };
-    let session_provider_first_party = session_profile_auto_mode_provider == "firstParty";
+    // Resolve the selected route from the actual ModelRuntime registry after
+    // fallback/managed selection. Provider identity is not inferred from a
+    // first/last profile map or the endpoint URL.
+    let session_profile = selected_model_context
+        .route
+        .profile
+        .as_ref()
+        .ok_or_else(|| BuildError::ApiBase("selected model route has no profile".into()))?;
+    let session_profile_auto_mode_provider = profile_auto_mode_provider
+        .get(session_profile)
+        .cloned()
+        .ok_or_else(|| {
+            BuildError::ApiBase(format!(
+                "selected model profile {session_profile:?} has no provider classification"
+            ))
+        })?;
+    let session_provider_first_party = selected_model_context.route.provider
+        == Some(agent::model_resolution::ModelProviderKind::FirstParty);
     let first_party_environment_provider = match api_provider() {
         ApiProvider::FirstParty => "firstParty",
         ApiProvider::Bedrock => "anthropicAws",
@@ -1193,7 +1347,8 @@ pub(super) async fn resolve_llm_stack_with_credentials(
             .flatten(),
         cfg.api_key_helper.clone(),
         oauth_delegates,
-    );
+    )
+    .with_anthropic_api_key_source(cfg.api_key_source.clone());
     // GitHub Copilot needs a short-lived token minted from the raw OAuth token
     // (api.githubcopilot.com rejects the raw token). Wrap the composite so the
     // `github-copilot` credential is exchanged + cached; every other credential
@@ -1318,6 +1473,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         credentials,
         auth,
         subscription,
+        subscription_refresh_generation,
         resolved_anthropic_api_key,
         is_subscriber,
         openai_oauth_handle,
@@ -1330,7 +1486,6 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         default_listings,
         default_model_id,
         default_model_profile,
-        profile_first_party,
         profile_auto_mode_provider,
         first_party_environment_provider: first_party_environment_provider.to_string(),
         provider_availability,
@@ -1338,9 +1493,9 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         model_provenance,
         session_model_restriction,
         model_setting_for_spawns,
-        session_provider_first_party,
         session_auto_mode_provider,
         llm_runtime,
+        model_resolution_context_provider,
         llm_transport,
         cost_estimator,
         subscriber_state,
@@ -1422,7 +1577,24 @@ pub fn api_service_from_stack(
     )
     .with_subscription(stack.subscription)
     .with_custom_cli_betas(cfg.custom_betas.clone())
-    .with_thinking(cfg.session_thinking);
+    .with_thinking(cfg.session_thinking)
+    .with_effort_table_options(crate::effort_settings::table_options(&cfg.lingxi_home))
+    .with_effort_settings_source({
+        let effort_cfg = cfg.clone();
+        Arc::new(move || {
+            super::load_effective_settings_for_config(
+                &effort_cfg,
+                &managed_settings_raw_tiers_sync(),
+            )
+            .map(|settings| settings.effort_layers)
+            .unwrap_or_default()
+        })
+    })
+    .with_prompt_cache_ttl_settings_source({
+        let cache_cfg = cfg.clone();
+        Arc::new(move || super::prompt_cache_ttl_settings_for_config(&cache_cfg))
+    })
+    .retain_account_change_observer(stack.subscription_refresh_generation.clone());
 
     match aws_auth_refresher(cfg, cwd, analytics_bus) {
         Some(refresher) => service.with_aws_auth(refresher),
@@ -1546,5 +1718,157 @@ pub(super) fn capture_legacy_opening_balance(
         Some((session_id, u64::MAX))
     } else {
         Some((session_id, nanos as u64))
+    }
+}
+
+#[cfg(test)]
+mod subscription_refresh_generation_tests {
+    use super::SubscriptionRefreshGeneration;
+    use lingxi_core::host::auth::AccountChangeObserver;
+    use lingxi_core::host::subscription::{SharedSubscription, SubscriptionSnapshot};
+    use std::sync::{Arc, RwLock};
+
+    #[test]
+    fn account_change_clears_slot_and_rejects_inflight_refresh() {
+        let slot: SharedSubscription = Arc::new(RwLock::new(Some(SubscriptionSnapshot::default())));
+        let generation = SubscriptionRefreshGeneration::new(slot.clone());
+        let captured = generation.epoch();
+
+        generation.account_changed();
+
+        let stale = SubscriptionSnapshot {
+            is_subscriber: true,
+            subscription_type: Some("enterprise".into()),
+            rate_limit_tier: Some("stale".into()),
+            ..SubscriptionSnapshot::default()
+        };
+        assert!(!generation.publish_if_current(captured, stale));
+        assert!(
+            !slot.read().unwrap().as_ref().unwrap().is_subscriber,
+            "an account switch must not fall back to the previous account's subscriber bit"
+        );
+
+        let current = generation.epoch();
+        assert!(generation.publish_if_current(current, SubscriptionSnapshot::default()));
+        assert!(slot.read().unwrap().is_some());
+    }
+}
+
+#[cfg(test)]
+mod catalog_default_route_tests {
+    use super::*;
+    use agent::model_resolution::{
+        ModelResolutionContext, ModelResolutionContextProvider, ModelResolutionError,
+    };
+    use lingxi_core::host::{ModelListing, ModelProvenance};
+
+    fn assembled_catalog() -> llm_runtime::ClientConfig {
+        let default_model = DesktopConfig::default().default_model;
+        provider_config::assemble(provider_config::AssembleInputs {
+            anthropic_api_base: "https://api.anthropic.com".into(),
+            anthropic_models: anthropic_models_for(&default_model, None),
+            anthropic_has_api_key: false,
+            anthropic_has_oauth: false,
+            user_providers: Default::default(),
+            routing: None,
+        })
+        .client_config
+    }
+
+    fn resolve_catalog_reference(
+        config: &llm_runtime::ClientConfig,
+        reference: &str,
+    ) -> Result<ModelResolutionContext, ModelResolutionError> {
+        let listings: Vec<ModelListing> = config
+            .providers
+            .iter()
+            .flat_map(|provider| {
+                provider.models.iter().map(move |model| ModelListing {
+                    request_model: model.request_model.clone(),
+                    display_model: model.display_model.clone(),
+                    provider_id: provider.profile_name.clone(),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let (model, profile) = lingxi_core::host::parse_model_ref(reference, &listings);
+        let runtime = Arc::new(ModelRuntime::from_config(config.clone()).unwrap());
+        crate::model_resolution::RuntimeModelResolutionProvider::new(runtime, config)
+            .context_for_route(&model, profile.as_deref())
+    }
+
+    #[test]
+    fn qualified_catalog_default_registers_only_the_provider_local_model() {
+        let reference = DesktopConfig::default().default_model;
+        let model = lingxi_core::host::provider_default_model("anthropic").unwrap();
+        let native_models = anthropic_models_for(&reference, None);
+        assert!(native_models.iter().any(|entry| entry.request_model == model));
+        assert!(!native_models.iter().any(|entry| entry.request_model == reference));
+    }
+
+    #[test]
+    fn automatic_catalog_default_keeps_its_declared_owner_with_duplicate_ids() {
+        let config = DesktopConfig::default();
+        assert_eq!(
+            model_provenance_for_config(&config, None),
+            ModelProvenance::ProviderCatalogTier,
+        );
+        let mut catalog = assembled_catalog();
+        let default_model = lingxi_core::host::provider_default_model("anthropic").unwrap();
+        let owners: Vec<&str> = catalog
+            .providers
+            .iter()
+            .filter(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .any(|model| model.request_model == default_model)
+            })
+            .map(|provider| provider.profile_name.as_str())
+            .collect();
+        assert!(owners.contains(&"anthropic"));
+        assert!(owners.contains(&"github-copilot"));
+        for _ in 0..2 {
+            let selection = resolve_catalog_reference(&catalog, &config.default_model).unwrap();
+            assert_eq!(selection.route.model, default_model);
+            assert_eq!(selection.route.profile.as_deref(), Some("anthropic"));
+            catalog.providers.reverse();
+        }
+    }
+
+    #[test]
+    fn explicit_bare_duplicate_model_keeps_its_ambiguity_error() {
+        let catalog = assembled_catalog();
+        for env_pinned in [false, true] {
+            let mut config = DesktopConfig::default();
+            config.default_model = lingxi_core::host::provider_default_model("anthropic")
+                .unwrap()
+                .into();
+            config.default_model_explicit = !env_pinned;
+            config.default_model_env_pinned = env_pinned;
+            assert_eq!(
+                model_provenance_for_config(&config, None),
+                ModelProvenance::UserOrEnv,
+            );
+            let error = resolve_catalog_reference(&catalog, &config.default_model).unwrap_err();
+            let ModelResolutionError::AmbiguousRoute { profiles, .. } = error else {
+                panic!("a user-authored bare duplicate must remain ambiguous");
+            };
+            assert!(profiles.iter().any(|profile| profile == "anthropic"));
+            assert!(profiles.iter().any(|profile| profile == "github-copilot"));
+        }
+    }
+
+    #[test]
+    fn explicit_qualified_model_selects_the_requested_owner() {
+        let catalog = assembled_catalog();
+        let model = lingxi_core::host::provider_default_model("anthropic").unwrap();
+        let selected = resolve_catalog_reference(
+            &catalog,
+            &lingxi_core::host::qualified_model_ref(model, Some("github-copilot")),
+        )
+        .unwrap();
+        assert_eq!(selected.route.model, model);
+        assert_eq!(selected.route.profile.as_deref(), Some("github-copilot"));
     }
 }

@@ -5,7 +5,7 @@ use serde_json::json;
 
 #[test]
 fn agent_audit_mentions_require_context_instead_of_keyword_denial() {
-    for tool in ["Agent", "Task"] {
+    for tool in ["Agent"] {
         for term in [
             "dangerously-skip-permissions",
             "bypassPermissions",
@@ -30,7 +30,7 @@ fn agent_audit_mentions_require_context_instead_of_keyword_denial() {
 
 #[test]
 fn agent_permission_requests_are_never_automatically_allowed_by_local_classifier() {
-    for tool in ["Agent", "Task"] {
+    for tool in ["Agent"] {
         for input in [
             json!({"prompt": "Launch an agent with --dangerously-skip-permissions --no-sandbox"}),
             json!({"mode": "bypassPermissions", "prompt": "Inspect the repository"}),
@@ -61,7 +61,7 @@ async fn agent_audit_without_contextual_classifier_requires_user_confirmation() 
     use permission::{policy::PermissionPolicy, policy_gate::PolicyPermissionGate, PermissionMode};
     use std::sync::Arc;
 
-    for tool in ["Agent", "Task"] {
+    for tool in ["Agent"] {
         let gate = PolicyPermissionGate::new(
             Arc::new(PermissionPolicy::new(PermissionMode::Auto)),
             Arc::new(RejectPrompt),
@@ -98,7 +98,7 @@ async fn agent_contextual_verdict_is_preserved_and_pass_still_prompts() {
     use permission::{policy::PermissionPolicy, policy_gate::PolicyPermissionGate, PermissionMode};
     use std::sync::Arc;
 
-    for tool in ["Agent", "Task"] {
+    for tool in ["Agent"] {
         for (verdict, expected) in [
             (
                 AutoModeClassifierVerdict::Allow {

@@ -1,0 +1,113 @@
+{
+  "version": "2.1.286",
+  "sha256": "75e3016e9d2570767b08e43a7467d4817a4f149232c169ca295f2c95fef21433",
+  "sourceByteRanges": [
+    {
+      "signature": "class wvt{",
+      "start": 185125510,
+      "end": 185126390
+    }
+  ],
+  "cases": [
+    {
+      "name": "auto_compact_rolls_full_usage_then_new_context_starts_at_zero",
+      "actions": [
+        {
+          "type": "anchor",
+          "used": 100,
+          "expectedUsed": 0
+        },
+        {
+          "type": "usage",
+          "used": 1000,
+          "expectedUsed": 900
+        },
+        {
+          "type": "rollover",
+          "used": 1000,
+          "expectedUsed": 900
+        },
+        {
+          "type": "usage",
+          "used": 0,
+          "expectedUsed": 900
+        },
+        {
+          "type": "usage",
+          "used": 200,
+          "expectedUsed": 1100
+        }
+      ]
+    },
+    {
+      "name": "clear_retains_root_ledger_until_next_user_reanchor",
+      "actions": [
+        {
+          "type": "anchor",
+          "used": 100,
+          "expectedUsed": 0
+        },
+        {
+          "type": "usage",
+          "used": 1000,
+          "expectedUsed": 900
+        },
+        {
+          "type": "rollover",
+          "used": 1000,
+          "expectedUsed": 900
+        },
+        {
+          "type": "usage",
+          "used": 0,
+          "expectedUsed": 900
+        },
+        {
+          "type": "usage",
+          "used": 50,
+          "expectedUsed": 950
+        },
+        {
+          "type": "anchor",
+          "used": 50,
+          "expectedUsed": 0
+        },
+        {
+          "type": "usage",
+          "used": 50,
+          "expectedUsed": 0
+        },
+        {
+          "type": "usage",
+          "used": 90,
+          "expectedUsed": 40
+        }
+      ]
+    },
+    {
+      "name": "manual_compact_has_no_rollover_high_water_mark_stays",
+      "actions": [
+        {
+          "type": "anchor",
+          "used": 100,
+          "expectedUsed": 0
+        },
+        {
+          "type": "usage",
+          "used": 1000,
+          "expectedUsed": 900
+        },
+        {
+          "type": "usage",
+          "used": 0,
+          "expectedUsed": 900
+        },
+        {
+          "type": "usage",
+          "used": 200,
+          "expectedUsed": 900
+        }
+      ]
+    }
+  ]
+}

@@ -18,6 +18,198 @@
 
 use serde_json::Value;
 
+/// Tool-aware media projection shared by the main and child loops.
+#[must_use]
+pub fn media_content_blocks_for_tool(
+    name: &str,
+    data: &Value,
+    model_text: &str,
+) -> Option<Vec<Value>> {
+    match name {
+        "Bash" => bash_image_content_blocks(data).or_else(|| media_content_blocks(data)),
+        "Read" => {
+            read_media_content_blocks(data, model_text).or_else(|| media_content_blocks(data))
+        }
+        "computer" => {
+            computer_batch_content_blocks(data, model_text).or_else(|| media_content_blocks(data))
+        }
+        _ => media_content_blocks(data),
+    }
+}
+
+fn computer_batch_images(data: &Value) -> Option<Vec<(usize, Vec<Value>)>> {
+    data.get("stepsCompleted")?.as_u64()?;
+    let images: Vec<_> = data
+        .get("results")?
+        .as_array()?
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| matches!(item["action"].as_str(), Some("screenshot" | "zoom")))
+        .filter_map(|(index, item)| {
+            image_content_blocks(&item["result"]).map(|blocks| (index, blocks))
+        })
+        .collect();
+    (!images.is_empty()).then_some(images)
+}
+
+/// Keep Computer's batch wrapper and geometry visible without spelling out
+/// image bytes in the accompanying text. The raw result still reaches hooks.
+#[must_use]
+pub fn computer_batch_model_text(data: &Value) -> Option<String> {
+    let images = computer_batch_images(data)?;
+    let mut metadata = data.clone();
+    for (index, _) in images {
+        metadata["results"][index]["result"]["file"]
+            .as_object_mut()?
+            .remove("base64");
+    }
+    Some(crate::native_schema::js_json(&metadata, false))
+}
+
+fn computer_batch_content_blocks(data: &Value, model_text: &str) -> Option<Vec<Value>> {
+    let images = computer_batch_images(data)?;
+    let mut blocks = vec![serde_json::json!({"type":"text","text":model_text})];
+    for (index, image) in images {
+        blocks.push(serde_json::json!({"type":"text","text":format!(
+            "[Step {}: {}]", index + 1, data["results"][index]["action"].as_str()?
+        )}));
+        blocks.extend(image);
+    }
+    Some(blocks)
+}
+
+/// Read's notebook, PDF, and extracted-page result mapper. The summary must be
+/// the same tool-owned text used for an ordinary result; blocks replace it on
+/// the wire.
+#[must_use]
+pub fn read_media_content_blocks(data: &Value, model_text: &str) -> Option<Vec<Value>> {
+    let file = data.get("file")?;
+    match data.get("type")?.as_str()? {
+        "notebook" => {
+            let cells = file.get("cells")?.as_array()?;
+            let mut blocks: Vec<Value> = Vec::new();
+            for cell in cells {
+                let cell_type = cell.get("cellType")?.as_str()?;
+                let cell_id = cell.get("cell_id")?.as_str()?;
+                let source = cell.get("source")?.as_str()?;
+                let mut metadata = String::new();
+                if cell_type != "code" {
+                    metadata.push_str(&format!("<cell_type>{cell_type}</cell_type>"));
+                } else if let Some(language) = cell.get("language").and_then(Value::as_str) {
+                    if language != "python" {
+                        metadata.push_str(&format!("<language>{language}</language>"));
+                    }
+                }
+                append_read_text_block(
+                    &mut blocks,
+                    format!("<cell id=\"{cell_id}\">{metadata}{source}</cell id=\"{cell_id}\">"),
+                );
+                if let Some(outputs) = cell.get("outputs").and_then(Value::as_array) {
+                    for output in outputs {
+                        if let Some(text) = output.get("text").and_then(Value::as_str) {
+                            if !text.is_empty() {
+                                append_read_text_block(&mut blocks, format!("\n{text}"));
+                            }
+                        }
+                        if let Some(image) = output.get("image") {
+                            let base64 = image.get("image_data")?.as_str()?;
+                            let media_type = image.get("media_type")?.as_str()?;
+                            blocks.push(serde_json::json!({
+                                "type":"image",
+                                "source":{"type":"base64","data":base64,"media_type":media_type}
+                            }));
+                        }
+                    }
+                }
+            }
+            Some(blocks)
+        }
+        "pdf" => {
+            let base64 = file.get("base64")?.as_str()?;
+            if base64.is_empty() {
+                return None;
+            }
+            Some(vec![
+                serde_json::json!({"type":"text","text":model_text}),
+                serde_json::json!({
+                    "type":"document",
+                    "source":{"type":"base64","media_type":"application/pdf","data":base64}
+                }),
+            ])
+        }
+        "parts" => {
+            let pages = data.get("pages")?.as_array()?;
+            if pages.is_empty() {
+                return None;
+            }
+            let first_page = data.get("firstPage").and_then(Value::as_u64).unwrap_or(1);
+            let mut blocks = vec![serde_json::json!({"type":"text","text":model_text})];
+            for (index, page) in pages.iter().enumerate() {
+                let base64 = page.get("base64")?.as_str()?;
+                if !base64.is_empty() {
+                    let media_type = page.get("mediaType")?.as_str()?;
+                    blocks.push(serde_json::json!({
+                        "type":"image",
+                        "source":{"type":"base64","data":base64,"media_type":media_type}
+                    }));
+                } else {
+                    let suffix = page
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .filter(|error| !error.is_empty())
+                        .map(|error| format!(": {error}"))
+                        .unwrap_or_default();
+                    blocks.push(serde_json::json!({
+                        "type":"text",
+                        "text":format!("[Page {} could not be processed as an image{}]", first_page.saturating_add(index as u64), suffix)
+                    }));
+                }
+            }
+            Some(blocks)
+        }
+        _ => None,
+    }
+}
+
+fn append_read_text_block(blocks: &mut Vec<Value>, text: String) {
+    if let Some(last) = blocks.last_mut() {
+        if let Some(previous) = last.get("text").and_then(Value::as_str) {
+            let merged = format!("{previous}\n{text}");
+            *last = serde_json::json!({"type":"text","text":merged});
+            return;
+        }
+    }
+    blocks.push(serde_json::json!({"type":"text","text":text}));
+}
+
+/// Claude's Bash `isImage` mapper: require a base64 data URI and sniff the
+/// decoded payload instead of trusting the URI's claimed media type.
+#[must_use]
+pub fn bash_image_content_blocks(data: &Value) -> Option<Vec<Value>> {
+    use base64::Engine as _;
+    if data.get("isImage") != Some(&Value::Bool(true)) {
+        return None;
+    }
+    let stdout = data.get("stdout").and_then(Value::as_str)?;
+    let rest = stdout.trim().strip_prefix("data:")?;
+    let semi = rest.find(';')?;
+    if semi == 0 {
+        return None;
+    }
+    let payload = rest[semi..].strip_prefix(";base64,")?;
+    if payload.is_empty() {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .ok()?;
+    let media_type = crate::util::image_sniff::sniff_image_media_type(&bytes)?;
+    Some(vec![serde_json::json!({
+        "type": "image",
+        "source": {"type":"base64","media_type":media_type,"data":payload},
+    })])
+}
+
 /// The media blocks a tool result's `data` should be delivered as, or `None`
 /// when it is an ordinary textual result.
 ///
@@ -154,6 +346,18 @@ mod tests {
     }
 
     #[test]
+    fn bash_image_mapper_sniffs_bytes_and_only_runs_for_bash() {
+        let data = serde_json::json!({
+            "isImage":true,
+            "stdout":"data:image/jpeg;base64,iVBORw0KGgo="
+        });
+        let blocks = media_content_blocks_for_tool("Bash", &data, "ignored").unwrap();
+        assert_eq!(blocks[0]["source"]["media_type"], "image/png");
+        assert_eq!(blocks[0]["source"]["data"], "iVBORw0KGgo=");
+        assert!(media_content_blocks_for_tool("Read", &data, "ignored").is_none());
+    }
+
+    #[test]
     fn computer_batch_images_remain_ordered_and_do_not_project_for_unrelated_tools() {
         let data = serde_json::json!({"stepsCompleted":3,"stepFailed":{"action":"key","error":"denied"},"results":[
             {"action":"screenshot","result":{"type":"image","file":{"base64":"first","type":"image/png"},"computer_frame":{"width":2}}},
@@ -180,64 +384,64 @@ mod tests {
         );
         assert!(computer_batch_model_text(&serde_json::json!({"stepsCompleted":1,"results":[{"action":"left_click","result":{"ok":true}}]})).is_none());
     }
-}
 
-/// Tool-aware media projection shared by the main and child loops.
-#[must_use]
-pub fn media_content_blocks_for_tool(
-    name: &str,
-    data: &Value,
-    model_text: &str,
-) -> Option<Vec<Value>> {
-    match name {
-        "Bash" => bash_image_content_blocks(data).or_else(|| media_content_blocks(data)),
-        "Read" => {
-            read_media_content_blocks(data, model_text).or_else(|| media_content_blocks(data))
-        }
-        "computer" => {
-            computer_batch_content_blocks(data, model_text).or_else(|| media_content_blocks(data))
-        }
-        _ => media_content_blocks(data),
+    #[test]
+    fn read_pdf_replacement_keeps_summary_and_document_in_one_result() {
+        let data = serde_json::json!({"type":"pdf","file":{"base64":"JVBERi0="}});
+        let blocks =
+            media_content_blocks_for_tool("Read", &data, "PDF file read: x (5 B)").unwrap();
+        assert_eq!(
+            blocks[0],
+            serde_json::json!({"type":"text","text":"PDF file read: x (5 B)"})
+        );
+        assert_eq!(blocks[1]["type"], "document");
+        assert_eq!(blocks[1]["source"]["data"], "JVBERi0=");
+        assert!(read_media_content_blocks(
+            &serde_json::json!({"type":"pdf","file":{"base64":""}}),
+            "x"
+        )
+        .is_none());
     }
-}
 
-fn computer_batch_images(data: &Value) -> Option<Vec<(usize, Vec<Value>)>> {
-    data.get("stepsCompleted")?.as_u64()?;
-    let images: Vec<_> = data
-        .get("results")?
-        .as_array()?
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| matches!(item["action"].as_str(), Some("screenshot" | "zoom")))
-        .filter_map(|(index, item)| {
-            image_content_blocks(&item["result"]).map(|blocks| (index, blocks))
-        })
-        .collect();
-    (!images.is_empty()).then_some(images)
-}
-
-/// Keep Computer's batch wrapper and geometry visible without spelling out
-/// image bytes in the accompanying text. The raw result still reaches hooks.
-#[must_use]
-pub fn computer_batch_model_text(data: &Value) -> Option<String> {
-    let images = computer_batch_images(data)?;
-    let mut metadata = data.clone();
-    for (index, _) in images {
-        metadata["results"][index]["result"]["file"]
-            .as_object_mut()?
-            .remove("base64");
+    #[test]
+    fn read_pages_replacement_interleaves_images_and_page_failures() {
+        let data = serde_json::json!({
+            "type":"parts", "firstPage":3, "file":{},
+            "pages":[
+                {"base64":"aGVsbG8=","mediaType":"image/jpeg"},
+                {"base64":"","mediaType":"image/jpeg","error":"decode failed"}
+            ]
+        });
+        let blocks =
+            media_content_blocks_for_tool("Read", &data, "PDF pages extracted: 2").unwrap();
+        assert_eq!(blocks[0]["text"], "PDF pages extracted: 2");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/jpeg");
+        assert_eq!(
+            blocks[2]["text"],
+            "[Page 4 could not be processed as an image: decode failed]"
+        );
+        assert!(read_media_content_blocks(
+            &serde_json::json!({"type":"parts","file":{},"pages":[]}),
+            "x"
+        )
+        .is_none());
     }
-    Some(crate::native_schema::js_json(&metadata, false))
-}
 
-fn computer_batch_content_blocks(data: &Value, model_text: &str) -> Option<Vec<Value>> {
-    let images = computer_batch_images(data)?;
-    let mut blocks = vec![serde_json::json!({"type":"text","text":model_text})];
-    for (index, image) in images {
-        blocks.push(serde_json::json!({"type":"text","text":format!(
-            "[Step {}: {}]", index + 1, data["results"][index]["action"].as_str()?
-        )}));
-        blocks.extend(image);
+    #[test]
+    fn read_notebook_replacement_keeps_image_between_text_blocks() {
+        let data = serde_json::json!({"type":"notebook","file":{"cells":[
+            {"cellType":"code","cell_id":"cell-0","source":"print(1)","language":"python","outputs":[
+                {"text":"1","image":{"image_data":"aGVsbG8=","media_type":"image/png"}},
+                {"text":"done"}
+            ]}
+        ]}});
+        let blocks = media_content_blocks_for_tool("Read", &data, "ignored").unwrap();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(
+            blocks[0]["text"],
+            "<cell id=\"cell-0\">print(1)</cell id=\"cell-0\">\n\n1"
+        );
+        assert_eq!(blocks[1]["source"]["data"], "aGVsbG8=");
+        assert_eq!(blocks[2]["text"], "\ndone");
     }
-    Some(blocks)
 }

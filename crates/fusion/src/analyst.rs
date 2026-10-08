@@ -303,6 +303,7 @@ where
         .map(|message| message.text_content())
         .unwrap_or_default();
     let mut spawn = lingxi_core::host::subagent_spawn::SubagentSpawnRequest {
+        stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped,
         subagent_type: FUSION_ANALYST_TYPE.to_string(),
         prompt: format!("{system}\n\nThe panel reports to compare, as JSON:\n\n{user}"),
         model: Some(analyst.model.clone()),

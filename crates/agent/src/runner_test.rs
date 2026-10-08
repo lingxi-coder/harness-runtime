@@ -6,7 +6,6 @@ use crate::definition::{
 };
 use crate::display::{AgentColor, AgentDisplay};
 use async_trait::async_trait;
-use lingxi_core::token::Usage;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, RequestId, ToolUseId};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -31,14 +30,23 @@ fn cumulative_usage_keeps_reasoning_as_output_subset() {
 // ---- Scripted loop-mode fixtures -------------------------------------
 
 /// `SubagentApiClient` that hands back a pre-scripted queue of responses,
-/// one per `messages_create` call. Counts calls so tests can assert the
+/// one per typed streaming request. Counts calls so tests can assert the
 /// number of model round-trips (`max_turns` bound, multi-turn loop).
 struct MockSubagentApiClient {
     responses: Mutex<VecDeque<Result<llm_runtime::HistoryResponse, llm_runtime::LlmError>>>,
     calls: AtomicUsize,
+    physical_calls: Mutex<Vec<CapturedSubagentCall>>,
     /// The messages the LAST call was given — lets a test assert what the
     /// runner actually seeded the conversation with.
     last_messages: Mutex<Vec<ConversationMessage>>,
+    last_tools: Mutex<Vec<serde_json::Value>>,
+}
+
+#[derive(Clone, Debug)]
+struct CapturedSubagentCall {
+    request: crate::api::SubagentApiRequest,
+    response: Option<llm_runtime::HistoryResponse>,
+    fallback_target: Option<lingxi_core::host::refusal_driver::FallbackTargetContext>,
 }
 
 impl MockSubagentApiClient {
@@ -48,7 +56,9 @@ impl MockSubagentApiClient {
         Arc::new(Self {
             responses: Mutex::new(responses.into_iter().collect()),
             calls: AtomicUsize::new(0),
+            physical_calls: Mutex::new(Vec::new()),
             last_messages: Mutex::new(Vec::new()),
+            last_tools: Mutex::new(Vec::new()),
         })
     }
     fn call_count(&self) -> usize {
@@ -57,29 +67,13 @@ impl MockSubagentApiClient {
     fn last_messages(&self) -> Vec<ConversationMessage> {
         self.last_messages.lock().unwrap().clone()
     }
+    fn physical_calls(&self) -> Vec<CapturedSubagentCall> {
+        self.physical_calls.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
 impl crate::api::SubagentApiClient for MockSubagentApiClient {
-    async fn messages_create(
-        &self,
-        _model: &str,
-        _system: Option<&str>,
-        _messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        *self.last_messages.lock().unwrap() = _messages.clone();
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.responses
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or_else(|| {
-                // Out of scripted responses: a non-terminal, no-tool turn keeps
-                // the loop honest (it terminates on empty tool_uses).
-                Ok(text_response("(exhausted)", Some("end_turn")))
-            })
-    }
     async fn stream(
         &self,
         request: crate::api::SubagentApiRequest,
@@ -125,20 +119,24 @@ impl crate::api::SubagentApiClient for MockSubagentApiClient {
     }
 }
 
-/// `SubagentApiClient` that OVERRIDES the streaming seam with scripted
-/// `HistoryEvent` sequences (one `Vec` per turn) and makes the non-streaming
-/// `messages_create` unreachable — proving the runner drives the loop
-/// through `messages_create_stream` + `accumulate_stream`, not the
-/// non-streaming fallback.
+/// Scripted decoded event streams, including real per-turn tool/history events.
 struct StreamingMockApiClient {
     turns: Mutex<VecDeque<Vec<llm_runtime::HistoryEvent>>>,
     calls: AtomicUsize,
-    /// Tools seen on the most recent `messages_create_stream` call — lets a
+    /// Tools seen on the most recent streaming request — lets a
     /// test prove `ctx.tool_schemas` threads through the seam.
     last_tools: Mutex<Vec<serde_json::Value>>,
     /// The model each call was issued against, in order — lets a test prove a
     /// refusal hop actually re-issued against the fallback.
     models: Mutex<Vec<String>>,
+    /// Provider profile used for each request, in order.
+    profiles: Mutex<Vec<Option<String>>>,
+    /// Complete physical request/response snapshots. The older migrated mock
+    /// only kept the last request's routing fields, which hid lost prompt,
+    /// effort, usage and stop metadata across multiple next calls.
+    physical_calls: Mutex<Vec<CapturedSubagentCall>>,
+    refusal_snapshot: Mutex<Option<lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot>>,
+    refusal_snapshot_requests: Mutex<Vec<(String, Option<String>)>>,
 }
 
 impl StreamingMockApiClient {
@@ -148,11 +146,25 @@ impl StreamingMockApiClient {
             calls: AtomicUsize::new(0),
             last_tools: Mutex::new(Vec::new()),
             models: Mutex::new(Vec::new()),
+            profiles: Mutex::new(Vec::new()),
+            physical_calls: Mutex::new(Vec::new()),
+            refusal_snapshot: Mutex::new(None),
+            refusal_snapshot_requests: Mutex::new(Vec::new()),
         })
+    }
+
+    fn set_refusal_snapshot(
+        &self,
+        snapshot: lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot,
+    ) {
+        *self.refusal_snapshot.lock().unwrap() = Some(snapshot);
     }
 
     fn models(&self) -> Vec<String> {
         self.models.lock().unwrap().clone()
+    }
+    fn profiles(&self) -> Vec<Option<String>> {
+        self.profiles.lock().unwrap().clone()
     }
     fn call_count(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
@@ -160,40 +172,30 @@ impl StreamingMockApiClient {
     fn last_tools(&self) -> Vec<serde_json::Value> {
         self.last_tools.lock().unwrap().clone()
     }
+    fn physical_calls(&self) -> Vec<CapturedSubagentCall> {
+        self.physical_calls.lock().unwrap().clone()
+    }
+
+    fn refusal_snapshot_requests(&self) -> Vec<(String, Option<String>)> {
+        self.refusal_snapshot_requests.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
 impl crate::api::SubagentApiClient for StreamingMockApiClient {
-    async fn messages_create(
-        &self,
-        _model: &str,
-        _system: Option<&str>,
-        _messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        unreachable!("streaming mock must be driven through messages_create_stream")
-    }
-
-    async fn messages_create_stream(
+    fn refusal_api_text_snapshot(
         &self,
         model: &str,
-        _system: Option<&str>,
-        _messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        _effort: Option<serde_json::Value>,
+        profile: Option<&str>,
     ) -> Result<
-        futures::stream::BoxStream<
-            'static,
-            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
-        >,
+        Option<lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot>,
         llm_runtime::LlmError,
     > {
-        use futures::StreamExt;
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.models.lock().unwrap().push(model.to_string());
-        *self.last_tools.lock().unwrap() = tools;
-        let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
-        Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
+        self.refusal_snapshot_requests
+            .lock()
+            .unwrap()
+            .push((model.to_owned(), profile.map(str::to_owned)));
+        Ok(self.refusal_snapshot.lock().unwrap().clone())
     }
 
     async fn stream(
@@ -229,6 +231,961 @@ impl crate::api::SubagentApiClient for StreamingMockApiClient {
             events.into_iter().map(Ok),
         )))
     }
+}
+
+struct GatedFallbackApiClient {
+    fallback_gate: Arc<tokio::sync::Notify>,
+    terminal_gate: Arc<tokio::sync::Notify>,
+    terminal_waiting: Arc<AtomicBool>,
+    tail_polls: Arc<AtomicUsize>,
+    models: Mutex<Vec<String>>,
+    first_events: Vec<llm_runtime::HistoryEvent>,
+    later_responses: Mutex<VecDeque<llm_runtime::HistoryResponse>>,
+    calls: AtomicUsize,
+}
+
+struct ToolThenStreamErrorApi;
+
+#[async_trait]
+impl crate::api::SubagentApiClient for ToolThenStreamErrorApi {
+    async fn stream(
+        &self,
+        _request: crate::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let events = vec![
+            ev_message_start(),
+            llm_runtime::HistoryEvent::ContentBlockStart {
+                index: 2,
+                content_block: llm_runtime::ContentBlock::ToolCall {
+                    id: "toolu-before-error".into(),
+                    name: "Agent".into(),
+                    input: serde_json::Value::Null,
+                },
+            },
+            llm_runtime::HistoryEvent::ContentBlockDelta {
+                index: 2,
+                delta: llm_runtime::HistoryContentDelta::InputJsonDelta {
+                    partial_json: "{}".into(),
+                },
+            },
+            llm_runtime::HistoryEvent::ContentBlockStop { index: 2 },
+        ];
+        let stream = futures::stream::iter(events.into_iter().map(Ok).chain(std::iter::once(Err(
+            llm_runtime::LlmError::Transport {
+                message: "provider stream broke".into(),
+            },
+        ))));
+        Ok(futures::StreamExt::boxed(stream))
+    }
+}
+
+impl GatedFallbackApiClient {
+    fn new(
+        discarded_blocks: Vec<usize>,
+        later_responses: Vec<llm_runtime::HistoryResponse>,
+    ) -> Arc<Self> {
+        let server_fallback: llm_runtime::HistoryEvent =
+            serde_json::from_value(serde_json::json!({
+                "type": "server_fallback",
+                "event": {
+                    "fromModel": "primary-model",
+                    "toModel": "fallback-model",
+                    "reason": "sticky",
+                    "apiRefusalCategory": null,
+                    "midStream": true,
+                    "requestId": "fallback-request",
+                    "discardedBlocks": discarded_blocks,
+                    "retainedBlocks": [],
+                    "retainedText": "",
+                    "finalStopReason": null
+                },
+                "profile": "fallback-provider",
+                "lane": {
+                    "forModel": "primary-model",
+                    "model": "primary-model",
+                    "mode": "explicit"
+                }
+            }))
+            .expect("typed server fallback event fixture");
+        let first_events = vec![
+            ev_message_start(),
+            llm_runtime::HistoryEvent::ContentBlockStart {
+                index: 0,
+                content_block: llm_runtime::ContentBlock::ToolCall {
+                    id: "toolu-before-hop".into(),
+                    name: "Agent".into(),
+                    input: serde_json::Value::Null,
+                },
+            },
+            llm_runtime::HistoryEvent::ContentBlockDelta {
+                index: 0,
+                delta: llm_runtime::HistoryContentDelta::InputJsonDelta {
+                    partial_json: "{}".into(),
+                },
+            },
+            llm_runtime::HistoryEvent::ContentBlockStop { index: 0 },
+            server_fallback,
+            llm_runtime::HistoryEvent::ContentBlockStart {
+                index: 1,
+                content_block: llm_runtime::ContentBlock::ToolCall {
+                    id: "toolu-after-hop".into(),
+                    name: "Agent".into(),
+                    input: serde_json::Value::Null,
+                },
+            },
+            llm_runtime::HistoryEvent::ContentBlockDelta {
+                index: 1,
+                delta: llm_runtime::HistoryContentDelta::InputJsonDelta {
+                    partial_json: "{}".into(),
+                },
+            },
+            llm_runtime::HistoryEvent::ContentBlockStop { index: 1 },
+            llm_runtime::HistoryEvent::MessageDelta {
+                delta: llm_runtime::HistoryMessageDelta {
+                    stop_reason: Some("tool_use".into()),
+                    stop_details: None,
+                },
+                usage: None,
+            },
+            llm_runtime::HistoryEvent::MessageStop,
+        ];
+        Arc::new(Self {
+            fallback_gate: Arc::new(tokio::sync::Notify::new()),
+            terminal_gate: Arc::new(tokio::sync::Notify::new()),
+            terminal_waiting: Arc::new(AtomicBool::new(false)),
+            tail_polls: Arc::new(AtomicUsize::new(0)),
+            models: Mutex::new(Vec::new()),
+            first_events,
+            later_responses: Mutex::new(later_responses.into()),
+            calls: AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl crate::api::SubagentApiClient for GatedFallbackApiClient {
+    async fn stream(
+        &self,
+        request: crate::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.models.lock().unwrap().push(request.model.clone());
+        if call == 0 {
+            let events = self.first_events.clone();
+            let gate = self.fallback_gate.clone();
+            let terminal_gate = self.terminal_gate.clone();
+            let terminal_waiting = self.terminal_waiting.clone();
+            let tail_polls = self.tail_polls.clone();
+            let stream = futures::stream::unfold(0usize, move |index| {
+                let events = events.clone();
+                let gate = gate.clone();
+                let terminal_gate = terminal_gate.clone();
+                let terminal_waiting = terminal_waiting.clone();
+                let tail_polls = tail_polls.clone();
+                async move {
+                    if index == 4 {
+                        gate.notified().await;
+                    } else if index == 8 {
+                        terminal_waiting.store(true, Ordering::SeqCst);
+                        terminal_gate.notified().await;
+                        terminal_waiting.store(false, Ordering::SeqCst);
+                    } else if index > 4 {
+                        tail_polls.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let event = events.get(index)?.clone();
+                    Some((Ok(event), index + 1))
+                }
+            });
+            return Ok(futures::StreamExt::boxed(stream));
+        }
+
+        let response = self
+            .later_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| text_response("exhausted", Some("end_turn")));
+        let _ = request;
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(response);
+        Ok(futures::StreamExt::boxed(futures::stream::iter(
+            events.into_iter().map(Ok),
+        )))
+    }
+}
+
+struct FallbackCancellationProbeInvoker {
+    first_started:
+        Mutex<Option<tokio::sync::oneshot::Sender<lingxi_core::host::CancellationToken>>>,
+    calls: AtomicUsize,
+}
+
+#[derive(Default)]
+struct CaptureLiveInvocationContexts {
+    contexts: Mutex<Vec<lingxi_core::host::tool_invoker::SubagentInvocationContext>>,
+}
+
+#[async_trait]
+impl lingxi_core::host::ToolInvoker for CaptureLiveInvocationContexts {
+    async fn invoke(
+        &self,
+        _name: &str,
+        _input: serde_json::Value,
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
+        self.contexts.lock().unwrap().push(ctx);
+        Ok(serde_json::json!("ok"))
+    }
+
+    async fn invoke_detailed(
+        &self,
+        _name: &str,
+        _input: serde_json::Value,
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+        _workspace_lease_token: Option<u64>,
+    ) -> Result<
+        lingxi_core::host::tool_invoker::ToolInvocationResult,
+        lingxi_core::host::tool_invoker::ToolInvokerError,
+    > {
+        let tool_use_id = ctx.tool_use_id.clone().unwrap_or_default();
+        self.contexts.lock().unwrap().push(ctx);
+        Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
+            is_error: false,
+            data: serde_json::json!("ok"),
+            model_content: None,
+            new_messages: vec![
+                ConversationMessage::User {
+                    id: MessageId::new(),
+                    content: vec![
+                        ContentBlock::Text {
+                            text: format!("injected note {tool_use_id}"),
+                            citations: None,
+                        },
+                        ContentBlock::Document {
+                            source: lingxi_core::types::DocumentSource::Base64 {
+                                media_type: "application/pdf".into(),
+                                data: "cGRm".into(),
+                            },
+                        },
+                    ],
+                    is_meta: true,
+                    is_compact_summary: false,
+                    is_visible_in_transcript_only: false,
+                },
+                ConversationMessage::Assistant {
+                    id: MessageId::new(),
+                    content: vec![ContentBlock::Text {
+                        text: format!("executor assistant context {tool_use_id}"),
+                        citations: None,
+                    }],
+                    stop_reason: None,
+                },
+                ConversationMessage::System {
+                    id: MessageId::new(),
+                    content: format!("executor system context {tool_use_id}"),
+                    subtype: None,
+                    compact_metadata: None,
+                    model_fallback: None,
+                    refusal_fallback: None,
+                },
+            ],
+            context_modifier: None,
+            mcp_meta: None,
+            turn_end: None,
+            context: lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                serde_json::Value::Array(Vec::new()),
+            ),
+            context_state: None,
+        })
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl FallbackCancellationProbeInvoker {
+    fn new() -> (
+        Arc<Self>,
+        tokio::sync::oneshot::Receiver<lingxi_core::host::CancellationToken>,
+    ) {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        (
+            Arc::new(Self {
+                first_started: Mutex::new(Some(started_tx)),
+                calls: AtomicUsize::new(0),
+            }),
+            started_rx,
+        )
+    }
+}
+
+#[async_trait]
+impl lingxi_core::host::ToolInvoker for FallbackCancellationProbeInvoker {
+    async fn invoke(
+        &self,
+        _name: &str,
+        _input: serde_json::Value,
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if matches!(
+            ctx.tool_use_id.as_deref(),
+            Some("toolu-before-hop" | "toolu-before-error")
+        ) {
+            if let Some(tx) = self.first_started.lock().unwrap().take() {
+                let _ = tx.send(ctx.cancellation_token.clone());
+            }
+            ctx.cancellation_token.cancelled().await;
+            return Err(lingxi_core::host::tool_invoker::ToolInvokerError::Abort(
+                "server fallback swept the call".into(),
+            ));
+        }
+        Ok(serde_json::json!("post-hop-tool-result"))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[derive(Default)]
+struct IdleFactCaptureRegistry {
+    updates: Mutex<Vec<bool>>,
+}
+
+#[async_trait]
+impl lingxi_core::host::TaskRegistryHandle for IdleFactCaptureRegistry {
+    async fn update_agent_list_local_fact(
+        &self,
+        _agent_id: lingxi_core::types::AgentId,
+        update: lingxi_core::host::task_registry::AgentListLocalFactUpdate,
+    ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
+        if let lingxi_core::host::task_registry::AgentListLocalFactUpdate::IsIdle(idle) = update {
+            self.updates.lock().unwrap().push(idle);
+        }
+        Ok(())
+    }
+
+    async fn create(
+        &self,
+        _input: lingxi_core::host::task_registry::TaskCreateInput,
+    ) -> Result<
+        lingxi_core::host::task_registry::TaskRecord,
+        lingxi_core::host::task_registry::TaskRegistryError,
+    > {
+        Err(
+            lingxi_core::host::task_registry::TaskRegistryError::Internal(
+                "unused test method".into(),
+            ),
+        )
+    }
+
+    async fn get(
+        &self,
+        _id: &str,
+    ) -> Result<
+        Option<lingxi_core::host::task_registry::TaskRecord>,
+        lingxi_core::host::task_registry::TaskRegistryError,
+    > {
+        Ok(None)
+    }
+
+    async fn list(
+        &self,
+        _filter: lingxi_core::host::task_registry::TaskListFilter,
+    ) -> Result<
+        Vec<lingxi_core::host::task_registry::TaskRecord>,
+        lingxi_core::host::task_registry::TaskRegistryError,
+    > {
+        Ok(Vec::new())
+    }
+
+    async fn update(
+        &self,
+        _id: &str,
+        _patch: lingxi_core::host::task_registry::TaskUpdatePatch,
+    ) -> Result<
+        lingxi_core::host::task_registry::TaskRecord,
+        lingxi_core::host::task_registry::TaskRegistryError,
+    > {
+        Err(
+            lingxi_core::host::task_registry::TaskRegistryError::Internal(
+                "unused test method".into(),
+            ),
+        )
+    }
+
+    async fn set_status(
+        &self,
+        _id: &str,
+        _status: &str,
+    ) -> Result<
+        lingxi_core::host::task_registry::TaskRecord,
+        lingxi_core::host::task_registry::TaskRegistryError,
+    > {
+        Err(
+            lingxi_core::host::task_registry::TaskRegistryError::Internal(
+                "unused test method".into(),
+            ),
+        )
+    }
+
+    async fn kill(
+        &self,
+        _id: &str,
+    ) -> Result<
+        lingxi_core::host::task_registry::TaskRecord,
+        lingxi_core::host::task_registry::TaskRegistryError,
+    > {
+        Err(
+            lingxi_core::host::task_registry::TaskRegistryError::Internal(
+                "unused test method".into(),
+            ),
+        )
+    }
+
+    async fn output(
+        &self,
+        _id: &str,
+        _offset: Option<u64>,
+    ) -> Result<
+        lingxi_core::host::TaskOutputChunk,
+        lingxi_core::host::task_registry::TaskRegistryError,
+    > {
+        Err(
+            lingxi_core::host::task_registry::TaskRegistryError::Internal(
+                "unused test method".into(),
+            ),
+        )
+    }
+}
+
+async fn run_gated_fallback_case(
+    discarded_blocks: Vec<usize>,
+    enforcement_models: &[&str],
+    later_responses: Vec<llm_runtime::HistoryResponse>,
+) -> (
+    Arc<GatedFallbackApiClient>,
+    Arc<FallbackCancellationProbeInvoker>,
+    Arc<IdleFactCaptureRegistry>,
+    lingxi_core::host::CancellationToken,
+    Vec<SubagentEvent>,
+) {
+    let api = GatedFallbackApiClient::new(discarded_blocks, later_responses);
+    let (invoker, started_rx) = FallbackCancellationProbeInvoker::new();
+    let registry = Arc::new(IdleFactCaptureRegistry::default());
+    let mut ctx = loop_ctx(
+        api.clone(),
+        Some(invoker.clone() as Arc<dyn lingxi_core::host::ToolInvoker>),
+        3,
+    );
+    ctx.agent_definition.model = AgentModel::Explicit("primary-model".into());
+    ctx.server_fallback_model_enforcement = Some(active_model_enforcement(enforcement_models));
+    ctx.task_registry = Some(registry.clone());
+
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(1);
+    drop(event_tx);
+    let (out_tx, mut out_rx) = mpsc::channel::<SubagentEvent>(64);
+    let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+
+    let token = tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+        .await
+        .expect("the tool must start before the stream reaches its fallback boundary")
+        .expect("tool invocation start token");
+    api.fallback_gate.notify_one();
+    let mut events = Vec::new();
+    if enforcement_models.contains(&"fallback-model") {
+        loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(2), out_rx.recv())
+                .await
+                .expect("accepted fallback must continue to its replacement tool")
+                .expect("runner output channel remains open");
+            let reached_post_hop_tool_result = matches!(
+                &event,
+                SubagentEvent::Message { message, .. }
+                    if message.to_string().contains("toolu-after-hop")
+                        && message.to_string().contains("tool_result")
+            );
+            events.push(event);
+            if reached_post_hop_tool_result {
+                while !api.terminal_waiting.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+                api.terminal_gate.notify_one();
+                break;
+            }
+        }
+    }
+    runner.await.expect("subagent runner task");
+    events.extend(drain(out_rx).await);
+    (api, invoker, registry, token, events)
+}
+
+#[tokio::test]
+async fn declined_fallback_sweeps_started_tool_before_consuming_target_body() {
+    let (api, invoker, registry, token, events) =
+        run_gated_fallback_case(Vec::new(), &["primary-model"], Vec::new()).await;
+
+    assert!(
+        token.is_cancelled(),
+        "the started tool receives real cancellation"
+    );
+    assert_eq!(invoker.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(api.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(api.tail_polls.load(Ordering::SeqCst), 0);
+    assert_eq!(*registry.updates.lock().unwrap(), [true, false]);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    assert!(!events.iter().any(|event| match event {
+        SubagentEvent::Message { message, .. } => {
+            message.to_string().contains("toolu-after-hop")
+        }
+        _ => false,
+    }));
+}
+
+#[tokio::test]
+async fn declined_fallback_sweeps_even_when_discard_indexes_are_not_tools_and_admitted_hop_continues(
+) {
+    let denied = run_gated_fallback_case(vec![99], &["primary-model"], Vec::new()).await;
+    assert!(denied.3.is_cancelled());
+    assert_eq!(denied.0.tail_polls.load(Ordering::SeqCst), 0);
+    assert_eq!(*denied.2.updates.lock().unwrap(), [true, false]);
+
+    let accepted = run_gated_fallback_case(
+        vec![0],
+        &["fallback-model"],
+        vec![text_response("after the fallback tool", Some("end_turn"))],
+    )
+    .await;
+    assert!(accepted.3.is_cancelled());
+    assert_eq!(accepted.1.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        accepted.0.models.lock().unwrap().as_slice(),
+        ["primary-model", "fallback-model"]
+    );
+    assert!(accepted.0.tail_polls.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        *accepted.2.updates.lock().unwrap(),
+        [true, false, true, false]
+    );
+    assert!(accepted
+        .4
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    assert!(!accepted.4.iter().any(|event| match event {
+        SubagentEvent::Message { message, .. } =>
+            message.to_string().contains("toolu-before-hop")
+                && message.to_string().contains("ToolResult"),
+        _ => false,
+    }));
+}
+
+#[tokio::test]
+async fn stream_error_drains_live_tool_use_and_emits_native_cancellation_result() {
+    let (invoker, started_rx) = FallbackCancellationProbeInvoker::new();
+    let registry = Arc::new(IdleFactCaptureRegistry::default());
+    let mut ctx = loop_ctx(
+        Arc::new(ToolThenStreamErrorApi),
+        Some(invoker.clone() as Arc<dyn lingxi_core::host::ToolInvoker>),
+        3,
+    );
+    ctx.task_registry = Some(registry.clone());
+
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(32);
+    let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+    let token = tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+        .await
+        .expect("the tool must start at its completed-block boundary")
+        .expect("tool invocation token");
+    runner.await.expect("subagent runner task");
+
+    assert!(token.is_cancelled());
+    assert_eq!(*registry.updates.lock().unwrap(), [true, false]);
+    let events = drain(out_rx).await;
+    let messages = events
+        .iter()
+        .filter_map(|event| match event {
+            SubagentEvent::Message { message, .. } => Some(message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(messages.iter().any(|message| {
+        message["content"][0]["id"] == "toolu-before-error"
+            && message["content"][0]["type"] == "tool_use"
+    }));
+    assert!(messages.iter().any(|message| {
+        message["content"][0]["tool_use_id"] == "toolu-before-error"
+            && message["content"][0]["type"] == "tool_result"
+            && message["content"][0]["is_error"].as_bool() == Some(true)
+            && message["content"][0]["content"]
+                == "The turn ended on an error, so this tool call was cancelled. If it had already started, some of its effects may have happened. Error: provider stream broke"
+    }));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+}
+
+#[tokio::test]
+async fn streamed_tool_invocations_keep_query_history_current_row_and_prior_siblings_separate() {
+    let response = llm_runtime::HistoryResponse {
+        id: "context-carrier-response".into(),
+        model: "mock".into(),
+        content: vec![
+            llm_runtime::ContentBlock::ToolCall {
+                id: "toolu-sibling-a".into(),
+                name: "Read".into(),
+                input: serde_json::json!({"file_path":"a.txt"}),
+            },
+            llm_runtime::ContentBlock::ToolCall {
+                id: "toolu-sibling-b".into(),
+                name: "Read".into(),
+                input: serde_json::json!({"file_path":"b.txt"}),
+            },
+        ],
+        stop_reason: Some("tool_use".into()),
+        stop_details: None,
+        usage: llm_runtime::ExecutionUsage::default(),
+        cost: None,
+        provider_metadata: serde_json::Value::Null,
+    };
+    let events = llm_runtime::stream_accumulator::response_to_stream_events(response);
+    let next_events = llm_runtime::stream_accumulator::response_to_stream_events(text_response(
+        "finished after tools",
+        Some("end_turn"),
+    ));
+    let api = StreamingMockApiClient::new(vec![events, next_events]);
+    let invoker = Arc::new(CaptureLiveInvocationContexts::default());
+    let mut ctx = loop_ctx(
+        api.clone(),
+        Some(invoker.clone() as Arc<dyn lingxi_core::host::ToolInvoker>),
+        2,
+    );
+    let transcript_dir = tempfile::tempdir().unwrap();
+    ctx.transcript_subdir = transcript_dir.path().to_path_buf();
+    ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
+        transcript_dir.path().to_path_buf(),
+    )) as Arc<dyn lingxi_core::host::FileSystem>);
+    let agent_id = ctx.agent_id;
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(1);
+    drop(event_tx);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(32);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let output_events = drain(out_rx).await;
+    assert!(output_events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+
+    let physical_calls = api.physical_calls();
+    assert_eq!(physical_calls.len(), 2);
+    let next_messages = &physical_calls[1].request.messages;
+    let assistant_tool_ids = next_messages
+        .iter()
+        .flat_map(|message| match message {
+            ConversationMessage::Assistant { content, .. } => content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::ToolUse { id, .. } => Some(id.as_str().to_owned()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let result_tool_ids = next_messages
+        .iter()
+        .flat_map(|message| match message {
+            ConversationMessage::User { content, .. } => content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                        Some(tool_use_id.as_str().to_owned())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(assistant_tool_ids, ["toolu-sibling-a", "toolu-sibling-b"]);
+    assert_eq!(result_tool_ids, ["toolu-sibling-a", "toolu-sibling-b"]);
+    let je_order = next_messages
+        .iter()
+        .filter_map(|message| match message {
+            ConversationMessage::User { content, .. } => {
+                if let Some(tool_use_id) = content.iter().find_map(|block| match block {
+                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                        Some(tool_use_id.as_str().to_owned())
+                    }
+                    _ => None,
+                }) {
+                    Some(format!("result:{tool_use_id}"))
+                } else {
+                    message
+                        .text_content()
+                        .strip_prefix("injected note ")
+                        .map(|tool_use_id| format!("note:{tool_use_id}"))
+                }
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        je_order,
+        [
+            "result:toolu-sibling-a",
+            "note:toolu-sibling-a",
+            "result:toolu-sibling-b",
+            "note:toolu-sibling-b",
+        ]
+    );
+    assert!(!next_messages.iter().any(|message| {
+        message
+            .text_content()
+            .contains("executor assistant context")
+    }));
+    assert!(!next_messages
+        .iter()
+        .any(|message| message.text_content().contains("executor system context")));
+    assert!(next_messages.iter().any(|message| {
+        matches!(message, ConversationMessage::User { content, .. }
+            if content.iter().any(|block| matches!(block, ContentBlock::Document { .. })))
+    }));
+    for expected in ["executor assistant context", "executor system context"] {
+        assert!(
+            output_events.iter().any(|event| matches!(event,
+                SubagentEvent::Message { message, .. }
+                    if message.to_string().contains(expected)
+            )),
+            "Native event journal retains {expected}"
+        );
+    }
+    let transcript_path = transcript_dir
+        .path()
+        .join(format!("agent-{agent_id}.jsonl"));
+    let transcript = std::fs::read_to_string(&transcript_path).unwrap();
+    assert!(transcript.contains("executor assistant context"));
+    assert!(transcript.contains("executor system context"));
+    let emitted_raw_k_ids = output_events
+        .iter()
+        .filter_map(|event| match event {
+            SubagentEvent::Message { message, .. } => {
+                serde_json::from_value::<ConversationMessage>(message.clone()).ok()
+            }
+            _ => None,
+        })
+        .filter_map(|message| match &message {
+            ConversationMessage::Assistant { content, .. }
+                if content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolUse { .. })) =>
+            {
+                Some(message.id().as_uuid().to_string())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let requested_raw_k_ids = next_messages
+        .iter()
+        .filter_map(|message| match message {
+            ConversationMessage::Assistant { content, id, .. }
+                if content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolUse { .. })) =>
+            {
+                Some(id.as_uuid().to_string())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(requested_raw_k_ids, emitted_raw_k_ids);
+    let emitted_tool_result_row_ids = output_events
+        .iter()
+        .filter_map(|event| match event {
+            SubagentEvent::Message { message, .. } => {
+                serde_json::from_value::<ConversationMessage>(message.clone()).ok()
+            }
+            _ => None,
+        })
+        .filter_map(|message| match &message {
+            ConversationMessage::User { content, .. }
+                if content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolResult { .. })) =>
+            {
+                Some(message.id().as_uuid().to_string())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let requested_tool_result_row_ids = next_messages
+        .iter()
+        .filter_map(|message| match message {
+            ConversationMessage::User { content, id, .. }
+                if content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolResult { .. })) =>
+            {
+                Some(id.as_uuid().to_string())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(requested_tool_result_row_ids, emitted_tool_result_row_ids);
+    let last_assistant_tool_row = next_messages
+        .iter()
+        .rposition(|message| {
+            matches!(message, ConversationMessage::Assistant { content, .. }
+                if content.iter().any(|block| matches!(block, ContentBlock::ToolUse { .. })))
+        })
+        .expect("raw K assistant rows are present");
+    let first_tool_result_row = next_messages
+        .iter()
+        .position(|message| {
+            matches!(message, ConversationMessage::User { content, .. }
+                if content.iter().any(|block| matches!(block, ContentBlock::ToolResult { .. })))
+        })
+        .expect("je tool-result rows are present");
+    assert!(last_assistant_tool_row < first_tool_result_row);
+
+    let contexts = invoker.contexts.lock().unwrap();
+    assert_eq!(contexts.len(), 2);
+    assert!(contexts.iter().all(|context| {
+        !context.current_history.iter().any(|message| {
+            matches!(message, ConversationMessage::Assistant { content, .. }
+                if content.iter().any(|block| matches!(block, ContentBlock::ToolUse { .. })))
+        })
+    }));
+    assert!(matches!(
+        contexts[0].assistant_message.as_ref(),
+        Some(ConversationMessage::Assistant { content, .. })
+            if matches!(content.as_slice(), [ContentBlock::ToolUse { id, .. }] if id.as_str() == "toolu-sibling-a")
+    ));
+    assert!(contexts[0].same_turn_tool_uses.is_empty());
+    assert!(matches!(
+        contexts[1].assistant_message.as_ref(),
+        Some(ConversationMessage::Assistant { content, .. })
+            if matches!(content.as_slice(), [ContentBlock::ToolUse { id, .. }] if id.as_str() == "toolu-sibling-b")
+    ));
+    assert!(matches!(
+        contexts[1].same_turn_tool_uses.as_slice(),
+        [ContentBlock::ToolUse { id, .. }] if id.as_str() == "toolu-sibling-a"
+    ));
+}
+
+#[tokio::test]
+async fn accepted_fallback_prunes_discarded_k_without_clearing_je() {
+    let discarded = ConversationMessage::Assistant {
+        id: MessageId::new(),
+        content: vec![ContentBlock::Text {
+            text: "discarded non-tool K row".into(),
+            citations: None,
+        }],
+        stop_reason: None,
+    };
+    let retained = ConversationMessage::Assistant {
+        id: MessageId::new(),
+        content: vec![ContentBlock::Text {
+            text: "retained K row".into(),
+            citations: None,
+        }],
+        stop_reason: None,
+    };
+    let result_a_id = MessageId::new();
+    let note_a_id = MessageId::new();
+    let result_b_id = MessageId::new();
+    let je_a = ConversationMessage::User {
+        id: result_a_id,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: ToolUseId::from("toolu-result-a".to_string()),
+            content: "result A".into(),
+            is_error: Some(false),
+            provider_tool_use_id: None,
+            content_blocks: None,
+        }],
+        is_meta: false,
+        is_compact_summary: false,
+        is_visible_in_transcript_only: false,
+    };
+    let note_a = ConversationMessage::user(note_a_id, "attachment/user note A".into());
+    let je_b = ConversationMessage::User {
+        id: result_b_id,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: ToolUseId::from("toolu-result-b".to_string()),
+            content: "result B".into(),
+            is_error: Some(false),
+            provider_tool_use_id: None,
+            content_blocks: None,
+        }],
+        is_meta: false,
+        is_compact_summary: false,
+        is_visible_in_transcript_only: false,
+    };
+    let mut assistant_rows = vec![
+        crate::transcript::StagedAssistantRow::from_source(4, discarded.clone()),
+        crate::transcript::StagedAssistantRow::from_source(5, retained.clone()),
+    ];
+    let mut ordered_rows = vec![
+        discarded.clone(),
+        retained.clone(),
+        je_a.clone(),
+        note_a.clone(),
+        je_b.clone(),
+    ];
+    let je_rows = vec![je_a, note_a, je_b];
+    let mut assistant_row_models = std::collections::HashMap::from([
+        (discarded.id(), "primary-model".to_string()),
+        (retained.id(), "primary-model".to_string()),
+    ]);
+
+    let removed = remove_discarded_assistant_rows(
+        &mut assistant_rows,
+        &mut ordered_rows,
+        &[4],
+        &mut assistant_row_models,
+        None,
+    );
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].0.accepted.id(), discarded.id());
+
+    let mut history = Vec::new();
+    let mut transcript_written = 0;
+    append_live_stream_rows(
+        ordered_rows,
+        &je_rows,
+        &mut assistant_rows,
+        None,
+        &mut history,
+        &mut transcript_written,
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        history
+            .iter()
+            .map(ConversationMessage::id)
+            .collect::<Vec<_>>(),
+        [retained.id(), result_a_id, note_a_id, result_b_id]
+    );
+    assert!(history
+        .iter()
+        .all(|message| message.text_content() != "discarded non-tool K row"));
 }
 
 static NEAR_LIMIT_WRAP_UP_FLAG_LOCK: RwLock<()> = RwLock::new(());
@@ -299,15 +1256,29 @@ impl crate::api::SubagentApiClient for NearLimitHintApiClient {
         self.near_limit_observations.fetch_add(1, Ordering::SeqCst);
     }
 
-    async fn messages_create(
+    async fn stream(
         &self,
-        _model: &str,
-        _system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        *self.last_messages.lock().unwrap() = messages;
-        Ok(self.response.clone())
+        request: crate::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let _model = request.model.as_str();
+        let _system = request.system.as_deref();
+        let messages = request.messages;
+        let _tools = request.tools;
+        let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = async {
+            *self.last_messages.lock().unwrap() = messages;
+            Ok(self.response.clone())
+        }
+        .await;
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+        Ok(futures::StreamExt::boxed(futures::stream::iter(
+            events.into_iter().map(Ok),
+        )))
     }
 }
 
@@ -337,6 +1308,7 @@ fn streamed_text_turn(text: &str, stop: &str) -> Vec<llm_runtime::HistoryEvent> 
             content_block: ContentBlock::Text {
                 text: String::new(),
                 cache_control: None,
+                citations: None,
             },
         },
         HistoryEvent::ContentBlockDelta {
@@ -386,18 +1358,108 @@ fn streamed_tool_use_turn(name: &str, stop: &str) -> Vec<llm_runtime::HistoryEve
     ]
 }
 
+fn streamed_tool_use_with_input_turn(
+    id: &str,
+    name: &str,
+    input: &serde_json::Value,
+    stop: &str,
+) -> Vec<llm_runtime::HistoryEvent> {
+    use llm_runtime::{ContentBlock, HistoryContentDelta, HistoryEvent, HistoryMessageDelta};
+    vec![
+        ev_message_start(),
+        HistoryEvent::ContentBlockStart {
+            index: 0,
+            content_block: ContentBlock::Text {
+                text: String::new(),
+                cache_control: None,
+                citations: None,
+            },
+        },
+        HistoryEvent::ContentBlockDelta {
+            index: 0,
+            delta: HistoryContentDelta::TextDelta {
+                text: "provider prelude".into(),
+            },
+        },
+        HistoryEvent::ContentBlockStop { index: 0 },
+        HistoryEvent::ContentBlockStart {
+            index: 1,
+            content_block: ContentBlock::ToolCall {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                input: serde_json::Value::Null,
+            },
+        },
+        HistoryEvent::ContentBlockDelta {
+            index: 1,
+            delta: HistoryContentDelta::InputJsonDelta {
+                partial_json: serde_json::to_string(input).expect("tool input serializes"),
+            },
+        },
+        HistoryEvent::ContentBlockStop { index: 1 },
+        HistoryEvent::MessageDelta {
+            delta: HistoryMessageDelta {
+                stop_reason: Some(stop.to_owned()),
+                stop_details: None,
+            },
+            usage: None,
+        },
+        HistoryEvent::MessageStop,
+    ]
+}
+
 /// `ToolInvoker` that counts invocations and returns a canned value.
 struct CountingInvoker {
     calls: AtomicUsize,
     policies: Mutex<Vec<lingxi_core::host::tool_invoker::ToolExecutionPolicy>>,
+    parent_models: Mutex<Vec<Option<String>>>,
+    parent_profiles: Mutex<Vec<Option<String>>>,
     cleanups: Mutex<Vec<(AgentId, Option<lingxi_core::types::SessionId>)>>,
     cleanup_failures: AtomicUsize,
+}
+
+#[derive(Default)]
+struct InputCapturingInvoker {
+    calls: Mutex<
+        Vec<(
+            String,
+            serde_json::Value,
+            Vec<ConversationMessage>,
+            Option<ConversationMessage>,
+            Vec<ContentBlock>,
+        )>,
+    >,
+}
+
+#[async_trait]
+impl lingxi_core::host::ToolInvoker for InputCapturingInvoker {
+    async fn invoke(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
+        self.calls.lock().unwrap().push((
+            name.to_owned(),
+            input,
+            ctx.current_history,
+            ctx.assistant_message,
+            ctx.same_turn_tool_uses,
+        ));
+        Ok(serde_json::json!("tool-output"))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 impl CountingInvoker {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             calls: AtomicUsize::new(0),
             policies: Mutex::new(Vec::new()),
+            parent_models: Mutex::new(Vec::new()),
+            parent_profiles: Mutex::new(Vec::new()),
             cleanups: Mutex::new(Vec::new()),
             cleanup_failures: AtomicUsize::new(0),
         })
@@ -408,25 +1470,18 @@ impl CountingInvoker {
     fn policies(&self) -> Vec<lingxi_core::host::tool_invoker::ToolExecutionPolicy> {
         self.policies.lock().unwrap().clone()
     }
+    fn parent_routes(&self) -> Vec<(Option<String>, Option<String>)> {
+        self.parent_models
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .zip(self.parent_profiles.lock().unwrap().iter().cloned())
+            .collect()
+    }
 }
 #[async_trait]
 impl lingxi_core::host::ToolInvoker for CountingInvoker {
-    async fn invoke(
-        &self,
-        _name: &str,
-        _input: serde_json::Value,
-        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.policies
-            .lock()
-            .unwrap()
-            .push(ctx.tool_execution_policy);
-        Ok(serde_json::json!("tool-output"))
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     async fn cleanup_computer_inputs(
         &self,
         agent_id: AgentId,
@@ -446,6 +1501,30 @@ impl lingxi_core::host::ToolInvoker for CountingInvoker {
             ));
         }
         Ok(())
+    }
+    async fn invoke(
+        &self,
+        _name: &str,
+        _input: serde_json::Value,
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.parent_models
+            .lock()
+            .unwrap()
+            .push(ctx.parent_model.clone());
+        self.parent_profiles
+            .lock()
+            .unwrap()
+            .push(ctx.parent_model_profile.clone());
+        self.policies
+            .lock()
+            .unwrap()
+            .push(ctx.tool_execution_policy);
+        Ok(serde_json::json!("tool-output"))
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -534,6 +1613,7 @@ fn text_response(text: &str, stop_reason: Option<&str>) -> llm_runtime::HistoryR
         content: vec![llm_runtime::ContentBlock::Text {
             text: text.into(),
             cache_control: None,
+            citations: None,
         }],
         stop_reason: stop_reason.map(str::to_string),
         stop_details: None,
@@ -561,6 +1641,26 @@ fn tool_use_response(name: &str, stop_reason: Option<&str>) -> llm_runtime::Hist
     }
 }
 
+fn tool_uses_response(names: &[&str]) -> llm_runtime::HistoryResponse {
+    llm_runtime::HistoryResponse {
+        id: "mock".into(),
+        model: "mock".into(),
+        content: names
+            .iter()
+            .map(|name| llm_runtime::ContentBlock::ToolCall {
+                id: ToolUseId::new().to_string(),
+                name: (*name).into(),
+                input: serde_json::json!({}),
+            })
+            .collect(),
+        stop_reason: Some("tool_use".into()),
+        stop_details: None,
+        usage: llm_runtime::ExecutionUsage::default(),
+        cost: None,
+        provider_metadata: serde_json::Value::Null,
+    }
+}
+
 /// Build an `HistoryResponse` carrying a text block AND a `tool_call` block
 /// (+ the given `stop_reason`) — for the G2 backward-scan test (a turn that
 /// surfaces text then a later turn that is tool-only).
@@ -576,6 +1676,7 @@ fn text_and_tool_response(
             llm_runtime::ContentBlock::Text {
                 text: text.into(),
                 cache_control: None,
+                citations: None,
             },
             llm_runtime::ContentBlock::ToolCall {
                 id: ToolUseId::new().to_string(),
@@ -624,6 +1725,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         task_registry: None,
         agent_id: AgentId::new(),
         parent_agent_id: None,
+        agent_spawn_provenance: Default::default(),
         agent_name: None,
         team_name: None,
         agent_definition: AgentDefinition {
@@ -655,6 +1757,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
             initial_prompt: None,
             color: None,
             observer: None,
+            offer_provider: None,
         },
         prompt_messages: vec![],
         fork_context_messages: None,
@@ -672,6 +1775,9 @@ fn fresh_subagent_ctx() -> SubagentContext {
         resumed_history: None,
         rendered_system_prompt: Some(Arc::from("")),
         mobile_runtime_environment_reminder: None,
+        instruction_context: Default::default(),
+        instruction_context_is_override: false,
+        instruction_provider: None,
         mobile_runtime_workspace_reminder: None,
         content_replacement_state: None,
         agent_memory: None,
@@ -706,8 +1812,1117 @@ fn fresh_subagent_ctx() -> SubagentContext {
         query_source_label: None,
         correlation_id: None,
         model_attempt: None,
+        handback: None,
+        handback_restore_start: None,
         refusal_fallback_chain: Vec::new(),
     }
+}
+
+#[tokio::test]
+async fn agent_terminal_paths_await_cleanup_for_the_exact_agent_and_session() {
+    for response in [
+        Ok(text_response("done", Some("end_turn"))),
+        Err(llm_runtime::LlmError::InvalidRequest {
+            message: "failed".into(),
+        }),
+    ] {
+        let invoker = CountingInvoker::new();
+        let mut ctx = loop_ctx(
+            MockSubagentApiClient::new(vec![response]),
+            Some(invoker.clone()),
+            1,
+        );
+        let session = lingxi_core::types::SessionId::new();
+        ctx.origin_session_id = Some(session);
+        let agent = ctx.agent_id;
+        let (_event_tx, event_rx) = mpsc::channel(8);
+        let (out_tx, out_rx) = mpsc::channel(64);
+        run_subagent(ctx, event_rx, out_tx).await;
+        assert!(invoker
+            .cleanups
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|identity| *identity == (agent, Some(session))));
+        assert!(!invoker.cleanups.lock().unwrap().is_empty());
+        assert!(drain(out_rx).await.iter().any(|event| matches!(
+            event,
+            SubagentEvent::Completed { .. } | SubagentEvent::Failed { .. }
+        )));
+    }
+}
+
+#[tokio::test]
+async fn failed_input_cleanup_never_reports_success_or_parks_a_persistent_agent() {
+    for persistent in [false, true] {
+        let invoker = CountingInvoker::new();
+        invoker.cleanup_failures.store(usize::MAX, Ordering::SeqCst);
+        let mut ctx = loop_ctx(
+            MockSubagentApiClient::new(vec![Ok(text_response("done", Some("end_turn")))]),
+            Some(invoker.clone()),
+            1,
+        );
+        ctx.persistent = persistent;
+        let (_event_tx, event_rx) = mpsc::channel(8);
+        let (out_tx, out_rx) = mpsc::channel(64);
+        tokio::time::timeout(Duration::from_secs(3), run_subagent(ctx, event_rx, out_tx))
+            .await
+            .unwrap();
+        let events = drain(out_rx).await;
+        assert!(events.iter().any(|event| matches!(event, SubagentEvent::Failed { error, .. } if error.contains("desktop remains reserved"))));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+        assert!(invoker.cleanups.lock().unwrap().len() >= 3);
+    }
+}
+
+fn attach_failure_hook_executor(ctx: &mut SubagentContext) -> Arc<hooks::HookExecutorImpl> {
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(hooks::HookRegistry::new())),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    ctx.hook_executor = Some(executor.clone());
+    ctx.hook_session_id = lingxi_core::types::SessionId::new();
+    ctx.agent_definition.model = AgentModel::Explicit("failure-child-model".into());
+    ctx.model_profile = Some("failure-child-profile".into());
+    executor
+}
+
+#[tokio::test]
+async fn startup_instruction_failure_publishes_child_route_and_retained_history() {
+    struct StartupPromptRecorder(Mutex<Vec<hooks::PromptHookRequest>>);
+    #[async_trait]
+    impl hooks::HookPromptRunner for StartupPromptRecorder {
+        async fn run(
+            &self,
+            request: hooks::PromptHookRequest,
+        ) -> Result<String, hooks::PromptHookError> {
+            self.0.lock().unwrap().push(request);
+            Ok(r#"{"ok":true}"#.into())
+        }
+    }
+    struct UnavailableInstructions;
+    #[async_trait]
+    impl lingxi_core::host::instructions::InstructionContextProvider for UnavailableInstructions {
+        async fn load(
+            &self,
+            _: &std::path::Path,
+            _: lingxi_core::host::instructions::InstructionScope,
+        ) -> Result<lingxi_core::host::instructions::InstructionContext, String> {
+            Err("initial instruction load failed".into())
+        }
+    }
+    for resumed in [false, true] {
+        let api = MockSubagentApiClient::new(Vec::new());
+        let mut ctx = loop_ctx(api.clone(), None, 1);
+        ctx.instruction_provider = Some(Arc::new(UnavailableInstructions));
+        if resumed {
+            ctx.resumed_history = Some(vec![ConversationMessage::user(
+                MessageId::new(),
+                "retained child evidence".into(),
+            )]);
+        }
+        attach_failure_hook_executor(&mut ctx);
+        let prompt_runner = Arc::new(StartupPromptRecorder(Mutex::new(Vec::new())));
+        let executor = Arc::new(
+            hooks::HookExecutorImpl::new(
+                Arc::new(tokio::sync::RwLock::new(hooks::HookRegistry::new())),
+                Arc::new(test_harness::mocks::MockHttpTransport::new()),
+                Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+            )
+            .with_prompt_runner(prompt_runner.clone()),
+        );
+        ctx.hook_executor = Some(executor.clone());
+        let mut stop_hook = frontmatter_stop_hook("startup-retained-prompt-stop");
+        stop_hook.executor = hooks::definition::HookExecutor::Prompt {
+            prompt: "Inspect the retained child evidence. $ARGUMENTS".into(),
+            model: None,
+            continue_on_block: false,
+        };
+        ctx.agent_definition.frontmatter_hooks = vec![stop_hook];
+        let transcript_dir = tempfile::tempdir().unwrap();
+        ctx.transcript_subdir = transcript_dir.path().to_path_buf();
+        let session_id = ctx.hook_session_id;
+        let agent_id = ctx.agent_id;
+        let expected_history = ctx.resumed_history.clone().unwrap_or_default();
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+        assert!(
+            matches!(out_rx.recv().await, Some(SubagentEvent::Failed { error, .. })
+            if error == "initial instruction load failed")
+        );
+        let (route, transcript) = executor
+            .take_agent_prompt_transcript(session_id, agent_id)
+            .expect("the child's snapshot precedes its Failed event");
+        assert_eq!(route.model, "failure-child-model");
+        assert_eq!(
+            route.model_profile.as_deref(),
+            Some("failure-child-profile")
+        );
+        assert_eq!(transcript.messages, expected_history);
+        assert_eq!(api.call_count(), 0);
+        runner.await.unwrap();
+        assert!(
+            out_rx.recv().await.is_none(),
+            "startup failure must emit no synthetic rows"
+        );
+        let requests = prompt_runner.0.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "the actual scoped prompt Stop fired once"
+        );
+        assert_eq!(
+            requests[0].transcript.as_ref().unwrap().messages,
+            expected_history
+        );
+        assert_eq!(
+            requests[0].model_selection.as_ref().unwrap().model,
+            "failure-child-model"
+        );
+        assert_eq!(
+            requests[0]
+                .model_selection
+                .as_ref()
+                .unwrap()
+                .model_profile
+                .as_deref(),
+            Some("failure-child-profile")
+        );
+        assert_eq!(
+            std::fs::read_dir(transcript_dir.path()).unwrap().count(),
+            0,
+            "instruction failure must not create transcript rows"
+        );
+    }
+}
+
+struct RouteChangingCleanupInvoker;
+
+#[async_trait]
+impl lingxi_core::host::ToolInvoker for RouteChangingCleanupInvoker {
+    async fn invoke(
+        &self,
+        _: &str,
+        _: serde_json::Value,
+        _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
+        Ok(serde_json::Value::Null)
+    }
+    async fn invoke_detailed(
+        &self,
+        _: &str,
+        _: serde_json::Value,
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+        _: Option<u64>,
+    ) -> Result<
+        lingxi_core::host::tool_invoker::ToolInvocationResult,
+        lingxi_core::host::tool_invoker::ToolInvokerError,
+    > {
+        let mut context = tool_api::test_support::fresh_ctx();
+        context.options.main_loop_model = ctx.parent_model.unwrap();
+        context.options.model_profile = ctx.parent_model_profile;
+        Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
+            is_error: false,
+            data: serde_json::Value::Null,
+            model_content: None,
+            new_messages: Vec::new(),
+            context_modifier: Some(nested_route_modifier(
+                "failure-live-model",
+                Some("failure-live-profile"),
+            )),
+            mcp_meta: None,
+            turn_end: None,
+            context: lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!(
+                []
+            )),
+            context_state: Some(
+                lingxi_core::host::tool_invoker::ToolInvocationContextState::new(Arc::new(context)),
+            ),
+        })
+    }
+    async fn cleanup_computer_inputs(
+        &self,
+        _: AgentId,
+        _: Option<lingxi_core::types::SessionId>,
+    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
+        Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
+            "key release failed".into(),
+        ))
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[tokio::test]
+async fn cleanup_failure_publishes_live_skill_route_before_failed_terminal() {
+    let api = MockSubagentApiClient::new(vec![
+        Ok(tool_use_response("Skill", Some("tool_use"))),
+        Ok(text_response("done on the new route", Some("end_turn"))),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), Some(Arc::new(RouteChangingCleanupInvoker)), 2);
+    let executor = attach_failure_hook_executor(&mut ctx);
+    ctx.model_resolution_context_provider = Some(Arc::new(|model: &str, profile: Option<&str>| {
+        Ok(crate::model_resolution::ModelResolutionContext {
+            route: crate::model_resolution::ModelRouteFacts {
+                model: model.to_string(),
+                profile: profile.map(str::to_string),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    }));
+    let session_id = ctx.hook_session_id;
+    let agent_id = ctx.agent_id;
+    let (_event_tx, event_rx) = mpsc::channel(1);
+    let (out_tx, mut out_rx) = mpsc::channel(1);
+    let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+    loop {
+        match out_rx.recv().await.expect("a terminal event") {
+            SubagentEvent::Failed { error, .. } => {
+                assert!(error.contains("desktop remains reserved"));
+                break;
+            }
+            SubagentEvent::Completed { .. } => panic!("cleanup failure cannot complete"),
+            _ => {}
+        }
+    }
+    let (route, transcript) = executor
+        .take_agent_prompt_transcript(session_id, agent_id)
+        .expect("cleanup failure publishes before Failed");
+    assert_eq!(route.model, "failure-live-model");
+    assert_eq!(route.model_profile.as_deref(), Some("failure-live-profile"));
+    assert!(transcript
+        .messages
+        .iter()
+        .any(|message| message.text_content() == "done on the new route"));
+    assert_eq!(api.call_count(), 2);
+    runner.await.unwrap();
+}
+
+#[tokio::test]
+async fn transient_input_cleanup_retries_before_completed_publication() {
+    let invoker = CountingInvoker::new();
+    invoker.cleanup_failures.store(2, Ordering::SeqCst);
+    let ctx = loop_ctx(
+        MockSubagentApiClient::new(vec![Ok(text_response("done", Some("end_turn")))]),
+        Some(invoker.clone()),
+        1,
+    );
+    let (_event_tx, event_rx) = mpsc::channel(8);
+    let (out_tx, out_rx) = mpsc::channel(64);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    assert!(invoker.cleanups.lock().unwrap().len() >= 3);
+}
+
+struct PendingAfterInputApi {
+    first: Arc<MockSubagentApiClient>,
+    calls: AtomicUsize,
+}
+#[async_trait]
+impl crate::api::SubagentApiClient for PendingAfterInputApi {
+    async fn stream(
+        &self,
+        request: crate::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.first.stream(request).await
+        } else {
+            std::future::pending().await
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancellation_between_agent_tool_calls_awaits_input_cleanup() {
+    let api = Arc::new(PendingAfterInputApi {
+        first: MockSubagentApiClient::new(vec![Ok(tool_use_response(
+            "computer",
+            Some("tool_use"),
+        ))]),
+        calls: AtomicUsize::new(0),
+    });
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 3);
+    let session = lingxi_core::types::SessionId::new();
+    ctx.origin_session_id = Some(session);
+    let agent = ctx.agent_id;
+    let (event_tx, event_rx) = mpsc::channel(8);
+    let (out_tx, out_rx) = mpsc::channel(64);
+    let run = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while api.calls.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(invoker.calls.load(Ordering::SeqCst), 1);
+    event_tx
+        .send(lingxi_core::Event::UserInterrupt)
+        .await
+        .unwrap();
+    run.await.unwrap();
+    assert!(invoker
+        .cleanups
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|identity| *identity == (agent, Some(session))));
+    assert!(!invoker.cleanups.lock().unwrap().is_empty());
+    assert!(drain(out_rx)
+        .await
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Killed { .. })));
+}
+
+#[tokio::test]
+async fn persistent_agent_releases_inputs_before_completed_event_and_pool_abort() {
+    let invoker = CountingInvoker::new();
+    let api = MockSubagentApiClient::new(vec![
+        Ok(tool_use_response("computer", Some("tool_use"))),
+        Ok(text_response("done", Some("end_turn"))),
+    ]);
+    let mut ctx = loop_ctx(api, Some(invoker.clone()), 3);
+    ctx.persistent = true;
+    let session = lingxi_core::types::SessionId::new();
+    ctx.origin_session_id = Some(session);
+    let agent = ctx.agent_id;
+    let (_event_tx, event_rx) = mpsc::channel(8);
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    let run = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if matches!(out_rx.recv().await, Some(SubagentEvent::Completed { .. })) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(invoker.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *invoker.cleanups.lock().unwrap(),
+        vec![(agent, Some(session))]
+    );
+    assert!(
+        !run.is_finished(),
+        "persistent Agent still owns its idle event pump"
+    );
+    // The real pool deallocates/aborts upon seeing terminal publication.
+    run.abort();
+    assert!(run.await.unwrap_err().is_cancelled());
+}
+
+fn completed_with_server_fallback(
+    mut response: llm_runtime::HistoryResponse,
+    declared_model: &str,
+    received_model: &str,
+    profile: &str,
+    reason: &str,
+) -> llm_runtime::HistoryEvent {
+    response.provider_metadata = serde_json::json!({
+        "llm_client": {
+            "server_fallback_events": [{
+                "event": {
+                    "fromModel": "primary-model",
+                    "toModel": received_model,
+                    "reason": reason,
+                    "apiRefusalCategory": null,
+                    "midStream": true,
+                    "requestId": "server-fallback-request",
+                    "discardedBlocks": [],
+                    "retainedBlocks": [],
+                    "retainedText": "",
+                    "finalStopReason": null
+                },
+                "profile": profile,
+                "lane": {
+                    "forModel": "primary-model",
+                    "model": declared_model,
+                    "mode": "explicit"
+                }
+            }]
+        }
+    });
+    llm_runtime::HistoryEvent::Completed {
+        response: Box::new(response),
+    }
+}
+
+fn active_model_enforcement(models: &[&str]) -> llm_runtime::model::allowlist::ModelEnforcement {
+    llm_runtime::model::allowlist::ModelEnforcement::Active {
+        allowlist: models.iter().map(|model| (*model).to_string()).collect(),
+        overrides: Default::default(),
+    }
+}
+
+fn test_refusal_api_text_snapshot(
+    serving_model: &str,
+) -> lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot {
+    lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot {
+        serving_model: Some(serving_model.to_owned()),
+        model_eligible: true,
+        display_label: Some("Test model".into()),
+        model_family: None,
+        fable_copy_suppressed: false,
+        opus_5_5_exception: false,
+        help_url: Some("https://example.test/refusal-help".into()),
+        provider: lingxi_core::host::refusal_api_text::RefusalProviderKind::Other,
+        interactive: true,
+        feedback_eligible: false,
+        brand: lingxi_core::host::refusal_api_text::RefusalBrandCopyOwned {
+            api_error_prefix: "API Error".into(),
+            product_name: "Test Host".into(),
+            generic_model_label: "Model".into(),
+        },
+    }
+}
+
+fn refusal_fallback_event(
+    source_model: &str,
+    received_model: &str,
+    profile: &str,
+) -> llm_runtime::HistoryEvent {
+    let mut event = completed_with_server_fallback(
+        text_response("refused content must not be shown", Some("refusal")),
+        source_model,
+        received_model,
+        profile,
+        "refusal",
+    );
+    let llm_runtime::HistoryEvent::Completed { response } = &mut event else {
+        unreachable!("completed fallback fixture")
+    };
+    response.provider_metadata["llm_client"]["server_fallback_events"][0]["event"]
+        ["apiRefusalCategory"] = serde_json::Value::String("cyber".into());
+    response.provider_metadata["llm_client"]["server_fallback_events"][0]["lane"]["forModel"] =
+        serde_json::Value::String(source_model.into());
+    response.provider_metadata["llm_client"]["server_fallback_events"][0]["event"]["fromModel"] =
+        serde_json::Value::String(source_model.into());
+    event
+}
+
+fn streamed_refusal_fallback_event(
+    source_model: &str,
+    received_model: &str,
+    profile: &str,
+) -> llm_runtime::HistoryEvent {
+    serde_json::from_value(serde_json::json!({
+        "type": "server_fallback",
+        "event": {
+            "fromModel": source_model,
+            "toModel": received_model,
+            "reason": "refusal",
+            "apiRefusalCategory": "cyber",
+            "midStream": true,
+            "requestId": "stream-refusal-request",
+            "discardedBlocks": [],
+            "retainedBlocks": [],
+            "retainedText": "",
+            "finalStopReason": null
+        },
+        "profile": profile,
+        "lane": {
+            "forModel": source_model,
+            "model": source_model,
+            "mode": "explicit"
+        }
+    }))
+    .expect("typed streamed refusal fallback event")
+}
+
+#[tokio::test]
+async fn server_fallback_updates_only_the_child_route_for_its_next_request() {
+    let api = StreamingMockApiClient::new(vec![
+        vec![completed_with_server_fallback(
+            llm_runtime::HistoryResponse {
+                model: "untrusted-response-model".into(),
+                ..text_and_tool_response("before fallback", "Read", Some("tool_use"))
+            },
+            "declared-model-not-in-policy",
+            "server-selected-model",
+            "fallback-provider",
+            "refusal",
+        )],
+        llm_runtime::stream_accumulator::response_to_stream_events(text_response(
+            "finished",
+            Some("end_turn"),
+        )),
+    ]);
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 3);
+    ctx.agent_definition.model = AgentModel::Explicit("primary-model".into());
+    ctx.model_profile = Some("origin-provider".into());
+    ctx.server_fallback_model_enforcement =
+        Some(active_model_enforcement(&["server-selected-model"]));
+    let caller_context = ctx.clone();
+    let (_event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(32);
+
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+
+    assert_eq!(api.models(), ["primary-model", "server-selected-model"]);
+    assert_eq!(
+        api.profiles(),
+        [
+            Some("origin-provider".into()),
+            Some("fallback-provider".into())
+        ]
+    );
+    assert_eq!(invoker.call_count(), 1);
+    assert_eq!(
+        invoker.parent_routes(),
+        [(Some("primary-model".into()), Some("origin-provider".into()))]
+    );
+    assert_eq!(one_completed(&events)["text"], "finished");
+    // The runner's override is local; its spawn input stays the original route.
+    assert_eq!(
+        caller_context.model_profile.as_deref(),
+        Some("origin-provider")
+    );
+}
+
+#[tokio::test]
+async fn response_without_server_fallback_keeps_child_model_and_profile() {
+    let first_response = llm_runtime::HistoryResponse {
+        model: "untrusted-response-model".into(),
+        ..text_and_tool_response("before", "Read", Some("tool_use"))
+    };
+    let api = StreamingMockApiClient::new(vec![
+        vec![llm_runtime::HistoryEvent::Completed {
+            response: Box::new(first_response),
+        }],
+        llm_runtime::stream_accumulator::response_to_stream_events(text_response(
+            "finished",
+            Some("end_turn"),
+        )),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 3);
+    ctx.agent_definition.model = AgentModel::Explicit("primary-model".into());
+    ctx.model_profile = Some("origin-provider".into());
+    ctx.server_fallback_model_enforcement = Some(active_model_enforcement(&["other-model"]));
+    let (_event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(32);
+
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+
+    assert_eq!(api.models(), ["primary-model", "primary-model"]);
+    assert_eq!(
+        api.profiles(),
+        [
+            Some("origin-provider".into()),
+            Some("origin-provider".into())
+        ]
+    );
+    assert_eq!(one_completed(&events)["text"], "finished");
+}
+
+#[tokio::test]
+async fn other_server_fallback_reason_is_not_adopted_by_the_child_query() {
+    let api = StreamingMockApiClient::new(vec![
+        vec![completed_with_server_fallback(
+            llm_runtime::HistoryResponse {
+                model: "untrusted-response-model".into(),
+                ..text_and_tool_response("before", "Read", Some("tool_use"))
+            },
+            "declared-model",
+            "received-other-model",
+            "other-provider",
+            "other",
+        )],
+        llm_runtime::stream_accumulator::response_to_stream_events(text_response(
+            "finished",
+            Some("end_turn"),
+        )),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 3);
+    ctx.agent_definition.model = AgentModel::Explicit("primary-model".into());
+    ctx.model_profile = Some("origin-provider".into());
+    ctx.server_fallback_model_enforcement = Some(active_model_enforcement(&["other-model"]));
+    let (_event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(32);
+
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+
+    assert_eq!(api.models(), ["primary-model", "primary-model"]);
+    assert_eq!(
+        api.profiles(),
+        [
+            Some("origin-provider".into()),
+            Some("origin-provider".into())
+        ]
+    );
+    assert_eq!(one_completed(&events)["text"], "finished");
+}
+
+#[tokio::test]
+async fn managed_denial_discards_received_fallback_before_tools_or_reply() {
+    let api = StreamingMockApiClient::new(vec![vec![completed_with_server_fallback(
+        llm_runtime::HistoryResponse {
+            model: "untrusted-response-model".into(),
+            ..text_and_tool_response("forbidden target reply", "Read", Some("tool_use"))
+        },
+        "allowed-declared-model",
+        "denied-received-model",
+        "denied-provider",
+        "sticky",
+    )]]);
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 3);
+    ctx.agent_definition.model = AgentModel::Explicit("primary-model".into());
+    ctx.prompt_messages = vec![lingxi_core::types::ConversationMessage::user(
+        MessageId::new(),
+        "fallback test prompt".into(),
+    )];
+    ctx.server_fallback_model_enforcement =
+        Some(active_model_enforcement(&["allowed-declared-model"]));
+    let (_event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(32);
+
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+
+    assert_eq!(api.call_count(), 1);
+    assert_eq!(invoker.call_count(), 0);
+    let api_error_rows = events
+        .iter()
+        .filter_map(|event| match event {
+            SubagentEvent::ServerFallbackApiErrorRow { row, .. } => Some(row),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        api_error_rows.len(),
+        1,
+        "decline emits one typed host API-error row"
+    );
+    assert_eq!(api_error_rows[0].error, "invalid_request");
+    assert_eq!(api_error_rows[0].message.model, "<synthetic>");
+    assert_eq!(
+        api_error_rows[0].message.content,
+        [ContentBlock::Text {
+            text: lingxi_core::host::refusal_server_control::SERVER_FALLBACK_ALLOWLIST_ERROR.into(),
+            citations: None,
+        }]
+    );
+    let settled_history = events.iter().find_map(|event| match event {
+        SubagentEvent::TranscriptSnapshot { messages, .. } => Some(messages),
+        _ => None,
+    });
+    assert!(
+        settled_history.is_some_and(|messages| messages
+            .iter()
+            .all(|message| { !message.text_content().contains("forbidden target reply") })),
+        "failed server-fallback discard snapshot cannot reintroduce received text"
+    );
+    assert!(
+        events.iter().all(|event| match event {
+            SubagentEvent::Message { message, .. } => {
+                !message.to_string().contains("forbidden target reply")
+                    && !message.to_string().contains(
+                        lingxi_core::host::refusal_server_control::SERVER_FALLBACK_ALLOWLIST_ERROR,
+                    )
+            }
+            _ => true,
+        }),
+        "the typed API-error row is not duplicated as a legacy message event"
+    );
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+}
+
+#[tokio::test]
+async fn denied_refusal_fallback_terminates_without_entering_child_cascade() {
+    let api = StreamingMockApiClient::new(vec![vec![completed_with_server_fallback(
+        text_response("forbidden fallback refusal", Some("refusal")),
+        "allowed-declared-model",
+        "denied-received-model",
+        "denied-provider",
+        "refusal",
+    )]]);
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 3);
+    ctx.agent_definition.model = AgentModel::Explicit("primary-model".into());
+    ctx.refusal_fallback_chain = vec!["local-fallback-model".into()];
+    ctx.server_fallback_model_enforcement =
+        Some(active_model_enforcement(&["allowed-declared-model"]));
+    let (_event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(32);
+
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+    let public_events = events
+        .iter()
+        .filter(|event| !matches!(event, SubagentEvent::TranscriptSnapshot { .. }))
+        .cloned()
+        .collect::<Vec<_>>();
+    let serialized = serde_json::to_string(&public_events).unwrap();
+
+    assert_eq!(api.call_count(), 1);
+    assert_eq!(api.models(), ["primary-model"]);
+    assert_eq!(invoker.call_count(), 0);
+    assert!(serialized.contains("declining the swap"));
+    assert!(!serialized.contains("forbidden fallback refusal"));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, SubagentEvent::ServerFallbackApiErrorRow { .. })),
+        "an unprovided host text snapshot must not be replaced with guessed refusal copy"
+    );
+}
+
+#[tokio::test]
+async fn denied_refusal_fallback_uses_the_source_route_snapshot_and_preserves_native_row() {
+    let source_model = "primary-route-model";
+    let profile = "primary-profile";
+    let api = StreamingMockApiClient::new(vec![vec![refusal_fallback_event(
+        source_model,
+        "denied-received-model",
+        profile,
+    )]]);
+    let snapshot = test_refusal_api_text_snapshot(source_model);
+    api.set_refusal_snapshot(snapshot.clone());
+    let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 3);
+    ctx.agent_definition.model = AgentModel::Explicit(source_model.into());
+    ctx.model_profile = Some(profile.into());
+    ctx.server_fallback_model_enforcement = Some(active_model_enforcement(&[source_model]));
+    let (_event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(32);
+
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+
+    assert_eq!(
+        api.refusal_snapshot_requests(),
+        [(source_model.to_owned(), Some(profile.to_owned()))],
+        "the request must resolve text facts against the pre-hop route, not the denied target"
+    );
+    let row = events
+        .iter()
+        .find_map(|event| match event {
+            SubagentEvent::ServerFallbackApiErrorRow {
+                row, message_index, ..
+            } => Some((row, *message_index)),
+            _ => None,
+        })
+        .expect("resolved refusal facts produce the native API-error row");
+    assert_eq!(row.0.request_id.as_deref(), Some("server-fallback-request"));
+    assert_eq!(row.0.error, "invalid_request");
+    assert_eq!(row.0.message.stop_reason, "refusal");
+    assert_eq!(
+        row.0.message.stop_details,
+        Some(serde_json::json!({
+            "type": "refusal",
+            "category": "cyber",
+            "explanation": null,
+            "fallback_credit_token": null,
+            "fallback_has_prefill_claim": null,
+            "recommended_model": null,
+        }))
+    );
+    assert_eq!(
+        row.0.message.content,
+        [ContentBlock::Text {
+            text: snapshot
+                .format(Some("cyber"), Some("server-fallback-request"))
+                .unwrap(),
+            citations: None,
+        }]
+    );
+    assert_eq!(
+        row.1, 0,
+        "the first visible row receives stable zero-based stream index zero"
+    );
+    let snapshot_messages = events.iter().find_map(|event| match event {
+        SubagentEvent::TranscriptSnapshot { messages, .. } => Some(messages),
+        _ => None,
+    });
+    assert!(
+        snapshot_messages.is_some_and(|messages| messages.iter().any(|message| {
+            message.id() == row.0.uuid
+                && matches!(
+                    message,
+                    ConversationMessage::Assistant {
+                        stop_reason: Some(reason),
+                        ..
+                    } if reason == "refusal"
+                )
+                && message
+                    .text_content()
+                    .contains("Test model's safeguards flagged this message")
+        })),
+        "the API-error row is appended to Agent history before terminal publication"
+    );
+    let row_event_pos = events
+        .iter()
+        .position(|event| matches!(event, SubagentEvent::ServerFallbackApiErrorRow { .. }))
+        .unwrap();
+    let failed_pos = events
+        .iter()
+        .position(|event| matches!(event, SubagentEvent::Failed { .. }))
+        .unwrap();
+    assert!(
+        row_event_pos < failed_pos,
+        "row publication precedes terminal failure"
+    );
+}
+
+#[tokio::test]
+async fn streamed_declined_refusal_uses_event_source_profile_and_emits_typed_row() {
+    let source_model = "primary-stream-model";
+    let source_profile = "resolved-stream-profile";
+    let mut refusal_event =
+        streamed_refusal_fallback_event(source_model, "denied-stream-model", source_profile);
+    if let llm_runtime::HistoryEvent::ServerFallback { lane, .. } = &mut refusal_event {
+        lane.mode =
+            llm_runtime::services::sdk::providers::anthropic::fallback_request::LaneMode::Default;
+    }
+    let api = StreamingMockApiClient::new(vec![vec![ev_message_start(), refusal_event]]);
+    let snapshot = test_refusal_api_text_snapshot(source_model);
+    api.set_refusal_snapshot(snapshot.clone());
+    let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 3);
+    ctx.agent_definition.model = AgentModel::Explicit(source_model.into());
+    ctx.model_profile = Some("request-profile-before-resolution".into());
+    ctx.server_fallback_model_enforcement = Some(active_model_enforcement(&[source_model]));
+    let (_event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(32);
+
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+
+    assert_eq!(
+        api.refusal_snapshot_requests(),
+        [(source_model.to_owned(), Some(source_profile.to_owned()))],
+        "stream declines resolve against the source lane and resolved profile"
+    );
+    let row = events.iter().find_map(|event| match event {
+        SubagentEvent::ServerFallbackApiErrorRow { row, .. } => Some(row),
+        _ => None,
+    });
+    let row = row.expect("streamed refusal decline emits its typed API-error row");
+    assert_eq!(row.request_id.as_deref(), Some("stream-refusal-request"));
+    assert_eq!(row.message.stop_reason, "refusal");
+    assert_eq!(
+        row.message.content,
+        [ContentBlock::Text {
+            text: snapshot
+                .format(Some("cyber"), Some("stream-refusal-request"))
+                .unwrap(),
+            citations: None,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn refusal_snapshot_after_an_accepted_hop_uses_the_current_source_route() {
+    let api = StreamingMockApiClient::new(vec![
+        vec![completed_with_server_fallback(
+            text_and_tool_response("before accepted hop", "Read", Some("tool_use")),
+            "primary-model",
+            "server-selected-model",
+            "fallback-provider",
+            "refusal",
+        )],
+        vec![refusal_fallback_event(
+            "server-selected-model",
+            "denied-next-model",
+            "fallback-provider",
+        )],
+    ]);
+    let snapshot = test_refusal_api_text_snapshot("server-selected-model");
+    api.set_refusal_snapshot(snapshot);
+    let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 4);
+    ctx.agent_definition.model = AgentModel::Explicit("primary-model".into());
+    ctx.model_profile = Some("origin-provider".into());
+    ctx.server_fallback_model_enforcement =
+        Some(active_model_enforcement(&["server-selected-model"]));
+    let (_event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(32);
+
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+
+    assert_eq!(api.models(), ["primary-model", "server-selected-model"]);
+    assert_eq!(
+        api.refusal_snapshot_requests(),
+        [(
+            "server-selected-model".into(),
+            Some("fallback-provider".into())
+        )],
+        "a later refusal resolves facts for the currently served route, never its next target"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SubagentEvent::ServerFallbackApiErrorRow { row, .. }
+            if row.message.model == "<synthetic>"
+                && row.message.content.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::Text { text, .. }
+                        if text.contains("Test model's safeguards flagged this message")
+                ))
+    )));
+}
+
+#[tokio::test]
+async fn same_request_refusal_decline_uses_the_last_accepted_hop_not_lane_source_or_candidate() {
+    let original_model = "original-request-model";
+    let accepted_model = "accepted-hop-model[1m]";
+    let accepted_wire_model = "accepted-hop-model";
+    let denied_model = "denied-hop-model";
+    let profile = "one-physical-profile";
+    let mut accepted_fallback =
+        streamed_refusal_fallback_event(original_model, accepted_wire_model, profile);
+    let llm_runtime::HistoryEvent::ServerFallback { lane, .. } = &mut accepted_fallback else {
+        unreachable!("typed streamed fallback event")
+    };
+    lane.model = accepted_model.into();
+    let api = StreamingMockApiClient::new(vec![vec![
+        ev_message_start(),
+        llm_runtime::HistoryEvent::ResponseObserved {
+            model: accepted_wire_model.into(),
+            response_id: Some("resp-candidate-one".into()),
+        },
+        accepted_fallback,
+        llm_runtime::HistoryEvent::ResponseObserved {
+            model: denied_model.into(),
+            response_id: Some("resp-candidate-two".into()),
+        },
+        streamed_refusal_fallback_event(original_model, denied_model, profile),
+    ]]);
+    let snapshot = test_refusal_api_text_snapshot(accepted_model);
+    api.set_refusal_snapshot(snapshot);
+    let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 3);
+    ctx.agent_definition.model = AgentModel::Explicit(original_model.into());
+    ctx.model_profile = Some(profile.into());
+    ctx.server_fallback_model_enforcement = Some(active_model_enforcement(&[
+        accepted_model,
+        accepted_wire_model,
+    ]));
+    let (_event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(32);
+
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+
+    assert_eq!(
+        api.call_count(),
+        1,
+        "both hops belong to one physical request"
+    );
+    assert_eq!(
+        api.refusal_snapshot_requests(),
+        [(accepted_model.to_owned(), Some(profile.to_owned()))],
+        "the declined hop uses the route advanced by the prior accepted hop, not lane.for_model, ResponseObserved candidate, or the denied target"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SubagentEvent::ServerFallbackApiErrorRow { row, .. }
+            if row.message.content.iter().any(|block| matches!(
+                block,
+                ContentBlock::Text { text, .. }
+                    if text.contains("Test model's safeguards flagged this message")
+            ))
+    )));
+}
+
+#[tokio::test]
+async fn completed_response_fallback_metadata_advances_source_across_hops() {
+    let original_model = "metadata-original-model";
+    let accepted_model = "metadata-accepted-model[1m]";
+    let accepted_wire_model = "metadata-accepted-model";
+    let denied_model = "metadata-denied-model";
+    let profile = "metadata-profile";
+    let mut completed = completed_with_server_fallback(
+        text_response("metadata refusal content", Some("refusal")),
+        accepted_model,
+        accepted_wire_model,
+        profile,
+        "refusal",
+    );
+    let llm_runtime::HistoryEvent::Completed { response } = &mut completed else {
+        unreachable!("completed fallback fixture")
+    };
+    let events = response.provider_metadata["llm_client"]["server_fallback_events"]
+        .as_array_mut()
+        .expect("fallback event array");
+    events[0]["event"]["fromModel"] = serde_json::Value::String(original_model.into());
+    events[0]["lane"]["forModel"] = serde_json::Value::String(original_model.into());
+    events.push(serde_json::json!({
+        "event": {
+            "fromModel": accepted_model,
+            "toModel": denied_model,
+            "reason": "refusal",
+            "apiRefusalCategory": "cyber",
+            "midStream": false,
+            "requestId": "second-metadata-request",
+            "discardedBlocks": [],
+            "retainedBlocks": [],
+            "retainedText": "",
+            "finalStopReason": "refusal"
+        },
+        "profile": profile,
+        "lane": {
+            "forModel": original_model,
+            "model": denied_model,
+            "mode": "default"
+        }
+    }));
+
+    let api = StreamingMockApiClient::new(vec![vec![completed]]);
+    let snapshot = test_refusal_api_text_snapshot(accepted_model);
+    api.set_refusal_snapshot(snapshot);
+    let mut ctx = loop_ctx(api.clone(), Some(CountingInvoker::new()), 3);
+    ctx.agent_definition.model = AgentModel::Explicit(original_model.into());
+    ctx.model_profile = Some(profile.into());
+    ctx.server_fallback_model_enforcement = Some(active_model_enforcement(&[
+        accepted_model,
+        accepted_wire_model,
+    ]));
+    let (_event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(32);
+
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+
+    assert_eq!(api.call_count(), 1);
+    assert_eq!(
+        api.refusal_snapshot_requests(),
+        [(accepted_model.to_owned(), Some(profile.to_owned()))],
+        "the completion-metadata path applies admitted preceding hops before resolving a later decline"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SubagentEvent::ServerFallbackApiErrorRow { row, .. }
+            if row.request_id.as_deref() == Some("second-metadata-request")
+    )));
 }
 
 struct OneShotDiagnostics {
@@ -726,23 +2941,37 @@ impl lingxi_core::host::NewDiagnosticsSource for OneShotDiagnostics {
     }
 }
 
-/// Records whether the agent 1h-cache-TTL override is visible AT THE MOMENT
-/// the round-trip is made — i.e. where the real request would be built.
+/// Records the exact agent cache-TTL override visible where the real request
+/// would be built, including explicit `5m` and no override.
 struct CacheTtlProbeClient {
-    seen: Mutex<Option<bool>>,
+    seen: Mutex<Option<Option<llm_runtime::AgentPromptCacheTtlOverride>>>,
 }
 
 #[async_trait]
 impl crate::api::SubagentApiClient for CacheTtlProbeClient {
-    async fn messages_create(
+    async fn stream(
         &self,
-        _model: &str,
-        _system: Option<&str>,
-        _messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        *self.seen.lock().unwrap() = Some(llm_runtime::agent_cache_ttl_1h_override());
-        Ok(text_response("done", Some("end_turn")))
+        request: crate::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let _model = request.model.as_str();
+        let _system = request.system.as_deref();
+        let _messages = request.messages;
+        let _tools = request.tools;
+        let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = async {
+            *self.seen.lock().unwrap() = Some(llm_runtime::agent_prompt_cache_ttl_override());
+            Ok(text_response("done", Some("end_turn")))
+        }
+        .await;
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+        Ok(futures::StreamExt::boxed(futures::stream::iter(
+            events.into_iter().map(Ok),
+        )))
     }
 }
 
@@ -750,7 +2979,9 @@ impl crate::api::SubagentApiClient for CacheTtlProbeClient {
 ///
 /// One run per test: three in a single `#[tokio::test]` overflowed the stack —
 /// `run_subagent`'s future is large, and they compose.
-async fn cache_ttl_seen_at_request_site(ttl: Option<crate::definition::AgentCacheTtl>) -> bool {
+async fn cache_ttl_seen_at_request_site(
+    ttl: Option<crate::definition::AgentCacheTtl>,
+) -> Option<llm_runtime::AgentPromptCacheTtlOverride> {
     let probe = Arc::new(CacheTtlProbeClient {
         seen: Mutex::new(None),
     });
@@ -767,33 +2998,28 @@ async fn cache_ttl_seen_at_request_site(ttl: Option<crate::definition::AgentCach
     seen.expect("the runner must have made a round-trip, or this test proves nothing")
 }
 
-/// The acceptance criterion recorded for AG-16: the override must be readable
-/// through the REAL runner-to-request path, not set by hand beside the
-/// assertion. A task-local that failed to propagate — because the round-trip
-/// moved onto its own task — would read `false` here while every unit test that
-/// scopes it manually still passed.
+/// `1h` survives the real runner-to-request path as a typed override.
 #[tokio::test]
-async fn agent_cache_ttl_1h_reaches_the_request_site() {
-    assert!(
+async fn agent_cache_ttl_one_hour_reaches_the_request_site() {
+    assert_eq!(
         cache_ttl_seen_at_request_site(Some(crate::definition::AgentCacheTtl::OneHour)).await,
-        "`cacheTtl: 1h` must be visible where the request is built"
+        Some(llm_runtime::AgentPromptCacheTtlOverride::OneHour)
     );
 }
 
-/// `"5m"` is Anthropic's default lifetime: it must NOT ask for the 1h
-/// breakpoint. Without this, any non-None value would look like it worked.
+/// Explicit `5m` stays distinct from an absent override at request construction.
 #[tokio::test]
-async fn agent_cache_ttl_5m_does_not_request_the_1h_breakpoint() {
-    assert!(
-        !cache_ttl_seen_at_request_site(Some(crate::definition::AgentCacheTtl::FiveMinutes)).await
+async fn agent_cache_ttl_five_minutes_reaches_the_request_site() {
+    assert_eq!(
+        cache_ttl_seen_at_request_site(Some(crate::definition::AgentCacheTtl::FiveMinutes)).await,
+        Some(llm_runtime::AgentPromptCacheTtlOverride::FiveMinutes)
     );
 }
 
-/// No frontmatter TTL leaves the env/setting in charge, exactly as before the
-/// field existed.
+/// Absence stays available for environment/settings resolution.
 #[tokio::test]
-async fn no_agent_cache_ttl_leaves_the_default_alone() {
-    assert!(!cache_ttl_seen_at_request_site(None).await);
+async fn no_agent_cache_ttl_reaches_the_request_site_as_absent() {
+    assert_eq!(cache_ttl_seen_at_request_site(None).await, None);
 }
 
 #[tokio::test]
@@ -1118,19 +3344,33 @@ struct TimeoutAfterToolApi {
 
 #[async_trait]
 impl crate::api::SubagentApiClient for TimeoutAfterToolApi {
-    async fn messages_create(
+    async fn stream(
         &self,
-        _model: &str,
-        _system: Option<&str>,
-        _messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        if call == 0 {
-            Ok(text_and_tool_response("partial", "Read", Some("tool_use")))
-        } else {
-            std::future::pending().await
+        request: crate::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let _model = request.model.as_str();
+        let _system = request.system.as_deref();
+        let _messages = request.messages;
+        let _tools = request.tools;
+        let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = async {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                Ok(text_and_tool_response("partial", "Read", Some("tool_use")))
+            } else {
+                std::future::pending().await
+            }
         }
+        .await;
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+        Ok(futures::StreamExt::boxed(futures::stream::iter(
+            events.into_iter().map(Ok),
+        )))
     }
 }
 
@@ -1204,110 +3444,117 @@ fn assistant_text(text: &str) -> ConversationMessage {
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: text.to_string(),
+            citations: None,
         }],
         stop_reason: Some("end_turn".into()),
     }
 }
 
 #[tokio::test]
-async fn run_subagent_emits_message_on_api_stream_end_then_completed() {
-    let ctx = fresh_subagent_ctx();
+async fn run_subagent_emits_streamed_message_before_completed() {
+    let api = StreamingMockApiClient::new(vec![streamed_text_turn("hello world", "end_turn")]);
+    let ctx = loop_ctx(api.clone(), None, 1);
     let agent_id = ctx.agent_id;
-
     let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(8);
-
-    // Drive the runner from a request-response cycle the M1 reducer
-    // accepts: UserMessage -> ApiStreamStart -> ApiStreamEnd -> EOF.
-    // The runner is expected to surface the assistant Message on
-    // ApiStreamEnd and finally Completed (Killed only on user_exit-prefixed
-    // terminal — see Task 1 step 3 notes).
-    let req = RequestId::new();
-    let msg_id = MessageId::new();
-    let final_msg = assistant_text("hello world");
-
-    let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
-
-    event_tx
-        .send(lingxi_core::Event::UserMessage {
-            message_id: msg_id,
-            request_id: req,
-            content: "hi".into(),
-        })
-        .await
-        .unwrap();
-    event_tx
-        .send(lingxi_core::Event::ApiStreamStart { request_id: req })
-        .await
-        .unwrap();
-    event_tx
-        .send(lingxi_core::Event::ApiStreamEnd {
-            request_id: req,
-            final_message: final_msg.clone(),
-            usage: Usage::default(),
-        })
-        .await
-        .unwrap();
-    // Close the event channel — the runner should NOT treat clean close
-    // as a failure when it has already produced a Message; instead it
-    // emits a Completed terminal (graceful end on EOF).
     drop(event_tx);
-
-    handle.await.unwrap();
-    let evs = drain(out_rx).await;
-
-    // At least one Message and exactly one terminal Completed.
-    let message_count = evs
-        .iter()
-        .filter(|e| matches!(e, SubagentEvent::Message { .. }))
-        .count();
-    let completed_count = evs
-        .iter()
-        .filter(|e| matches!(e, SubagentEvent::Completed { .. }))
-        .count();
-    let failed_count = evs
-        .iter()
-        .filter(|e| matches!(e, SubagentEvent::Failed { .. }))
-        .count();
-
+    let date_before = chrono::Local::now().format("%Y-%m-%d").to_string();
+    run_subagent(ctx, event_rx, out_tx).await;
+    let date_after = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let events = drain(out_rx).await;
+    assert_eq!(api.call_count(), 1);
     assert_eq!(
-        message_count, 1,
-        "exactly one Message emitted on ApiStreamEnd; got events: {evs:?}"
+        events
+            .iter()
+            .filter(|event| matches!(event, SubagentEvent::Completed { .. }))
+            .count(),
+        1
     );
-    assert_eq!(
-        completed_count, 1,
-        "exactly one Completed terminal; got events: {evs:?}"
-    );
-    assert_eq!(
-        failed_count, 0,
-        "no Failed events expected; got events: {evs:?}"
-    );
-
-    // The Message payload must be JSON-equivalent to the serialized final_message.
-    let msg_payload = evs
+    assert_eq!(one_completed(&events)["stop_reason"], "end_turn");
+    assert!(!events
         .iter()
-        .find_map(|e| match e {
+        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    let messages: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
             SubagentEvent::Message {
-                agent_id: aid,
-                message,
-            } => Some((*aid, message.clone())),
+                agent_id, message, ..
+            } => Some((*agent_id, message)),
             _ => None,
         })
+        .collect();
+    assert_eq!(
+        messages.len(),
+        2,
+        "one date and one assistant are published"
+    );
+    let startup: Vec<_> = messages
+        .iter()
+        .filter(|(_, message)| message["type"] == "attachment")
+        .collect();
+    assert_eq!(startup.len(), 1, "one startup date attachment is published");
+    assert_eq!(startup[0].0, agent_id);
+    let _: MessageId = serde_json::from_value(startup[0].1["uuid"].clone()).unwrap();
+    let date = startup[0].1["attachment"]["date"].as_str().unwrap();
+    assert!(date == date_before || date == date_after);
+    assert_eq!(
+        startup[0].1["attachment"],
+        serde_json::json!({"type":"date","date":date})
+    );
+    let assistants: Vec<_> = messages
+        .iter()
+        .filter(|(_, message)| message["role"] == "assistant")
+        .collect();
+    assert_eq!(assistants.len(), 1, "one completed assistant is published");
+    assert_eq!(assistants[0].0, agent_id);
+    let message: ConversationMessage = serde_json::from_value(assistants[0].1.clone()).unwrap();
+    let ConversationMessage::Assistant {
+        content,
+        stop_reason,
+        ..
+    } = message
+    else {
+        panic!("streamed completion must publish an assistant message");
+    };
+    assert_eq!(
+        content,
+        vec![ContentBlock::Text {
+            text: "hello world".into(),
+            citations: None
+        }]
+    );
+    // A content_block_stop row is yielded before message_delta supplies the
+    // terminal stop reason. The completed response carries end_turn separately.
+    assert_eq!(stop_reason, None);
+    let message_position = events
+        .iter()
+        .position(|event| {
+            matches!(event, SubagentEvent::Message { message, .. }
+            if message["role"] == "assistant")
+        })
         .unwrap();
-    assert_eq!(
-        msg_payload.0, agent_id,
-        "Message agent_id matches ctx.agent_id"
-    );
-    let expected = serde_json::to_value(&final_msg).unwrap();
-    assert_eq!(
-        msg_payload.1, expected,
-        "Message payload byte-equals serialized final_message"
-    );
+    let startup_position = events
+        .iter()
+        .position(|event| {
+            matches!(event, SubagentEvent::Message { message, .. }
+            if message["attachment"]["type"] == "date")
+        })
+        .unwrap();
+    let completed_position = events
+        .iter()
+        .position(|event| matches!(event, SubagentEvent::Completed { .. }))
+        .unwrap();
+    assert!(startup_position < message_position);
+    assert!(message_position < completed_position);
 }
 
 #[tokio::test]
 async fn run_subagent_emits_killed_on_user_exit_terminal() {
-    let ctx = fresh_subagent_ctx();
+    let mut ctx = loop_ctx(Arc::new(PendingApiClient), None, 1);
+    ctx.prompt_messages = vec![lingxi_core::types::ConversationMessage::user(
+        MessageId::new(),
+        "cancelled prompt".into(),
+    )];
     let agent_id = ctx.agent_id;
 
     let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
@@ -1341,6 +3588,15 @@ async fn run_subagent_emits_killed_on_user_exit_terminal() {
         completed_count, 0,
         "no Completed expected when terminal is UserExit; got events: {evs:?}"
     );
+    let snapshot_position = evs
+        .iter()
+        .position(|event| matches!(event, SubagentEvent::TranscriptSnapshot { .. }))
+        .expect("killed runner emits a host transcript snapshot");
+    let killed_position = evs
+        .iter()
+        .position(|event| matches!(event, SubagentEvent::Killed { .. }))
+        .unwrap();
+    assert!(snapshot_position < killed_position);
 
     // Killed carries the agent id.
     let killed_aid = evs
@@ -1355,10 +3611,8 @@ async fn run_subagent_emits_killed_on_user_exit_terminal() {
 
 #[tokio::test]
 async fn run_subagent_emits_killed_on_user_interrupt_terminal() {
-    // UserInterrupt does NOT terminate via the M1 reducer (catch-all),
-    // so without the fast-path this would emit Failed (channel close
-    // before terminal). The fast-path makes it produce Killed instead.
-    let ctx = fresh_subagent_ctx();
+    // Cancellation terminates an actual pending model request.
+    let ctx = loop_ctx(Arc::new(PendingApiClient), None, 1);
     let agent_id = ctx.agent_id;
 
     let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
@@ -1388,7 +3642,7 @@ async fn run_subagent_emits_killed_on_user_interrupt_terminal() {
 }
 
 #[tokio::test]
-async fn run_subagent_emits_failed_on_eof_before_any_work() {
+async fn run_subagent_rejects_an_unconfigured_api_before_any_work() {
     let ctx = fresh_subagent_ctx();
     let agent_id = ctx.agent_id;
 
@@ -1397,8 +3651,7 @@ async fn run_subagent_emits_failed_on_eof_before_any_work() {
 
     let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
 
-    // Drop the sender immediately — runner sees event_rx close on the
-    // very first recv, with no prior Message or Terminated emission.
+    // Configuration failure does not depend on the event channel staying open.
     drop(event_tx);
 
     handle.await.unwrap();
@@ -1419,7 +3672,7 @@ async fn run_subagent_emits_failed_on_eof_before_any_work() {
     let (failed_aid, failed_err) = failed.unwrap();
     assert_eq!(failed_aid, agent_id);
     assert_eq!(
-        failed_err, "run_subagent: event channel closed without terminal state",
+        failed_err, "Subagent model API is not configured",
         "byte-locked error message"
     );
 
@@ -1433,7 +3686,25 @@ async fn run_subagent_emits_failed_on_eof_before_any_work() {
     );
 }
 
-// ---- Loop-mode tests (api_client = Some) -----------------------------
+struct PendingApiClient;
+
+#[async_trait]
+impl crate::api::SubagentApiClient for PendingApiClient {
+    async fn stream(
+        &self,
+        _request: crate::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        std::future::pending().await
+    }
+}
+
+// ---- Model-request loop tests ----------------------------------------
 
 /// Pull the single `Completed.result` payload (panics if none / many).
 fn one_completed(evs: &[SubagentEvent]) -> serde_json::Value {
@@ -1465,6 +3736,1282 @@ async fn loop_single_end_turn_completes_with_aggregated_text() {
 }
 
 #[tokio::test]
+async fn child_turn_complete_mod_covers_answer_error_and_abort() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("child-turn-complete.js");
+    std::fs::write(
+        &module,
+        r#"let seen;
+let count = 0;
+export function register(on) {
+  on('turn.complete', ($, e, next) => {
+    seen = { ...e, probeCount: ++count };
+    return next(e);
+  });
+  on('prompt.submit', ($, e, next) => next({ ...e, text: JSON.stringify(seen ?? null) }));
+}"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "child-turn-complete",
+        dir.path(),
+        &module,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host.clone());
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    let mut response = text_response("child answer", Some("end_turn"));
+    response.usage.counts_mut().input_tokens = 17;
+    response.usage.counts_mut().output_tokens = 9;
+    let api = MockSubagentApiClient::new(vec![Ok(response)]);
+    let mut ctx = loop_ctx(api, None, 1);
+    ctx.hook_executor = Some(executor.clone());
+    ctx.hook_cwd = dir.path().to_path_buf();
+    let agent_id = ctx.agent_id.to_string();
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    assert_eq!(one_completed(&drain(out_rx).await)["text"], "child answer");
+    let observed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let result = host
+                .dispatch(
+                    "prompt.submit",
+                    serde_json::json!({"text":"probe"}),
+                    |event| async move { Ok(event) },
+                )
+                .await
+                .unwrap();
+            if result["text"] != "null" {
+                break result;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("child turn.complete dispatches");
+    let event: serde_json::Value =
+        serde_json::from_str(observed["text"].as_str().unwrap()).unwrap();
+    assert_eq!(event["agentId"], agent_id);
+    assert_eq!(event["answer"], "child answer");
+    assert_eq!(event["reason"], "answer");
+    assert_eq!(event["usage"]["input_tokens"], 17);
+    assert_eq!(event["usage"]["output_tokens"], 9);
+    assert_eq!(event["probeCount"], 1);
+
+    let failing_api = MockSubagentApiClient::new(vec![Err(llm_runtime::LlmError::Transport {
+        message: "provider failed".into(),
+    })]);
+    let mut failing_ctx = loop_ctx(failing_api, None, 1);
+    failing_ctx.hook_executor = Some(executor.clone());
+    failing_ctx.hook_cwd = dir.path().to_path_buf();
+    let failing_id = failing_ctx.agent_id.to_string();
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(failing_ctx, event_rx, out_tx).await;
+    assert!(drain(out_rx)
+        .await
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    let failed_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let result = host
+                .dispatch(
+                    "prompt.submit",
+                    serde_json::json!({"text":"probe"}),
+                    |event| async move { Ok(event) },
+                )
+                .await
+                .unwrap();
+            let event: serde_json::Value =
+                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+            if event["agentId"] == failing_id {
+                break event;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("failed child dispatches turn.complete");
+    assert_eq!(failed_event["reason"], "error");
+    assert!(failed_event.get("usage").is_none());
+    assert_eq!(failed_event["probeCount"], 2);
+
+    let unused_api =
+        MockSubagentApiClient::new(vec![Ok(text_response("unused", Some("end_turn")))]);
+    let mut abort_ctx = loop_ctx(unused_api, None, 1);
+    abort_ctx.hook_executor = Some(executor.clone());
+    abort_ctx.hook_cwd = dir.path().to_path_buf();
+    let abort_id = abort_ctx.agent_id.to_string();
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    event_tx
+        .send(lingxi_core::Event::UserInterrupt)
+        .await
+        .unwrap();
+    run_subagent(abort_ctx, event_rx, out_tx).await;
+    assert!(drain(out_rx)
+        .await
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Killed { .. })));
+    let aborted_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let result = host
+                .dispatch(
+                    "prompt.submit",
+                    serde_json::json!({"text":"probe"}),
+                    |event| async move { Ok(event) },
+                )
+                .await
+                .unwrap();
+            let event: serde_json::Value =
+                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+            if event["agentId"] == abort_id {
+                break event;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("aborted child dispatches turn.complete");
+    assert_eq!(aborted_event["reason"], "aborted");
+    assert_eq!(aborted_event["isAborted"], true);
+    assert_eq!(aborted_event["probeCount"], 3);
+
+    let mut tool_response = tool_use_response("Read", Some("tool_use"));
+    tool_response.usage.counts_mut().input_tokens = 4;
+    tool_response.usage.counts_mut().output_tokens = 2;
+    let mut final_response = text_response("after tool", Some("end_turn"));
+    final_response.usage.counts_mut().input_tokens = 17;
+    final_response.usage.counts_mut().output_tokens = 9;
+    let api = MockSubagentApiClient::new(vec![Ok(tool_response), Ok(final_response)]);
+    let mut multi_ctx = loop_ctx(api, Some(CountingInvoker::new()), 2);
+    multi_ctx.hook_executor = Some(executor);
+    multi_ctx.hook_cwd = dir.path().to_path_buf();
+    let multi_id = multi_ctx.agent_id.to_string();
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(multi_ctx, event_rx, out_tx).await;
+    assert_eq!(one_completed(&drain(out_rx).await)["text"], "after tool");
+    let multi_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let result = host
+                .dispatch(
+                    "prompt.submit",
+                    serde_json::json!({"text":"probe"}),
+                    |event| async move { Ok(event) },
+                )
+                .await
+                .unwrap();
+            let event: serde_json::Value =
+                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+            if event["agentId"] == multi_id {
+                break event;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("multi-response child dispatches turn.complete");
+    assert_eq!(multi_event["answer"], "after tool");
+    assert_eq!(multi_event["usage"]["input_tokens"], 21);
+    assert_eq!(multi_event["usage"]["output_tokens"], 11);
+    assert_eq!(multi_event["probeCount"], 4);
+}
+
+#[tokio::test]
+async fn child_turn_complete_mod_uses_bound_session_ui() {
+    struct ChildSession {
+        cwd: std::path::PathBuf,
+        logs: Arc<tokio::sync::Mutex<Vec<String>>>,
+    }
+    #[async_trait]
+    impl hooks::mods::ModSessionContext for ChildSession {
+        fn cwd(&self) -> std::path::PathBuf {
+            self.cwd.clone()
+        }
+        fn root(&self) -> std::path::PathBuf {
+            self.cwd.clone()
+        }
+        async fn model(&self) -> String {
+            "test-model".into()
+        }
+        async fn id(&self) -> String {
+            "test-session".into()
+        }
+        async fn turns(&self) -> u64 {
+            1
+        }
+        async fn emit_mod_log(&self, _plugin: &str, text: &str) {
+            self.logs.lock().await.push(text.to_owned());
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("child-ui.js");
+    std::fs::write(
+        &module,
+        r#"export function register(on) {
+  on('turn.start', async ($, e, next) => {
+    $.ui.log(`child-start:${await $.session.cwd()}:${e.text}`);
+    return next(e);
+  });
+  on('turn.complete', async ($, e, next) => {
+    $.ui.log(`child-ui:${await $.session.cwd()}:${e.reason}:${e.answer}`);
+    return next(e);
+  });
+}"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load("child-ui", dir.path(), &module, serde_json::json!({}))
+        .await
+        .unwrap();
+    let logs = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let session: Arc<dyn hooks::mods::ModSessionContext> = Arc::new(ChildSession {
+        cwd: dir.path().to_path_buf(),
+        logs: logs.clone(),
+    });
+    host.attach_background_context(Arc::downgrade(&session));
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host);
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    let api = MockSubagentApiClient::new(vec![Ok(text_response("visible", Some("end_turn")))]);
+    let mut ctx = loop_ctx(api, None, 1);
+    ctx.hook_executor = Some(executor.clone());
+    ctx.hook_cwd = dir.path().to_path_buf();
+    ctx.prompt_messages = vec![ConversationMessage::user(
+        MessageId::new(),
+        "visible question".to_string(),
+    )];
+    let child_cwd = dir.path().join("child");
+    std::fs::create_dir(&child_cwd).unwrap();
+    ctx.cwd = Some(child_cwd.clone());
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    assert_eq!(one_completed(&drain(out_rx).await)["text"], "visible");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if logs
+                .lock()
+                .await
+                .iter()
+                .any(|text| text == &format!("child-ui:{}:answer:visible", child_cwd.display()))
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("child Mod log reaches owning session");
+    assert!(logs
+        .lock()
+        .await
+        .iter()
+        .any(|text| text == &format!("child-start:{}:visible question", child_cwd.display())));
+}
+
+#[tokio::test]
+async fn child_turn_step_mod_rewrites_provider_model_and_visible_text() {
+    struct CapturingApi {
+        models: Arc<Mutex<Vec<String>>>,
+    }
+    #[async_trait]
+    impl crate::api::SubagentApiClient for CapturingApi {
+        async fn stream(
+            &self,
+            request: crate::api::SubagentApiRequest,
+        ) -> Result<
+            futures::stream::BoxStream<
+                'static,
+                Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+            >,
+            llm_runtime::LlmError,
+        > {
+            use futures::StreamExt;
+            self.models.lock().unwrap().push(request.model);
+            let mut response = text_response("physical text", Some("end_turn"));
+            response.usage.counts_mut().input_tokens = 11;
+            response.usage.counts_mut().output_tokens = 7;
+            let events = llm_runtime::stream_accumulator::response_to_stream_events(response);
+            Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("child-step.js");
+    std::fs::write(
+        &module,
+        r#"let seen;
+export function register(on) {
+  on('turn.step', async function* ($, e, next) {
+    if (typeof e.agentId !== 'string' || !e.turnId || e.index !== 0) {
+      throw new Error('child step identity missing');
+    }
+    if (!(await $.session.cwd()).endsWith('/child')) {
+      throw new Error('child step cwd missing');
+    }
+    const below = next({ ...e, model: 'child-rewrite-model' });
+    for await (const chunk of below) {
+      yield chunk.kind === 'text' ? { ...chunk, text: 'hooked child text' } : chunk;
+    }
+    return await below.result;
+  });
+  on('turn.complete', ($, e, next) => {
+    seen = e;
+    return next(e);
+  });
+  on('prompt.submit', ($, e, next) => next({ ...e, text: JSON.stringify(seen ?? null) }));
+}"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load("child-step", dir.path(), &module, serde_json::json!({}))
+        .await
+        .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host.clone());
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    let models = Arc::new(Mutex::new(Vec::new()));
+    let api = Arc::new(CapturingApi {
+        models: models.clone(),
+    });
+    let mut ctx = loop_ctx(api, None, 1);
+    ctx.hook_executor = Some(executor);
+    ctx.hook_cwd = dir.path().to_path_buf();
+    let child_cwd = dir.path().join("child");
+    std::fs::create_dir(&child_cwd).unwrap();
+    ctx.cwd = Some(child_cwd);
+    ctx.prompt_messages = vec![ConversationMessage::user(
+        MessageId::new(),
+        "question".into(),
+    )];
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_subagent(ctx, event_rx, out_tx),
+    )
+    .await
+    .expect("child Mod stream completes");
+    let events = drain(out_rx).await;
+    assert_eq!(one_completed(&events)["text"], "hooked child text");
+    assert_eq!(*models.lock().unwrap(), vec!["child-rewrite-model"]);
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let result = host
+                .dispatch(
+                    "prompt.submit",
+                    serde_json::json!({"text":"probe"}),
+                    |event| async move { Ok(event) },
+                )
+                .await
+                .unwrap();
+            let event: serde_json::Value =
+                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+            if !event.is_null() {
+                break event;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("physical usage reaches turn.complete");
+    assert_eq!(event["answer"], "hooked child text");
+    assert_eq!(event["usage"]["input_tokens"], 11);
+    assert_eq!(event["usage"]["output_tokens"], 7);
+}
+
+#[tokio::test]
+async fn child_turn_step_result_summarizes_real_stream_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("stream-result.js");
+    std::fs::write(
+        &module,
+        r#"let seen;
+export function register(on) {
+  on('turn.step', async function* ($, e, next) {
+    const below = next(e);
+    for await (const chunk of below) yield chunk;
+    seen = await below.result;
+    return seen;
+  });
+  on('prompt.submit', ($, e, next) => next({ ...e, text: JSON.stringify(seen ?? null) }));
+}"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load("stream-result", dir.path(), &module, serde_json::json!({}))
+        .await
+        .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host.clone());
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    let mut response = text_response("streamed child", Some("end_turn"));
+    response.usage.counts_mut().input_tokens = 11;
+    response.usage.counts_mut().output_tokens = 7;
+    let api = StreamingMockApiClient::new(vec![
+        llm_runtime::stream_accumulator::response_to_stream_events(response),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), None, 1);
+    ctx.hook_executor = Some(executor);
+    ctx.hook_cwd = dir.path().to_path_buf();
+    ctx.prompt_messages = vec![ConversationMessage::user(
+        MessageId::new(),
+        "question".into(),
+    )];
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_subagent(ctx, event_rx, out_tx),
+    )
+    .await
+    .expect("child streamed Mod step completes");
+    assert_eq!(
+        one_completed(&drain(out_rx).await)["text"],
+        "streamed child"
+    );
+    assert_eq!(api.call_count(), 1);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let result = host
+                .dispatch(
+                    "prompt.submit",
+                    serde_json::json!({"text":"probe"}),
+                    |event| async move { Ok(event) },
+                )
+                .await
+                .unwrap();
+            let result: serde_json::Value =
+                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+            if !result.is_null() {
+                break result;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("streamed next.result settles");
+    assert_eq!(result["answer"], "streamed child");
+    assert_eq!(result["stopReason"], "end_turn");
+    assert_eq!(result["usage"]["input_tokens"], 11);
+    assert_eq!(result["usage"]["output_tokens"], 7);
+}
+
+#[tokio::test]
+async fn child_turn_step_managed_policy_rejects_model_rewrite() {
+    struct DenyRewrite {
+        checked: Arc<Mutex<Vec<String>>>,
+    }
+    #[async_trait]
+    impl hooks::mods::ModSettingsReader for DenyRewrite {
+        async fn read(
+            &self,
+            _input: serde_json::Value,
+        ) -> Result<serde_json::Value, hooks::mods::ModError> {
+            Ok(serde_json::json!({}))
+        }
+
+        async fn model_allowed(&self, model: &str) -> Result<Option<bool>, hooks::mods::ModError> {
+            self.checked.lock().unwrap().push(model.to_owned());
+            Ok(Some(model != "wire-child-model"))
+        }
+    }
+
+    struct CapturingApi(Arc<Mutex<Vec<String>>>);
+    #[async_trait]
+    impl crate::api::SubagentApiClient for CapturingApi {
+        fn resolve_mod_media_route(
+            &self,
+            model: &str,
+            _profile: Option<&str>,
+        ) -> Option<llm_runtime::MediaRoute> {
+            if model != "denied-child-model" {
+                return None;
+            }
+            Some(llm_runtime::MediaRoute {
+                main: llm_runtime::ResolvedRoute {
+                    provider_id: llm_runtime::ProviderId::AnthropicFirstParty,
+                    profile_name: "rewritten-profile".into(),
+                    request_model: "wire-child-model".into(),
+                    display_model: model.into(),
+                    pricing_model: llm_runtime::PricingModelRef {
+                        pricing_provider_id: llm_runtime::ProviderId::AnthropicFirstParty,
+                        billing_model: model.into(),
+                        request_model: "wire-child-model".into(),
+                        display_model: model.into(),
+                    },
+                    capabilities: llm_runtime::Capabilities::default(),
+                    connection_chain: Vec::new(),
+                    failover: llm_runtime::FailoverTriggers::default(),
+                },
+                vision_delegate: None,
+            })
+        }
+
+        async fn stream(
+            &self,
+            request: crate::api::SubagentApiRequest,
+        ) -> Result<
+            futures::stream::BoxStream<
+                'static,
+                Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+            >,
+            llm_runtime::LlmError,
+        > {
+            use futures::StreamExt;
+            self.0.lock().unwrap().push(request.model);
+            let events = llm_runtime::stream_accumulator::response_to_stream_events(text_response(
+                "original model answer",
+                Some("end_turn"),
+            ));
+            Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("deny-child-model.js");
+    std::fs::write(
+        &module,
+        r#"export function register(on) {
+  on('turn.step', async function* ($, e, next) {
+    const below = next({ ...e, model: 'denied-child-model' });
+    for await (const chunk of below) yield chunk;
+    return await below.result;
+  });
+}"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "deny-child-model",
+        dir.path(),
+        &module,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let checked = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = hooks::HookRegistry::new();
+    registry.attach_mod_model_policy(Arc::new(DenyRewrite {
+        checked: checked.clone(),
+    }));
+    registry.set_mod_host(host);
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    let models = Arc::new(Mutex::new(Vec::new()));
+    let mut ctx = loop_ctx(Arc::new(CapturingApi(models.clone())), None, 1);
+    ctx.hook_executor = Some(executor);
+    ctx.hook_cwd = dir.path().to_path_buf();
+    ctx.prompt_messages = vec![ConversationMessage::user(
+        MessageId::new(),
+        "question".into(),
+    )];
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_subagent(ctx, event_rx, out_tx),
+    )
+    .await
+    .expect("child Mod stream completes");
+    assert_eq!(
+        one_completed(&drain(out_rx).await)["text"],
+        "original model answer"
+    );
+    assert_eq!(*checked.lock().unwrap(), vec!["wire-child-model"]);
+    assert_eq!(*models.lock().unwrap(), vec!["inherit"]);
+}
+
+#[tokio::test]
+async fn child_turn_step_synthetic_answer_skips_provider() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("child-synthetic-step.js");
+    std::fs::write(
+        &module,
+        r#"let seen;
+export function register(on) {
+  on('turn.step', async function* ($, e) {
+    yield { kind: 'text', index: 0, text: 'synthetic child' };
+    yield { kind: 'stop', stopReason: 'end_turn', usage: null };
+    return { turnId: e.turnId, index: e.index, answer: 'synthetic child',
+      toolUses: [], stopReason: 'end_turn', usage: null };
+  });
+  on('turn.complete', ($, e, next) => {
+    seen = e;
+    return next(e);
+  });
+  on('prompt.submit', ($, e, next) => next({ ...e, text: JSON.stringify(seen ?? null) }));
+}"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "child-synthetic-step",
+        dir.path(),
+        &module,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host.clone());
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    let api = MockSubagentApiClient::new(vec![]);
+    let mut ctx = loop_ctx(api.clone(), None, 1);
+    ctx.hook_executor = Some(executor);
+    ctx.hook_cwd = dir.path().to_path_buf();
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    assert_eq!(
+        one_completed(&drain(out_rx).await)["text"],
+        "synthetic child"
+    );
+    assert_eq!(api.call_count(), 0);
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let result = host
+                .dispatch(
+                    "prompt.submit",
+                    serde_json::json!({"text":"probe"}),
+                    |event| async move { Ok(event) },
+                )
+                .await
+                .unwrap();
+            let event: serde_json::Value =
+                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+            if !event.is_null() {
+                break event;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("synthetic turn completes");
+    assert_eq!(event["answer"], "synthetic child");
+    assert!(event.get("usage").is_none(), "event: {event}");
+}
+
+#[tokio::test]
+async fn child_turn_step_keeps_synthetic_and_physical_responses_in_one_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("child-two-records.js");
+    std::fs::write(
+        &module,
+        r#"export function register(on) {
+  on('turn.step', async function* ($, e, next) {
+    yield { kind: 'text', index: 0, text: 'synthetic first' };
+    const below = next(e);
+    for await (const chunk of below) yield chunk;
+    return await below.result;
+  });
+}"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "child-two-records",
+        dir.path(),
+        &module,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host);
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    let api =
+        MockSubagentApiClient::new(vec![Ok(text_response("physical second", Some("end_turn")))]);
+    let mut ctx = loop_ctx(api.clone(), None, 1);
+    ctx.hook_executor = Some(executor);
+    ctx.hook_cwd = dir.path().to_path_buf();
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_subagent(ctx, event_rx, out_tx),
+    )
+    .await
+    .expect("child Mod stream completes");
+    assert_eq!(api.call_count(), 1);
+    let events = drain(out_rx).await;
+    let assistant_texts: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            SubagentEvent::Message { message, .. } => {
+                serde_json::from_value::<ConversationMessage>(message.clone())
+                    .ok()
+                    .and_then(|message| match message {
+                        ConversationMessage::Assistant { content, .. } => Some(
+                            content
+                                .iter()
+                                .filter_map(|block| match block {
+                                    ContentBlock::Text { text, .. } => Some(text.as_str()),
+                                    _ => None,
+                                })
+                                .collect(),
+                        ),
+                        _ => None,
+                    })
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(assistant_texts.len(), 2, "{events:?}");
+    assert!(assistant_texts[0].contains("synthetic first"));
+    assert!(assistant_texts[1].contains("physical second"));
+    assert_eq!(one_completed(&events)["text"], "physical second");
+}
+
+#[tokio::test]
+async fn child_turn_step_drains_tool_before_later_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("child-tool-then-answer.js");
+    std::fs::write(
+        &module,
+        r#"export function register(on) {
+  on('turn.step', async function* ($, e, next) {
+    yield { kind: 'tool', index: 0, id: 'toolu_child_first', name: 'Read' };
+    yield { kind: 'input', index: 0, json: '{}' };
+    yield { kind: 'stop', stopReason: 'tool_use', usage: null };
+    const below = next(e);
+    for await (const chunk of below) yield chunk;
+    return await below.result;
+  });
+}"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "child-tool-then-answer",
+        dir.path(),
+        &module,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host);
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    let api = MockSubagentApiClient::new(vec![Ok(text_response(
+        "after child tool",
+        Some("end_turn"),
+    ))]);
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 1);
+    ctx.hook_executor = Some(executor);
+    ctx.hook_cwd = dir.path().to_path_buf();
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_subagent(ctx, event_rx, out_tx),
+    )
+    .await
+    .expect("child tool and later answer complete");
+    assert_eq!(api.call_count(), 1);
+    assert_eq!(invoker.call_count(), 1);
+    let events = drain(out_rx).await;
+    let messages: Vec<ConversationMessage> = events
+        .iter()
+        .filter_map(|event| match event {
+            SubagentEvent::Message { message, .. } => serde_json::from_value(message.clone()).ok(),
+            _ => None,
+        })
+        .collect();
+    let tool = messages
+        .iter()
+        .position(|message| {
+            matches!(message,
+                ConversationMessage::Assistant { content, .. }
+                    if content.iter().any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+            )
+        })
+        .expect("tool response");
+    let result = messages
+        .iter()
+        .position(|message| {
+            matches!(message,
+                ConversationMessage::User { content, .. }
+                    if content.iter().any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+            )
+        })
+        .expect("tool result");
+    let answer = messages
+        .iter()
+        .position(|message| {
+            matches!(message,
+                ConversationMessage::Assistant { content, .. }
+                    if content.iter().any(|block| matches!(block,
+                        ContentBlock::Text { text, .. } if text == "after child tool"))
+            )
+        })
+        .expect("later answer");
+    assert!(tool < result && result < answer);
+    assert_eq!(one_completed(&events)["text"], "after child tool");
+}
+
+#[tokio::test]
+async fn child_turn_step_two_visible_next_calls_share_one_turn_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("child-two-visible-next.js");
+    std::fs::write(
+        &module,
+        r#"export function register(on) {
+  on('turn.step', async function* ($, e, next) {
+    if (e.index !== 0) throw new Error('second assistant must not advance turn index');
+    const first = next(e);
+    for await (const chunk of first) yield chunk;
+    await first.result;
+    const second = next(e);
+    for await (const chunk of second) yield chunk;
+    return await second.result;
+  });
+}"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "child-two-visible-next",
+        dir.path(),
+        &module,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host);
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    let mut first = text_response("first physical", Some("end_turn"));
+    first.usage.counts_mut().output_tokens = 3;
+    let mut second = text_response("second physical", Some("end_turn"));
+    second.usage.counts_mut().output_tokens = 5;
+    let api = MockSubagentApiClient::new(vec![Ok(first), Ok(second)]);
+    let mut ctx = loop_ctx(api.clone(), None, 1);
+    ctx.hook_executor = Some(executor);
+    ctx.hook_cwd = dir.path().to_path_buf();
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_subagent(ctx, event_rx, out_tx),
+    )
+    .await
+    .expect("two visible child responses complete");
+    assert_eq!(api.call_count(), 2);
+    let events = drain(out_rx).await;
+    let texts: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            SubagentEvent::Message { message, .. } => {
+                serde_json::from_value::<ConversationMessage>(message.clone())
+                    .ok()
+                    .and_then(|message| match message {
+                        ConversationMessage::Assistant { content, .. } => Some(
+                            content
+                                .iter()
+                                .filter_map(|block| match block {
+                                    ContentBlock::Text { text, .. } => Some(text.as_str()),
+                                    _ => None,
+                                })
+                                .collect(),
+                        ),
+                        _ => None,
+                    })
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["first physical", "second physical"]);
+    assert_eq!(one_completed(&events)["text"], "second physical");
+    let usage = events
+        .iter()
+        .find_map(|event| match event {
+            SubagentEvent::Completed {
+                cumulative_usage, ..
+            } => Some(cumulative_usage.counts()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(usage.output_tokens, 8);
+    let calls = api.physical_calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].request.model, calls[1].request.model);
+    assert_eq!(calls[0].request.profile, calls[1].request.profile);
+    assert_eq!(calls[0].request.system, calls[1].request.system);
+    assert_eq!(calls[0].request.messages, calls[1].request.messages);
+    assert_eq!(calls[0].request.tools, calls[1].request.tools);
+    assert_eq!(calls[0].request.forced_tool, calls[1].request.forced_tool);
+    assert_eq!(calls[0].request.effort, calls[1].request.effort);
+    assert_eq!(
+        calls[0].request.opts.max_output_tokens,
+        calls[1].request.opts.max_output_tokens
+    );
+    assert_eq!(
+        calls[0].request.opts.query_source_label,
+        calls[1].request.opts.query_source_label
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| {
+                call.response
+                    .as_ref()
+                    .map(|response| response.usage.counts().output_tokens)
+            })
+            .collect::<Vec<_>>(),
+        [Some(3), Some(5)]
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| {
+                call.response
+                    .as_ref()
+                    .and_then(|response| response.stop_reason.as_deref())
+            })
+            .collect::<Vec<_>>(),
+        [Some("end_turn"), Some("end_turn")]
+    );
+}
+
+#[tokio::test]
+async fn child_turn_step_multiple_next_calls_meter_all_physical_responses() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("child-multiple-next.js");
+    std::fs::write(
+        &module,
+        r#"let seen;
+export function register(on) {
+  on('turn.step', async function* ($, e, next) {
+    const first = next(e);
+    for await (const _chunk of first) {}
+    const second = next(e);
+    for await (const chunk of second) yield chunk;
+    return await second.result;
+  });
+  on('turn.complete', ($, e, next) => {
+    seen = e;
+    return next(e);
+  });
+  on('prompt.submit', ($, e, next) => next({ ...e, text: JSON.stringify(seen ?? null) }));
+}"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "child-multiple-next",
+        dir.path(),
+        &module,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host.clone());
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    let mut first = text_response("hidden first", Some("end_turn"));
+    first.usage.counts_mut().input_tokens = 11;
+    first.usage.counts_mut().output_tokens = 7;
+    let mut second = text_response("visible second", Some("end_turn"));
+    second.usage.counts_mut().input_tokens = 13;
+    second.usage.counts_mut().output_tokens = 5;
+    let api = MockSubagentApiClient::new(vec![Ok(first), Ok(second)]);
+    let mut ctx = loop_ctx(api.clone(), None, 1);
+    ctx.hook_executor = Some(executor);
+    ctx.hook_cwd = dir.path().to_path_buf();
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    assert_eq!(api.call_count(), 2);
+    let events = drain(out_rx).await;
+    assert_eq!(one_completed(&events)["text"], "visible second");
+    let completed_usage = events
+        .iter()
+        .find_map(|event| match event {
+            SubagentEvent::Completed {
+                cumulative_usage, ..
+            } => Some(cumulative_usage.counts()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(completed_usage.input_tokens, 24);
+    assert_eq!(completed_usage.output_tokens, 12);
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let result = host
+                .dispatch(
+                    "prompt.submit",
+                    serde_json::json!({"text":"probe"}),
+                    |event| async move { Ok(event) },
+                )
+                .await
+                .unwrap();
+            let event: serde_json::Value =
+                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+            if !event.is_null() {
+                break event;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("multi-next turn completes");
+    assert_eq!(event["answer"], "visible second");
+    assert_eq!(event["usage"]["input_tokens"], 24);
+    assert_eq!(event["usage"]["output_tokens"], 12);
+}
+
+#[tokio::test]
+async fn child_turn_step_cancel_after_paid_next_keeps_usage() {
+    struct FirstThenPending {
+        calls: AtomicUsize,
+        second_started: Arc<tokio::sync::Notify>,
+        first: llm_runtime::HistoryResponse,
+    }
+    #[async_trait]
+    impl crate::api::SubagentApiClient for FirstThenPending {
+        async fn stream(
+            &self,
+            _request: crate::api::SubagentApiRequest,
+        ) -> Result<
+            futures::stream::BoxStream<
+                'static,
+                Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+            >,
+            llm_runtime::LlmError,
+        > {
+            use futures::StreamExt;
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let events =
+                    llm_runtime::stream_accumulator::response_to_stream_events(self.first.clone());
+                return Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed());
+            }
+            self.second_started.notify_one();
+            std::future::pending().await
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("child-cancel-step.js");
+    std::fs::write(
+        &module,
+        r#"let seen;
+export function register(on) {
+  on('turn.step', async function* ($, e, next) {
+    const first = next(e);
+    for await (const _chunk of first) {}
+    const second = next(e);
+    for await (const chunk of second) yield chunk;
+    return await second.result;
+  });
+  on('turn.complete', ($, e, next) => {
+    seen = e;
+    return next(e);
+  });
+  on('prompt.submit', ($, e, next) => next({ ...e, text: JSON.stringify(seen ?? null) }));
+}"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "child-cancel-step",
+        dir.path(),
+        &module,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host.clone());
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    let mut first = text_response("paid first", Some("end_turn"));
+    first.usage.counts_mut().input_tokens = 11;
+    first.usage.counts_mut().output_tokens = 7;
+    let second_started = Arc::new(tokio::sync::Notify::new());
+    let api = Arc::new(FirstThenPending {
+        calls: AtomicUsize::new(0),
+        second_started: second_started.clone(),
+        first,
+    });
+    let mut ctx = loop_ctx(api.clone(), None, 2);
+    ctx.hook_executor = Some(executor);
+    ctx.hook_cwd = dir.path().to_path_buf();
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        second_started.notified(),
+    )
+    .await
+    .expect("second request starts");
+    event_tx
+        .send(lingxi_core::Event::UserInterrupt)
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), runner)
+        .await
+        .expect("cancelled child stops")
+        .unwrap();
+    assert!(drain(out_rx)
+        .await
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Killed { .. })));
+    assert_eq!(api.calls.load(Ordering::SeqCst), 2);
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let result = host
+                .dispatch(
+                    "prompt.submit",
+                    serde_json::json!({"text":"probe"}),
+                    |event| async move { Ok(event) },
+                )
+                .await
+                .unwrap();
+            let event: serde_json::Value =
+                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+            if !event.is_null() {
+                break event;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cancelled child turn completes");
+    assert_eq!(event["reason"], "aborted");
+    assert_eq!(event["usage"]["input_tokens"], 11);
+    assert_eq!(event["usage"]["output_tokens"], 7);
+}
+
+#[tokio::test]
+async fn child_turn_step_failure_before_next_runs_original_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("child-fallback-step.js");
+    std::fs::write(
+        &module,
+        r#"export function register(on) {
+  on('turn.step', async function* () {
+    yield { kind: 'text', index: 0, text: 'discard synthetic text' };
+    throw new Error('fails before next');
+  });
+}"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "child-fallback-step",
+        dir.path(),
+        &module,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host);
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    let api = MockSubagentApiClient::new(vec![Ok(text_response("fallback", Some("end_turn")))]);
+    let mut ctx = loop_ctx(api.clone(), None, 1);
+    ctx.hook_executor = Some(executor);
+    ctx.hook_cwd = dir.path().to_path_buf();
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+    assert_eq!(one_completed(&events)["text"], "fallback");
+    let texts: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            SubagentEvent::Message { message, .. } => {
+                serde_json::from_value::<ConversationMessage>(message.clone())
+                    .ok()
+                    .and_then(|message| match message {
+                        ConversationMessage::Assistant { content, .. } => Some(
+                            content
+                                .iter()
+                                .filter_map(|block| match block {
+                                    ContentBlock::Text { text, .. } => Some(text.as_str()),
+                                    _ => None,
+                                })
+                                .collect(),
+                        ),
+                        _ => None,
+                    })
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        ["fallback"],
+        "Native buffers pre-request synthetic assistant output and discards it when the hook fails before next(e)"
+    );
+    assert_eq!(api.call_count(), 1);
+    let calls = api.physical_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].request.model, "inherit");
+    assert_eq!(
+        calls[0]
+            .response
+            .as_ref()
+            .and_then(|response| response.stop_reason.as_deref()),
+        Some("end_turn")
+    );
+}
+
+#[tokio::test]
 async fn fusion_panel_tools_receive_the_trusted_deterministic_policy() {
     let api = MockSubagentApiClient::new(vec![
         Ok(tool_use_response("WebFetch", Some("tool_use"))),
@@ -1477,7 +5024,7 @@ async fn fusion_panel_tools_receive_the_trusted_deterministic_policy() {
     let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
-    let _ = drain(out_rx).await;
+    drop(drain(out_rx).await);
 
     assert_eq!(
         invoker.policies(),
@@ -1715,13 +5262,7 @@ async fn schema_no_call_nudges_twice_then_aborts() {
     assert_eq!(api2.call_count(), 3);
 }
 
-/// `SubagentApiClient` used ONLY through the `_opts` streaming seam
-/// (`messages_create_stream_in_opts` / `messages_create_stream_forced_in_opts`
-/// — the two methods `run_subagent_loop` actually calls). Records, per
-/// round-trip, whether the runner went through the FORCED variant (`true`) or
-/// the plain/auto variant (`false`) — the only way to observe `tool_choice`
-/// from outside the wire, since both variants funnel unrelated calls through
-/// the same underlying `HistoryResponse` script.
+/// Records each complete request's tool choice and conversation history.
 struct StructuredOutputModeCapturingApiClient {
     responses: Mutex<VecDeque<llm_runtime::HistoryResponse>>,
     forced_calls: Mutex<Vec<bool>>,
@@ -1765,32 +5306,16 @@ impl StructuredOutputModeCapturingApiClient {
             .unwrap()
             .pop_front()
             .unwrap_or_else(|| text_response("(exhausted)", Some("end_turn")));
-        let events = crate::accumulator::response_to_stream_events(resp);
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(resp);
         Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
     }
 }
 
 #[async_trait]
 impl crate::api::SubagentApiClient for StructuredOutputModeCapturingApiClient {
-    async fn messages_create(
+    async fn stream(
         &self,
-        _model: &str,
-        _system: Option<&str>,
-        _messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        unreachable!("driven only through the _opts streaming seam")
-    }
-
-    async fn messages_create_stream_in_opts(
-        &self,
-        _model: &str,
-        _profile: Option<&str>,
-        _system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-        _effort: Option<serde_json::Value>,
-        _opts: crate::api::SubagentApiCallOpts,
+        request: crate::api::SubagentApiRequest,
     ) -> Result<
         futures::stream::BoxStream<
             'static,
@@ -1798,30 +5323,11 @@ impl crate::api::SubagentApiClient for StructuredOutputModeCapturingApiClient {
         >,
         llm_runtime::LlmError,
     > {
-        self.forced_calls.lock().unwrap().push(false);
-        self.messages_seen.lock().unwrap().push(messages);
-        self.next_stream()
-    }
-
-    async fn messages_create_stream_forced_in_opts(
-        &self,
-        _model: &str,
-        _profile: Option<&str>,
-        _system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-        _forced_tool: Option<&str>,
-        _effort: Option<serde_json::Value>,
-        _opts: crate::api::SubagentApiCallOpts,
-    ) -> Result<
-        futures::stream::BoxStream<
-            'static,
-            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
-        >,
-        llm_runtime::LlmError,
-    > {
-        self.forced_calls.lock().unwrap().push(true);
-        self.messages_seen.lock().unwrap().push(messages);
+        self.forced_calls
+            .lock()
+            .unwrap()
+            .push(request.forced_tool.is_some());
+        self.messages_seen.lock().unwrap().push(request.messages);
         self.next_stream()
     }
 }
@@ -2102,32 +5608,16 @@ impl RecordingForceApiClient {
             .push(forced_tool.map(str::to_string));
         self.messages_per_call.lock().unwrap().push(messages);
         let resp = self.next_response()?;
-        let events = crate::accumulator::response_to_stream_events(resp);
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(resp);
         Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
     }
 }
 
 #[async_trait]
 impl crate::api::SubagentApiClient for RecordingForceApiClient {
-    async fn messages_create(
+    async fn stream(
         &self,
-        _model: &str,
-        _system: Option<&str>,
-        _messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        unreachable!("run_subagent_loop drives every round through the _opts streaming seam only")
-    }
-
-    async fn messages_create_stream_in_opts(
-        &self,
-        _model: &str,
-        _profile: Option<&str>,
-        _system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-        _effort: Option<serde_json::Value>,
-        _opts: crate::api::SubagentApiCallOpts,
+        request: crate::api::SubagentApiRequest,
     ) -> Result<
         futures::stream::BoxStream<
             'static,
@@ -2135,27 +5625,7 @@ impl crate::api::SubagentApiClient for RecordingForceApiClient {
         >,
         llm_runtime::LlmError,
     > {
-        self.record_and_stream(messages, None)
-    }
-
-    async fn messages_create_stream_forced_in_opts(
-        &self,
-        _model: &str,
-        _profile: Option<&str>,
-        _system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-        forced_tool: Option<&str>,
-        _effort: Option<serde_json::Value>,
-        _opts: crate::api::SubagentApiCallOpts,
-    ) -> Result<
-        futures::stream::BoxStream<
-            'static,
-            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
-        >,
-        llm_runtime::LlmError,
-    > {
-        self.record_and_stream(messages, forced_tool)
+        self.record_and_stream(request.messages, request.forced_tool.as_deref())
     }
 }
 
@@ -2598,15 +6068,7 @@ async fn loop_completed_cumulative_usage_sums_turns_and_reports_real_uncapped_ou
     assert!(!last.is_empty(), "at least the newest message is retained");
 }
 
-/// `SubagentApiClient` that implements ONLY the two `_in_opts` methods
-/// (`messages_create_stream_in_opts` / `messages_create_stream_forced_in_opts`
-/// — the seam `run_subagent_loop` actually calls, per `runner.rs`'s
-/// `call_opts` construction). Every other method — including the ones the
-/// trait's OWN default chain would fall back to (`messages_create_stream_in`,
-/// `..._forced_in`, `..._stream`, `..._forced`, `messages_create`) —
-/// is `unreachable!()`, so any call that reaches this client through a
-/// non-opts method panics instead of silently dropping `opts`. Records the
-/// `SubagentApiCallOpts` seen on every round-trip.
+/// Records registered call options on each typed streaming request.
 struct OptsOnlyCapturingApiClient {
     responses: Mutex<VecDeque<llm_runtime::HistoryResponse>>,
     opts_seen: Mutex<Vec<crate::api::SubagentApiCallOpts>>,
@@ -2642,32 +6104,16 @@ impl OptsOnlyCapturingApiClient {
             .unwrap()
             .pop_front()
             .unwrap_or_else(|| text_response("(exhausted)", Some("end_turn")));
-        let events = crate::accumulator::response_to_stream_events(resp);
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(resp);
         Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
     }
 }
 
 #[async_trait]
 impl crate::api::SubagentApiClient for OptsOnlyCapturingApiClient {
-    async fn messages_create(
+    async fn stream(
         &self,
-        _model: &str,
-        _system: Option<&str>,
-        _messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        unreachable!("driven only through the _opts streaming seam")
-    }
-
-    async fn messages_create_stream_in_opts(
-        &self,
-        _model: &str,
-        _profile: Option<&str>,
-        _system: Option<&str>,
-        _messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-        _effort: Option<serde_json::Value>,
-        opts: crate::api::SubagentApiCallOpts,
+        request: crate::api::SubagentApiRequest,
     ) -> Result<
         futures::stream::BoxStream<
             'static,
@@ -2675,42 +6121,11 @@ impl crate::api::SubagentApiClient for OptsOnlyCapturingApiClient {
         >,
         llm_runtime::LlmError,
     > {
-        self.record_and_stream(opts)
-    }
-
-    async fn messages_create_stream_forced_in_opts(
-        &self,
-        _model: &str,
-        _profile: Option<&str>,
-        _system: Option<&str>,
-        _messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-        _forced_tool: Option<&str>,
-        _effort: Option<serde_json::Value>,
-        opts: crate::api::SubagentApiCallOpts,
-    ) -> Result<
-        futures::stream::BoxStream<
-            'static,
-            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
-        >,
-        llm_runtime::LlmError,
-    > {
-        self.record_and_stream(opts)
+        self.record_and_stream(request.opts)
     }
 }
 
-/// WP2a item 2 (F002 sub-claim 3), round 2: the Fusion-only decorator
-/// `WorkflowWatchdogApiClient` sits between the runner and the production
-/// `ProviderApiAdapter` on the ONLY path that spawns a Fusion panel
-/// (`panel.rs` -> `handle.rs`'s `WORKFLOW_QUERY_WATCHDOG_OVERRIDE` machinery
-/// wraps `ctx.api_client` in it). If the decorator does not override the two
-/// `_in_opts` methods, the trait's default implementation re-dispatches
-/// through the NON-opts chain on `self` (the wrapper), which the wrapper only
-/// overrides down to `messages_create_stream_forced_in` / `..._stream_in` —
-/// so `opts` (the Fusion per-turn `max_output_tokens` ceiling and the COGS
-/// `query_source_label`) is silently dropped before it ever reaches the inner
-/// adapter, and a client that implements ONLY the opts seam is driven through
-/// its unimplemented non-opts fallback and panics.
+/// Registered Fusion rounds keep their capability while deriving fresh calls.
 #[tokio::test]
 async fn registered_panel_rounds_derive_fresh_calls_and_preserve_registration() {
     let api = OptsOnlyCapturingApiClient::new(vec![
@@ -2773,8 +6188,7 @@ async fn workflow_watchdog_wrapper_threads_opts_to_the_inner_client() {
     assert_eq!(
         opts.len(),
         2,
-        "both turns must reach the inner client through the opts seam \
-         (a fallback to the non-opts chain panics before this point)"
+        "both rounds must carry their registered call options to the inner client"
     );
     for (turn, o) in opts.iter().enumerate() {
         assert_eq!(
@@ -2792,8 +6206,7 @@ async fn workflow_watchdog_wrapper_threads_opts_to_the_inner_client() {
 
 #[tokio::test]
 async fn loop_consumes_streaming_seam_end_to_end() {
-    // Proves the runner drives the loop through `messages_create_stream`:
-    // the mock's non-streaming `messages_create` is `unreachable!`. Turn 1
+    // The required stream returns actual decoded turn events. Turn 1
     // streams a `tool_use` (dispatched via the invoker); turn 2 streams the
     // final text. Asserts two streamed round-trips, one tool dispatch, and
     // that the accumulated turn carries the streamed text + stop_reason.
@@ -2841,7 +6254,7 @@ async fn synchronous_child_dispatch_preserves_scheduled_headless_session_mode() 
 
 #[tokio::test]
 async fn loop_advertises_context_tool_schemas_to_the_seam() {
-    // `ctx.tool_schemas` must reach `messages_create_stream`'s `tools` arg
+    // `ctx.tool_schemas` must reach the typed request's `tools` field
     // on every round-trip (this is what lets the model emit `tool_use`).
     let api = StreamingMockApiClient::new(vec![streamed_text_turn("done", "end_turn")]);
     let mut ctx = loop_ctx(api.clone(), None, 4);
@@ -2924,6 +6337,7 @@ async fn loop_streaming_protocol_error_surfaces_failed() {
             content_block: llm_runtime::ContentBlock::Text {
                 text: String::new(),
                 cache_control: None,
+                citations: None,
             },
         },
         // no content_block_stop, no message_stop
@@ -2980,7 +6394,7 @@ async fn loop_refuses_tool_outside_allowed_list_without_dispatching() {
             return false;
         };
         content.iter().any(|b| {
-            matches!(b, ContentBlock::ToolResult { is_error: true, content, .. }
+            matches!(b, ContentBlock::ToolResult { is_error: Some(true), content, .. }
                 if content.contains("not in this agent's allowed tools"))
         })
     });
@@ -3045,6 +6459,12 @@ fn companion_note_absent_for_non_nke_tools() {
     }
 }
 
+#[test]
+fn companion_note_workflow_follows_tool_permissions() {
+    assert!(companion_note_for_disallowed_tool("Workflow").is_none());
+    assert!(companion_note_for_disallowed_tool("TaskOutput").is_some());
+}
+
 #[tokio::test]
 async fn loop_nke_tool_refusal_includes_companion_note() {
     // These tools are unavailable in every subagent.
@@ -3073,7 +6493,7 @@ async fn loop_nke_tool_refusal_includes_companion_note() {
             };
             content.iter().any(|b| {
                 matches!(b,
-                    ContentBlock::ToolResult { is_error: true, content, .. }
+                    ContentBlock::ToolResult { is_error: Some(true), content, .. }
                     if content.contains("not available inside subagents")
                         && content.contains(nke_tool)
                         && content.contains("return findings to the orchestrator")
@@ -3115,7 +6535,7 @@ async fn loop_non_nke_tool_refusal_has_no_companion_note() {
         };
         content.iter().all(|b| {
             !matches!(b,
-                ContentBlock::ToolResult { is_error: true, content, .. }
+                ContentBlock::ToolResult { is_error: Some(true), content, .. }
                 if content.contains("not available inside subagents")
             )
         })
@@ -3168,7 +6588,7 @@ async fn loop_budget_exhausted_stops_before_any_round_trip() {
     assert_eq!(
         api.call_count(),
         0,
-        "the budget gate precedes messages_create — no round-trip"
+        "the budget gate precedes the streaming request — no round-trip"
     );
     let failed = evs.iter().find_map(|e| match e {
         SubagentEvent::Failed { error, .. } => Some(error.clone()),
@@ -3476,18 +6896,32 @@ async fn persistent_resume_emits_user_message_before_stalled_provider_once() {
     }
     #[async_trait]
     impl crate::api::SubagentApiClient for ResumeApi {
-        async fn messages_create(
+        async fn stream(
             &self,
-            _model: &str,
-            _system: Option<&str>,
-            _messages: Vec<ConversationMessage>,
-            _tools: Vec<serde_json::Value>,
-        ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-            if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
-                self.started.notify_one();
-                self.release.notified().await;
+            request: crate::api::SubagentApiRequest,
+        ) -> Result<
+            futures::stream::BoxStream<
+                'static,
+                Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+            >,
+            llm_runtime::LlmError,
+        > {
+            let _model = request.model.as_str();
+            let _system = request.system.as_deref();
+            let _messages = request.messages;
+            let _tools = request.tools;
+            let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = async {
+                if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                    self.started.notify_one();
+                    self.release.notified().await;
+                }
+                Ok(text_response("answer", Some("end_turn")))
             }
-            Ok(text_response("answer", Some("end_turn")))
+            .await;
+            let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+            Ok(futures::StreamExt::boxed(futures::stream::iter(
+                events.into_iter().map(Ok),
+            )))
         }
     }
     let api = Arc::new(ResumeApi {
@@ -3612,6 +7046,140 @@ async fn persist_mode_processes_second_message_after_idling() {
         2,
         "exactly two model round-trips (one per turn-set)"
     );
+}
+
+#[tokio::test]
+async fn persistent_child_mod_turn_complete_fires_once_per_turn_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("persistent-turn-complete.js");
+    std::fs::write(
+        &module,
+        r#"let seen = [];
+let started = [];
+export function register(on) {
+  on('turn.start', ($, e) => {
+    started.push(e);
+    return { turnId: 'ignored-by-engine' };
+  });
+  on('turn.complete', ($, e, next) => {
+    seen.push(e);
+    return next(e);
+  });
+  on('prompt.submit', ($, e, next) => next({ ...e, text: JSON.stringify({ started, seen }) }));
+}"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "persistent-turn-complete",
+        dir.path(),
+        &module,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host.clone());
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    let mut first = text_response("first turn", Some("end_turn"));
+    first.usage.counts_mut().input_tokens = 3;
+    first.usage.counts_mut().output_tokens = 2;
+    let mut second = text_response("second turn", Some("end_turn"));
+    second.usage.counts_mut().input_tokens = 5;
+    second.usage.counts_mut().output_tokens = 4;
+    let api = MockSubagentApiClient::new(vec![Ok(first), Ok(second)]);
+    let mut ctx = loop_ctx(api, None, 4);
+    ctx.persistent = true;
+    ctx.prompt_messages = vec![ConversationMessage::user(
+        MessageId::new(),
+        "first question".to_string(),
+    )];
+    ctx.hook_executor = Some(executor.clone());
+    ctx.hook_cwd = dir.path().to_path_buf();
+    let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, mut out_rx) = mpsc::channel::<SubagentEvent>(16);
+    let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+    while !matches!(
+        out_rx.recv().await.unwrap(),
+        SubagentEvent::Completed { .. }
+    ) {}
+    event_tx
+        .send(lingxi_core::Event::UserMessage {
+            message_id: MessageId::new(),
+            request_id: RequestId::new(),
+            content: "continue".into(),
+        })
+        .await
+        .unwrap();
+    while !matches!(
+        out_rx.recv().await.unwrap(),
+        SubagentEvent::Completed { .. }
+    ) {}
+    drop(event_tx);
+    runner.await.unwrap();
+    let events = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let result = host
+                .dispatch(
+                    "prompt.submit",
+                    serde_json::json!({"text":"probe"}),
+                    |event| async move { Ok(event) },
+                )
+                .await
+                .unwrap();
+            let events: serde_json::Value =
+                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+            if events["seen"]
+                .as_array()
+                .is_some_and(|seen| seen.len() == 2)
+                && events["started"]
+                    .as_array()
+                    .is_some_and(|started| started.len() == 2)
+            {
+                break events;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both persistent turns dispatch");
+    assert_eq!(events["started"][0]["text"], "first question");
+    assert_eq!(events["started"][1]["text"], "continue");
+    assert_eq!(events["seen"][0]["answer"], "first turn");
+    assert_eq!(events["seen"][1]["answer"], "second turn");
+    assert_eq!(events["started"][0]["turnId"], events["seen"][0]["turnId"]);
+    assert_eq!(events["started"][1]["turnId"], events["seen"][1]["turnId"]);
+    assert_ne!(events["seen"][0]["turnId"], events["seen"][1]["turnId"]);
+    assert_eq!(events["seen"][0]["usage"]["input_tokens"], 3);
+    assert_eq!(events["seen"][1]["usage"]["input_tokens"], 5);
+
+    let mut rejected = loop_ctx(MockSubagentApiClient::new(vec![]), None, 1);
+    rejected.hook_executor = Some(executor);
+    rejected.hook_cwd = dir.path().to_path_buf();
+    rejected.budget = Some(Arc::new(MockBudget { exceeded: true }));
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(rejected, event_rx, out_tx).await;
+    assert!(drain(out_rx)
+        .await
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
+    let result = host
+        .dispatch(
+            "prompt.submit",
+            serde_json::json!({"text":"probe"}),
+            |event| async move { Ok(event) },
+        )
+        .await
+        .unwrap();
+    let after_rejection: serde_json::Value =
+        serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+    assert_eq!(after_rejection["started"].as_array().unwrap().len(), 2);
+    assert_eq!(after_rejection["seen"].as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -3786,23 +7354,37 @@ impl StuckThenCapturingApiClient {
 }
 #[async_trait]
 impl crate::api::SubagentApiClient for StuckThenCapturingApiClient {
-    async fn messages_create(
+    async fn stream(
         &self,
-        _model: &str,
-        _system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        let n = self.calls.fetch_add(1, Ordering::SeqCst);
-        if n == 0 {
-            // Stuck: never resolves. The runner's select must drop this
-            // future on the inbound UserMessage and re-issue.
-            self.first_call_started.notify_one();
-            std::future::pending::<()>().await;
-            unreachable!("the stuck first call must be dropped, not resolved")
+        request: crate::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let _model = request.model.as_str();
+        let _system = request.system.as_deref();
+        let messages = request.messages;
+        let _tools = request.tools;
+        let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = async {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                // Stuck: never resolves. The runner's select must drop this
+                // future on the inbound UserMessage and re-issue.
+                self.first_call_started.notify_one();
+                std::future::pending::<()>().await;
+                unreachable!("the stuck first call must be dropped, not resolved")
+            }
+            self.later_messages.lock().unwrap().push(messages);
+            Ok(text_response("woke and answered", Some("end_turn")))
         }
-        self.later_messages.lock().unwrap().push(messages);
-        Ok(text_response("woke and answered", Some("end_turn")))
+        .await;
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+        Ok(futures::StreamExt::boxed(futures::stream::iter(
+            events.into_iter().map(Ok),
+        )))
     }
 }
 
@@ -3839,12 +7421,16 @@ async fn persist_mode_message_wakes_stuck_round_trip_and_carries_the_text() {
 
     // The wake re-issues the round-trip immediately; the retry completes.
     let mut out_rx = out_rx;
-    let completed = loop {
-        let ev = out_rx.recv().await.expect("the woken turn-set completes");
-        if matches!(ev, SubagentEvent::Completed { .. }) {
-            break ev;
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let ev = out_rx.recv().await.expect("the woken turn-set completes");
+            if matches!(ev, SubagentEvent::Completed { .. }) {
+                break ev;
+            }
         }
-    };
+    })
+    .await
+    .expect("a UserMessage must wake the stuck model request within the bound");
     let SubagentEvent::Completed { result, .. } = &completed else {
         unreachable!()
     };
@@ -3929,19 +7515,33 @@ impl ToolUseThenCapturingApiClient {
 }
 #[async_trait]
 impl crate::api::SubagentApiClient for ToolUseThenCapturingApiClient {
-    async fn messages_create(
+    async fn stream(
         &self,
-        _model: &str,
-        _system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        let n = self.calls.fetch_add(1, Ordering::SeqCst);
-        if n == 0 {
-            return Ok(tool_use_response("SlowTool", Some("tool_use")));
+        request: crate::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let _model = request.model.as_str();
+        let _system = request.system.as_deref();
+        let messages = request.messages;
+        let _tools = request.tools;
+        let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = async {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                return Ok(tool_use_response("SlowTool", Some("tool_use")));
+            }
+            self.later_messages.lock().unwrap().push(messages);
+            Ok(text_response("done after direction", Some("end_turn")))
         }
-        self.later_messages.lock().unwrap().push(messages);
-        Ok(text_response("done after direction", Some("end_turn")))
+        .await;
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+        Ok(futures::StreamExt::boxed(futures::stream::iter(
+            events.into_iter().map(Ok),
+        )))
     }
 }
 
@@ -4019,7 +7619,7 @@ async fn launcher_message_is_direction_not_approval_of_pending_permission() {
         .position(|m| {
             matches!(m, ConversationMessage::User { content, .. }
                 if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { content, is_error, .. }
-                    if *is_error && content == "Error: Permission to use SlowTool has been denied.")))
+                    if is_error.unwrap_or(false) && content == "Error: Permission to use SlowTool has been denied.")))
         })
         .expect("the deny tool_result is in history");
     let direction_idx = hist
@@ -4065,18 +7665,32 @@ impl CapturingApiClient {
 }
 #[async_trait]
 impl crate::api::SubagentApiClient for CapturingApiClient {
-    async fn messages_create(
+    async fn stream(
         &self,
-        _model: &str,
-        _system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        let mut slot = self.first_messages.lock().unwrap();
-        if slot.is_none() {
-            *slot = Some(messages);
+        request: crate::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let _model = request.model.as_str();
+        let _system = request.system.as_deref();
+        let messages = request.messages;
+        let _tools = request.tools;
+        let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = async {
+            let mut slot = self.first_messages.lock().unwrap();
+            if slot.is_none() {
+                *slot = Some(messages);
+            }
+            Ok(text_response("done", Some("end_turn")))
         }
-        Ok(text_response("done", Some("end_turn")))
+        .await;
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+        Ok(futures::StreamExt::boxed(futures::stream::iter(
+            events.into_iter().map(Ok),
+        )))
     }
 }
 
@@ -4103,7 +7717,7 @@ impl hooks::executor::BuiltinHookHandler for AdditionalContextStartHook {
             stderr: String::new(),
             exit_code: None,
             response: Some(hooks::response::HookResponse {
-                additional_context: Some(self.context.clone()),
+                additional_context: Some(self.context.clone().into()),
                 ..Default::default()
             }),
         }
@@ -4258,9 +7872,9 @@ impl hooks::executor::BuiltinHookHandler for RecordingStopContextHook {
                 .as_ref()
                 .expect("worker Stop must carry live history");
             assert!(live.messages.iter().any(|message| matches!(message,
-                ConversationMessage::User { content, .. } if content.iter().any(|block| matches!(block, lingxi_core::types::ContentBlock::Text { text } if text == "go")))));
+                ConversationMessage::User { content, .. } if content.iter().any(|block| matches!(block, lingxi_core::types::ContentBlock::Text { text, .. } if text == "go")))));
             assert!(live.messages.iter().any(|message| matches!(message,
-                ConversationMessage::Assistant { content, .. } if content.iter().any(|block| matches!(block, lingxi_core::types::ContentBlock::Text { text } if text == "done")))));
+                ConversationMessage::Assistant { content, .. } if content.iter().any(|block| matches!(block, lingxi_core::types::ContentBlock::Text { text, .. } if text == "done")))));
             self.seen
                 .lock()
                 .unwrap()
@@ -4312,6 +7926,35 @@ fn frontmatter_stop_hook(handler_id: &str) -> hooks::definition::HookDefinition 
         async_timeout: None,
         rewake_message: None,
     }
+}
+
+#[tokio::test]
+async fn scoped_only_child_fires_frontmatter_stop_without_global_snapshot_buffer() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let api = MockSubagentApiClient::new(vec![Ok(text_response("done", Some("end_turn")))]);
+    let mut ctx = loop_ctx(api, None, 1);
+    ctx.stop_hook_scope = lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped;
+    ctx.agent_definition.frontmatter_hooks =
+        vec![frontmatter_stop_hook("record-subagent-stop-in-runner")];
+    let executor = exec_recording_stop(seen.clone());
+    ctx.hook_executor = Some(executor.clone());
+    let session = ctx.hook_session_id;
+    let child = ctx.agent_id;
+    let (events, input) = mpsc::channel(8);
+    drop(events);
+    let (output, results) = mpsc::channel(32);
+    run_subagent(ctx, input, output).await;
+    assert!(drain(results)
+        .await
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    assert_eq!(*seen.lock().unwrap(), vec!["completed".to_string()]);
+    assert!(
+        executor
+            .take_agent_prompt_transcript(session, child)
+            .is_none(),
+        "a child without a global consumer cannot retain a global snapshot"
+    );
 }
 
 #[tokio::test]
@@ -4506,6 +8149,7 @@ async fn runner_fires_subagent_start_and_frontmatter_stop_exactly_once_each() {
 struct MockSkillLoader {
     known: String,
     content_text: String,
+    expected_model: Option<String>,
 }
 #[async_trait]
 impl lingxi_core::host::skill_loader::SkillLoader for MockSkillLoader {
@@ -4514,13 +8158,18 @@ impl lingxi_core::host::skill_loader::SkillLoader for MockSkillLoader {
         skill_name: &str,
         _agent_type: &str,
         _cwd: Option<&std::path::Path>,
+        model: Option<&str>,
     ) -> Result<Option<lingxi_core::host::skill_loader::SkillLoad>, String> {
+        if let Some(expected) = &self.expected_model {
+            assert_eq!(model, Some(expected.as_str()));
+        }
         Ok(if skill_name == self.known {
             Some(lingxi_core::host::skill_loader::SkillLoad {
                 display_name: skill_name.to_string(),
                 progress_message: None,
                 content: vec![ContentBlock::Text {
                     text: self.content_text.clone(),
+                    citations: None,
                 }],
             })
         } else {
@@ -4534,7 +8183,7 @@ fn user_text(msg: &ConversationMessage) -> Option<String> {
         let t: Vec<String> = content
             .iter()
             .filter_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.clone()),
+                ContentBlock::Text { text, .. } => Some(text.clone()),
                 _ => None,
             })
             .collect();
@@ -4605,7 +8254,7 @@ impl hooks::executor::BuiltinHookHandler for CountingAdditionalContextStartHook 
             stderr: String::new(),
             exit_code: None,
             response: Some(hooks::response::HookResponse {
-                additional_context: Some(self.context.clone()),
+                additional_context: Some(self.context.clone().into()),
                 ..Default::default()
             }),
         }
@@ -4791,8 +8440,12 @@ async fn subagent_start_multiple_contexts_join_into_one_reminder() {
 
 #[tokio::test]
 async fn no_hook_executor_means_no_preload_injection() {
-    // G4: with hook_executor=None the child history carries ONLY the prompt
-    // seed — byte-identical to legacy (no SubagentStart fire).
+    // G4: no SubagentStart fire or skill preload. The normal .286 date
+    // announcement still follows the prompt seed.
+    let expected_date = format!(
+        "<system-reminder>\nToday's date is {}.\n</system-reminder>",
+        chrono::Local::now().format("%Y-%m-%d")
+    );
     let api = CapturingApiClient::new();
     let mut ctx = loop_ctx(api.clone(), None, 2);
     ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "do it".into())];
@@ -4805,8 +8458,30 @@ async fn no_hook_executor_means_no_preload_injection() {
     let _ = drain(out_rx).await;
 
     let msgs = api.captured();
-    assert_eq!(msgs.len(), 1, "only the prompt seed; got: {msgs:?}");
+    assert_eq!(
+        msgs.len(),
+        2,
+        "prompt seed and native date announcement: {msgs:?}"
+    );
     assert_eq!(user_text(&msgs[0]).as_deref(), Some("do it"));
+    assert!(matches!(
+        &msgs[0],
+        ConversationMessage::User { is_meta: false, .. }
+    ));
+    assert_eq!(user_text(&msgs[1]).as_deref(), Some(expected_date.as_str()));
+    assert!(matches!(
+        &msgs[1],
+        ConversationMessage::User {
+            is_meta: true,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+            ..
+        }
+    ));
+    for text in msgs.iter().filter_map(user_text) {
+        assert!(!text.contains("SubagentStart hook additional context"));
+        assert!(!text.contains("<skill-format>"));
+    }
 }
 
 #[tokio::test]
@@ -4818,9 +8493,11 @@ async fn resolved_skill_prepends_metadata_then_content() {
     ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "go".into())];
     ctx.agent_definition.agent_type = "my-agent".into();
     ctx.agent_definition.skills = vec!["my-skill".into()];
+    ctx.agent_definition.model = crate::definition::AgentModel::Explicit("claude-fable-5".into());
     ctx.skill_loader = Some(Arc::new(MockSkillLoader {
         known: "my-skill".into(),
         content_text: "SKILL BODY".into(),
+        expected_model: Some("claude-fable-5".into()),
     }));
 
     let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
@@ -4849,6 +8526,10 @@ async fn resolved_skill_prepends_metadata_then_content() {
 #[tokio::test]
 async fn missing_skill_is_skipped_no_message() {
     // G5: an unresolved skill injects NOTHING (claude logs the warn + skips).
+    let expected_date = format!(
+        "<system-reminder>\nToday's date is {}.\n</system-reminder>",
+        chrono::Local::now().format("%Y-%m-%d")
+    );
     let api = CapturingApiClient::new();
     let mut ctx = loop_ctx(api.clone(), None, 2);
     ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "go".into())];
@@ -4857,6 +8538,7 @@ async fn missing_skill_is_skipped_no_message() {
     ctx.skill_loader = Some(Arc::new(MockSkillLoader {
         known: "my-skill".into(),
         content_text: "SKILL BODY".into(),
+        expected_model: None,
     }));
 
     let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
@@ -4868,9 +8550,29 @@ async fn missing_skill_is_skipped_no_message() {
     let msgs = api.captured();
     assert_eq!(
         msgs.len(),
-        1,
-        "only the prompt seed (missing skill skipped): {msgs:?}"
+        2,
+        "prompt seed and native date announcement (missing skill skipped): {msgs:?}"
     );
+    assert_eq!(user_text(&msgs[0]).as_deref(), Some("go"));
+    assert!(matches!(
+        &msgs[0],
+        ConversationMessage::User { is_meta: false, .. }
+    ));
+    assert_eq!(user_text(&msgs[1]).as_deref(), Some(expected_date.as_str()));
+    assert!(matches!(
+        &msgs[1],
+        ConversationMessage::User {
+            is_meta: true,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+            ..
+        }
+    ));
+    for text in msgs.iter().filter_map(user_text) {
+        assert!(!text.contains("SubagentStart hook additional context"));
+        assert!(!text.contains("<skill-format>"));
+        assert!(!text.contains("SKILL BODY"));
+    }
 }
 
 #[tokio::test]
@@ -4886,6 +8588,7 @@ async fn preload_order_additional_context_then_skills() {
     ctx.skill_loader = Some(Arc::new(MockSkillLoader {
         known: "my-skill".into(),
         content_text: "SKILL BODY".into(),
+        expected_model: None,
     }));
 
     let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
@@ -4944,21 +8647,9 @@ impl ResultStreamMockApiClient {
 }
 #[async_trait]
 impl crate::api::SubagentApiClient for ResultStreamMockApiClient {
-    fn workflow_query_watchdog(&self) -> Option<lingxi_core::host::WorkflowQueryWatchdog> {
-        self.workflow_watchdog
-    }
-
-    // Accept registered contexts so the scripted malformed response reaches
-    // the runner's ownership guard instead of the trait's adapter guard.
-    async fn messages_create_stream_in_opts(
+    async fn stream(
         &self,
-        model: &str,
-        _profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        effort: Option<serde_json::Value>,
-        _opts: crate::api::SubagentApiCallOpts,
+        request: crate::api::SubagentApiRequest,
     ) -> Result<
         futures::stream::BoxStream<
             'static,
@@ -4966,9 +8657,18 @@ impl crate::api::SubagentApiClient for ResultStreamMockApiClient {
         >,
         llm_runtime::LlmError,
     > {
-        self.messages_create_stream(model, system, messages, tools, effort)
-            .await
+        self.histories.lock().unwrap().push(request.messages);
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
+        Ok(futures::StreamExt::boxed(futures::stream::iter(events)))
     }
+
+    fn workflow_query_watchdog(&self) -> Option<lingxi_core::host::WorkflowQueryWatchdog> {
+        self.workflow_watchdog
+    }
+
+    // Accept registered contexts so the scripted malformed response reaches
+    // the runner's ownership guard instead of the trait's adapter guard.
 
     async fn observe_workflow_query_retry(&self, agent_id: AgentId, attempt: u32, reason: String) {
         let stop = self.retry_stop.lock().unwrap().clone();
@@ -4984,35 +8684,6 @@ impl crate::api::SubagentApiClient for ResultStreamMockApiClient {
             .await;
         }
     }
-    async fn messages_create(
-        &self,
-        _model: &str,
-        _system: Option<&str>,
-        _messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        unreachable!("streaming mock must be driven through messages_create_stream")
-    }
-    async fn messages_create_stream(
-        &self,
-        _model: &str,
-        _system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-        _effort: Option<serde_json::Value>,
-    ) -> Result<
-        futures::stream::BoxStream<
-            'static,
-            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
-        >,
-        llm_runtime::LlmError,
-    > {
-        use futures::StreamExt;
-        self.histories.lock().unwrap().push(messages);
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
-        Ok(futures::stream::iter(events).boxed())
-    }
 }
 
 /// A partial streamed turn: one COMPLETED text block, then a mid-stream `Err`
@@ -5027,6 +8698,7 @@ fn partial_text_then_err(
         Ok(HistoryEvent::ContentBlockStart {
             index: 0,
             content_block: LB::Text {
+                citations: None,
                 text: String::new(),
                 cache_control: None,
             },
@@ -5446,7 +9118,7 @@ fn enable_create_parse_recovery(ctx: &mut SubagentContext) {
 
 fn reasoning_only_truncated_turn() -> Vec<Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>>
 {
-    crate::accumulator::response_to_stream_events(llm_runtime::HistoryResponse {
+    llm_runtime::stream_accumulator::response_to_stream_events(llm_runtime::HistoryResponse {
         content: vec![llm_runtime::ContentBlock::Reasoning {
             text: "unfinished reasoning".into(),
             signature: None,
@@ -5767,8 +9439,6 @@ async fn local_app_create_json_correction_rechecks_cancellation_and_budget() {
         let (out, events) = mpsc::channel(64);
         run_subagent(ctx, rx, out).await;
         let events = drain(events).await;
-        assert_eq!(api.call_count(), 1);
-        assert_eq!(invoker.call_count(), 0);
         if cancel {
             assert!(events
                 .iter()
@@ -5860,7 +9530,7 @@ async fn design_parse_recovery_still_requires_schema_valid_output() {
     assert!(events.iter().any(|event| matches!(event, SubagentEvent::Completed { result, .. } if result == &serde_json::json!({"design": {}}))));
     assert!(api.histories.lock().unwrap()[2].iter().any(|message| {
         matches!(message, ConversationMessage::User { content, .. }
-            if content.iter().any(|block| matches!(block, ContentBlock::ToolResult { is_error: true, content, .. }
+            if content.iter().any(|block| matches!(block, ContentBlock::ToolResult { is_error: Some(true), content, .. }
                 if content.contains("Output does not match required schema"))))
     }));
 }
@@ -6188,7 +9858,34 @@ async fn run_subagent_persists_its_conversation_to_the_agent_transcript() {
     let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
-    let _ = drain(out_rx).await;
+    let events = drain(out_rx).await;
+    let snapshot = events
+        .iter()
+        .find_map(|event| match event {
+            SubagentEvent::TranscriptSnapshot { messages, .. } => Some(messages),
+            _ => None,
+        })
+        .expect("terminal runner emits its settled history to the host");
+    assert!(snapshot.iter().any(|message| {
+        matches!(
+            message,
+            lingxi_core::types::ConversationMessage::Assistant { .. }
+        ) && message.text_content() == "the answer"
+    }));
+    assert!(snapshot.iter().any(|message| {
+        matches!(
+            message,
+            lingxi_core::types::ConversationMessage::User { .. }
+        ) && message.text_content() == "do the thing"
+    }));
+    let snapshot_event = events
+        .iter()
+        .find(|event| matches!(event, SubagentEvent::TranscriptSnapshot { .. }))
+        .unwrap();
+    assert!(
+        serde_json::to_value(snapshot_event).is_err(),
+        "host transcript snapshots cannot serialize onto a public event wire"
+    );
 
     let path = dir.path().join(format!("agent-{agent_id}.jsonl"));
     let body = std::fs::read_to_string(&path)
@@ -6464,7 +10161,7 @@ fn user_tool_result(tool_use_id: ToolUseId, content: &str) -> ConversationMessag
         content: vec![ContentBlock::ToolResult {
             tool_use_id,
             content: content.to_string(),
-            is_error: false,
+            is_error: Some(false),
             provider_tool_use_id: None,
             content_blocks: None,
         }],
@@ -6886,6 +10583,8 @@ struct OwnerNotificationRegistry {
     parked_fold: tokio::sync::Notify,
     owner: lingxi_core::types::AgentId,
     pending: Mutex<Vec<lingxi_core::host::task_registry::TaskNotification>>,
+    agent_fact_updates: Mutex<Vec<lingxi_core::host::task_registry::AgentListLocalFactUpdate>>,
+    records: Mutex<Vec<lingxi_core::host::task_registry::TaskRecord>>,
     revision: tokio::sync::watch::Sender<u64>,
 }
 impl OwnerNotificationRegistry {
@@ -6906,6 +10605,16 @@ impl OwnerNotificationRegistry {
 }
 #[async_trait]
 impl lingxi_core::host::task_registry::TaskRegistryHandle for OwnerNotificationRegistry {
+    async fn update_agent_list_local_fact(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        update: lingxi_core::host::task_registry::AgentListLocalFactUpdate,
+    ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
+        assert_eq!(agent_id, self.owner);
+        self.agent_fact_updates.lock().unwrap().push(update);
+        Ok(())
+    }
+
     async fn create(
         &self,
         _: lingxi_core::host::task_registry::TaskCreateInput,
@@ -6917,12 +10626,18 @@ impl lingxi_core::host::task_registry::TaskRegistryHandle for OwnerNotificationR
     }
     async fn get(
         &self,
-        _: &str,
+        task_id: &str,
     ) -> Result<
         Option<lingxi_core::host::task_registry::TaskRecord>,
         lingxi_core::host::task_registry::TaskRegistryError,
     > {
-        unreachable!()
+        Ok(self
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|record| record.task_id == task_id)
+            .cloned())
     }
     async fn list(
         &self,
@@ -6931,7 +10646,7 @@ impl lingxi_core::host::task_registry::TaskRegistryHandle for OwnerNotificationR
         Vec<lingxi_core::host::task_registry::TaskRecord>,
         lingxi_core::host::task_registry::TaskRegistryError,
     > {
-        Ok(vec![])
+        Ok(self.records.lock().unwrap().clone())
     }
     async fn update(
         &self,
@@ -7005,6 +10720,165 @@ impl lingxi_core::host::task_registry::TaskRegistryHandle for OwnerNotificationR
 }
 
 #[tokio::test]
+async fn local_agent_idle_fact_tracks_native_outstanding_agent_tool_set() {
+    // Native adds a whole assistant row before checking whether all pending
+    // tool calls are Agent calls. It then removes each id when that call's
+    // result is produced. The second row intentionally puts Read first so
+    // removing it exposes the still-pending Agent call as idle.
+    let api = MockSubagentApiClient::new(vec![
+        Ok(tool_use_response("Agent", Some("tool_use"))),
+        Ok(tool_uses_response(&["Read", "Agent"])),
+        Ok(text_response("done", Some("end_turn"))),
+    ]);
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 3);
+    let registry = Arc::new(OwnerNotificationRegistry {
+        park_foreground: false,
+        rest_acknowledged: AtomicBool::new(true),
+        wake_checked: tokio::sync::Notify::new(),
+        drains: AtomicUsize::new(0),
+        parked_fold: tokio::sync::Notify::new(),
+        owner: ctx.agent_id,
+        pending: Mutex::new(vec![]),
+        agent_fact_updates: Mutex::new(vec![]),
+        records: Mutex::new(vec![]),
+        revision: tokio::sync::watch::channel(0).0,
+    });
+    ctx.task_registry = Some(registry.clone());
+
+    let (_event_tx, event_rx) = mpsc::channel(8);
+    let (out_tx, mut out_rx) = mpsc::channel(32);
+    let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !matches!(out_rx.recv().await, Some(SubagentEvent::Completed { .. })) {}
+    })
+    .await
+    .expect("scripted local agent finishes");
+    runner.await.unwrap();
+
+    assert_eq!(api.call_count(), 3);
+    assert_eq!(invoker.call_count(), 3);
+    assert_eq!(
+        *registry.agent_fact_updates.lock().unwrap(),
+        vec![
+            lingxi_core::host::task_registry::AgentListLocalFactUpdate::IsIdle(true),
+            lingxi_core::host::task_registry::AgentListLocalFactUpdate::IsIdle(false),
+            lingxi_core::host::task_registry::AgentListLocalFactUpdate::IsIdle(true),
+            lingxi_core::host::task_registry::AgentListLocalFactUpdate::IsIdle(false),
+        ],
+        "all assistant tool IDs must be registered before dispatch, and each matching result removes its own ID"
+    );
+}
+
+#[tokio::test]
+async fn notified_local_agent_removes_only_its_parent_keepalive_reason() {
+    let mut ctx = loop_ctx(MockSubagentApiClient::new(vec![]), None, 1);
+    let child_agent_id = lingxi_core::types::AgentId::new();
+    let active_child_agent_id = lingxi_core::types::AgentId::new();
+    let stale_child_agent_id = lingxi_core::types::AgentId::new();
+    let child_reason = format!("agent:{}", child_agent_id.as_uuid());
+    let active_reason = format!("agent:{}", active_child_agent_id.as_uuid());
+    let stale_reason = format!("agent:{}", stale_child_agent_id.as_uuid());
+    let add = |reason: String| {
+        lingxi_core::host::task_registry::AgentListLocalFactUpdate::KeepaliveReason {
+            reason,
+            active: true,
+        }
+    };
+    let parent = lingxi_core::host::task_registry::TaskRecord {
+        task_id: "aparent".into(),
+        task_type: "local_agent".into(),
+        status: "running".into(),
+        ..Default::default()
+    };
+    let mut parent = parent;
+    parent.agent_facts = Some(lingxi_core::host::task_registry::AgentTaskFacts {
+        stable_agent_id: lingxi_core::host::task_registry::FieldPresence::Value(
+            ctx.agent_id.as_uuid().to_string(),
+        ),
+        keepalive_reasons: lingxi_core::host::task_registry::FieldPresence::Value(vec![
+            child_reason.clone(),
+            active_reason.clone(),
+            stale_reason.clone(),
+            "bash:background-task".into(),
+        ]),
+        ..Default::default()
+    });
+    let mut child = lingxi_core::host::task_registry::TaskRecord {
+        task_id: "achild".into(),
+        task_type: "local_agent".into(),
+        status: "completed".into(),
+        notified: true,
+        owner_agent_id: Some(child_agent_id.to_string()),
+        ..Default::default()
+    };
+    child.agent_facts = Some(lingxi_core::host::task_registry::AgentTaskFacts {
+        stable_agent_id: lingxi_core::host::task_registry::FieldPresence::Value(
+            child_agent_id.as_uuid().to_string(),
+        ),
+        parent_id: lingxi_core::host::task_registry::FieldPresence::Value(serde_json::json!(ctx
+            .agent_id
+            .to_string())),
+        ..Default::default()
+    });
+    let mut active_child = lingxi_core::host::task_registry::TaskRecord {
+        task_id: "aactive".into(),
+        task_type: "local_agent".into(),
+        status: "running".into(),
+        notified: false,
+        ..Default::default()
+    };
+    active_child.agent_facts = Some(lingxi_core::host::task_registry::AgentTaskFacts {
+        stable_agent_id: lingxi_core::host::task_registry::FieldPresence::Value(
+            active_child_agent_id.as_uuid().to_string(),
+        ),
+        parent_id: lingxi_core::host::task_registry::FieldPresence::Value(serde_json::json!(ctx
+            .agent_id
+            .to_string())),
+        ..Default::default()
+    });
+    let registry = Arc::new(OwnerNotificationRegistry {
+        park_foreground: false,
+        rest_acknowledged: AtomicBool::new(true),
+        wake_checked: tokio::sync::Notify::new(),
+        drains: AtomicUsize::new(0),
+        parked_fold: tokio::sync::Notify::new(),
+        owner: ctx.agent_id,
+        pending: Mutex::new(vec![]),
+        agent_fact_updates: Mutex::new(vec![
+            add(child_reason.clone()),
+            add(active_reason.clone()),
+            add(stale_reason.clone()),
+        ]),
+        records: Mutex::new(vec![parent, child, active_child]),
+        revision: tokio::sync::watch::channel(0).0,
+    });
+    registry.publish();
+    ctx.task_registry = Some(registry.clone());
+
+    let mut history = Vec::new();
+    assert!(fold_task_notifications(&ctx, &mut history).await);
+    assert_eq!(history.len(), 1, "the completion notice is folded once");
+    assert_eq!(
+        *registry.agent_fact_updates.lock().unwrap(),
+        vec![
+            add(child_reason.clone()),
+            add(active_reason),
+            add(stale_reason.clone()),
+            lingxi_core::host::task_registry::AgentListLocalFactUpdate::KeepaliveReason {
+                reason: child_reason,
+                active: false,
+            },
+            lingxi_core::host::task_registry::AgentListLocalFactUpdate::KeepaliveReason {
+                reason: stale_reason,
+                active: false,
+            },
+        ],
+        "notified or missing Agent rows are pruned while live Agent and non-Agent reasons stay"
+    );
+}
+
+#[tokio::test]
 async fn owner_notification_wakes_parked_runner_without_user_message() {
     let api = MockSubagentApiClient::new(vec![
         Ok(text_response("first", Some("end_turn"))),
@@ -7020,6 +10894,8 @@ async fn owner_notification_wakes_parked_runner_without_user_message() {
         parked_fold: tokio::sync::Notify::new(),
         owner: ctx.agent_id,
         pending: Mutex::new(vec![]),
+        agent_fact_updates: Mutex::new(vec![]),
+        records: Mutex::new(vec![]),
         revision: tokio::sync::watch::channel(0).0,
     });
     ctx.task_registry = Some(registry.clone());
@@ -7074,21 +10950,32 @@ struct NotificationDuringRequestApi {
 }
 #[async_trait]
 impl crate::api::SubagentApiClient for NotificationDuringRequestApi {
-    async fn messages_create(
+    async fn stream(
         &self,
-        _: &str,
-        _: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        _: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        *self.last_messages.lock().unwrap() = messages;
-        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            self.registry.publish();
-            // Notification arrives with a genuinely pending provider future.
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-            self.completed.store(true, Ordering::SeqCst);
+        request: crate::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let messages = request.messages;
+        let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = async {
+            *self.last_messages.lock().unwrap() = messages;
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.registry.publish();
+                // Notification arrives with a genuinely pending provider future.
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                self.completed.store(true, Ordering::SeqCst);
+            }
+            Ok(text_response("done", Some("end_turn")))
         }
-        Ok(text_response("done", Some("end_turn")))
+        .await;
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+        Ok(futures::StreamExt::boxed(futures::stream::iter(
+            events.into_iter().map(Ok),
+        )))
     }
 }
 #[tokio::test]
@@ -7102,6 +10989,8 @@ async fn owner_notification_folds_after_inflight_request_without_cancelling_it()
         parked_fold: tokio::sync::Notify::new(),
         owner: ctx.agent_id,
         pending: Mutex::new(vec![]),
+        agent_fact_updates: Mutex::new(vec![]),
+        records: Mutex::new(vec![]),
         revision: tokio::sync::watch::channel(0).0,
     });
     let api = Arc::new(NotificationDuringRequestApi {
@@ -7149,6 +11038,8 @@ async fn owner_notification_waits_for_handler_rest_acknowledgement() {
         parked_fold: tokio::sync::Notify::new(),
         owner: ctx.agent_id,
         pending: Mutex::new(vec![]),
+        agent_fact_updates: Mutex::new(vec![]),
+        records: Mutex::new(vec![]),
         revision: tokio::sync::watch::channel(0).0,
     });
     ctx.task_registry = Some(registry.clone());
@@ -7185,9 +11076,17 @@ async fn owner_notification_waits_for_handler_rest_acknowledgement() {
 
 #[tokio::test]
 async fn a_refusing_subagent_hops_to_the_fallback_and_retries() {
+    let mut refusal = text_response("", Some("refusal"));
+    refusal.stop_details = Some(llm_runtime::HistoryStopDetails {
+        category: Some("cyber".into()),
+        explanation: Some("fixture detail".into()),
+    });
+    refusal.usage.counts_mut().input_tokens = 11;
+    let mut answer = text_response("done", Some("end_turn"));
+    answer.usage.counts_mut().output_tokens = 7;
     let api = StreamingMockApiClient::new(vec![
-        streamed_text_turn("", "refusal"),
-        streamed_text_turn("done", "end_turn"),
+        llm_runtime::stream_accumulator::response_to_stream_events(refusal),
+        llm_runtime::stream_accumulator::response_to_stream_events(answer),
     ]);
     let mut ctx = loop_ctx(api.clone(), None, 3);
     ctx.refusal_fallback_chain = vec!["fallback-model".to_string()];
@@ -7224,6 +11123,222 @@ async fn a_refusing_subagent_hops_to_the_fallback_and_retries() {
         Some("fallback-model"),
         "the retry must go to the fallback, not back to the refusing model: {:?}",
         api.models()
+    );
+    let calls = api.physical_calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| call.request.model.as_str())
+            .collect::<Vec<_>>(),
+        ["inherit", "fallback-model"]
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| {
+                call.response
+                    .as_ref()
+                    .and_then(|response| response.stop_reason.as_deref())
+            })
+            .collect::<Vec<_>>(),
+        [Some("refusal"), Some("end_turn")],
+        "the stream fixture keeps each physical response's stop metadata"
+    );
+    assert_eq!(
+        calls[0]
+            .response
+            .as_ref()
+            .and_then(|response| response.stop_details.as_ref())
+            .and_then(|details| details.category.as_deref()),
+        Some("cyber")
+    );
+    assert_eq!(
+        calls[0]
+            .response
+            .as_ref()
+            .map(|response| response.usage.counts().input_tokens),
+        Some(11)
+    );
+    assert_eq!(
+        calls[1]
+            .response
+            .as_ref()
+            .map(|response| response.usage.counts().output_tokens),
+        Some(7)
+    );
+    assert!(
+        calls[1].request.messages.iter().any(|message| matches!(
+            message,
+            ConversationMessage::System { subtype: Some(subtype), .. }
+                if subtype == "model_refusal_fallback"
+        )),
+        "the retry request includes the local refusal note"
+    );
+}
+
+#[tokio::test]
+async fn skill_selection_of_the_serving_model_clears_the_refusal_target() {
+    for second_tool in [
+        Some("NestedMutateSecond"),
+        Some("NestedReselectInitial"),
+        None,
+    ] {
+        let mut registry = tool_api::ToolRegistry::new();
+        for name in std::iter::once("Skill").chain(second_tool) {
+            registry.register_builtin(Arc::new(NestedToolEffectsProbe {
+                name,
+                schema: serde_json::json!({"type":"object","additionalProperties":true}),
+                snapshots: Arc::new(Mutex::new(Vec::new())),
+                modifier_order: Arc::new(Mutex::new(Vec::new())),
+                meta_seen: Arc::new(AtomicUsize::new(0)),
+                modifier_calls: Arc::new(AtomicUsize::new(0)),
+            }));
+        }
+        let invoker: Arc<dyn lingxi_core::host::ToolInvoker> =
+            Arc::new(tool_api::RegistryToolInvoker::new(Arc::new(registry)));
+        let mut picked = tool_use_response("Skill", Some("tool_use"));
+        if let Some(name) = second_tool {
+            picked.content.push(llm_runtime::ContentBlock::ToolCall {
+                id: ToolUseId::new().to_string(), name: name.into(), input: serde_json::json!({}),
+            });
+        }
+        let api = MockSubagentApiClient::new(vec![
+            Ok(text_response("", Some("refusal"))),
+            Ok(picked),
+            Ok(text_response("done", Some("end_turn"))),
+        ]);
+        let mut ctx = loop_ctx(api.clone(), Some(invoker), 4);
+        ctx.agent_definition.model = AgentModel::Explicit("initial".into());
+        ctx.model_profile = Some("origin-provider".into());
+        ctx.refusal_fallback_chain = vec!["nested-model-final".into()];
+        ctx.model_resolution_context_provider = Some(Arc::new(
+            |model: &str, profile: Option<&str>| {
+                Ok(crate::model_resolution::ModelResolutionContext {
+                    route: crate::model_resolution::ModelRouteFacts {
+                        model: model.to_string(),
+                        profile: profile.or(Some("origin-provider")).map(str::to_string),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+            }));
+        let transcript_dir = tempfile::tempdir().unwrap();
+        ctx.transcript_subdir = transcript_dir.path().to_path_buf();
+        ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
+            transcript_dir.path().to_path_buf(),
+        )));
+        let transcript_path = transcript_dir.path().join(format!("agent-{}.jsonl", ctx.agent_id));
+        let (event_tx, event_rx) = mpsc::channel(1);
+        drop(event_tx);
+        let (out_tx, out_rx) = mpsc::channel(64);
+        run_subagent(ctx, event_rx, out_tx).await;
+        assert!(drain(out_rx).await.iter().any(|event| matches!(event, SubagentEvent::Completed { .. })));
+        let calls = api.physical_calls();
+        let physical_model = if second_tool == Some("NestedReselectInitial") {
+            "initial"
+        } else {
+            "nested-model-final"
+        };
+        assert_eq!(calls.iter().map(|call| call.request.model.as_str()).collect::<Vec<_>>(),
+            ["initial", "nested-model-final", physical_model]);
+        let serving = calls[1].fallback_target.as_ref().unwrap();
+        assert_eq!(serving.user_model, "initial");
+        assert!(serving.is_target("nested-model-final", str::to_string));
+        let selected = calls[2].fallback_target.as_ref().unwrap();
+        if second_tool.is_some() {
+            assert_eq!(selected.user_model, physical_model);
+            assert_eq!(selected.turn_override, None);
+            assert!(!selected.is_target(physical_model, str::to_string));
+        } else {
+            assert_eq!(selected.user_model, "initial");
+            assert_eq!(selected.turn_override.as_deref(), Some("nested-model-final"));
+            assert!(selected.is_target(physical_model, str::to_string),
+                "a prompt-only modifier retains the serving refusal route");
+        }
+        let expected_profile = if second_tool == Some("NestedMutateSecond") {
+            "nested-profile-final"
+        } else { "origin-provider" };
+        assert_eq!(calls[2].request.profile.as_deref(), Some(expected_profile));
+        let transcript = tokio::fs::read_to_string(transcript_path).await.unwrap();
+        let selections: Vec<serde_json::Value> = transcript.lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|row| row["type"] == "model-selection")
+            .collect();
+        assert_eq!(selections.len(), usize::from(second_tool.is_some()));
+        if let Some(selection) = selections.first() {
+            assert_eq!(selection["model"], physical_model);
+            assert_eq!(selection["model_profile"], expected_profile);
+        }
+    }
+}
+
+#[tokio::test]
+async fn local_refusal_serving_model_does_not_rewrite_tool_context() {
+    struct ModelScopeInvoker {
+        route: Mutex<Option<(Option<String>, Option<String>)>>,
+    }
+    #[async_trait]
+    impl lingxi_core::host::ToolInvoker for ModelScopeInvoker {
+        async fn invoke(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            context: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+        ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
+            *self.route.lock().unwrap() =
+                Some((context.parent_model, context.parent_model_profile));
+            Ok(serde_json::json!("done"))
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../tests/fixtures/child_refusal_scope_2_1_287.json"
+    ))
+    .unwrap();
+    let expected = fixture["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["main"] == false && row["silent"] == false)
+        .unwrap();
+    let api = StreamingMockApiClient::new(vec![
+        streamed_text_turn("", "refusal"),
+        streamed_tool_use_turn("Read", "tool_use"),
+        streamed_text_turn("done", "end_turn"),
+    ]);
+    let invoker = Arc::new(ModelScopeInvoker {
+        route: Mutex::new(None),
+    });
+    let mut context = loop_ctx(api.clone(), Some(invoker.clone()), 3);
+    context.agent_definition.model = AgentModel::Explicit("initial".into());
+    context.model_profile = Some("origin-provider".into());
+    context.refusal_fallback_chain = vec!["fallback".into()];
+    let (events, receiver) = mpsc::channel(1);
+    drop(events);
+    let (output, output_receiver) = mpsc::channel(32);
+    run_subagent(context, receiver, output).await;
+    let _ = drain(output_receiver).await;
+    assert_eq!(
+        api.models().get(1).map(String::as_str),
+        expected["expected"]["requestModel"].as_str()
+    );
+    let tool_route = invoker
+        .route
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("Read receives the current logical tool route");
+    assert_eq!(
+        tool_route.0.as_deref(),
+        expected["expected"]["toolModel"].as_str()
+    );
+    assert_eq!(
+        tool_route.1.as_deref(),
+        Some("origin-provider"),
+        "a serving-model fallback does not rewrite the tool's logical profile"
     );
 }
 
@@ -7282,6 +11397,19 @@ async fn a_subagent_cascade_stops_when_the_chain_is_exhausted() {
         api.models()[1..].to_vec(),
         vec!["hop-one".to_string(), "hop-two".to_string()],
         "each hop is consumed once, in order"
+    );
+    let calls = api.physical_calls();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| {
+                call.response
+                    .as_ref()
+                    .and_then(|response| response.stop_reason.as_deref())
+            })
+            .collect::<Vec<_>>(),
+        [Some("refusal"), Some("refusal"), Some("refusal")]
     );
 }
 
@@ -7389,6 +11517,7 @@ fn retracted_messages_are_dropped_but_notices_survive() {
         id: MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: text.to_string(),
+            citations: None,
         }],
         stop_reason: None,
     };
@@ -7417,7 +11546,7 @@ fn retracted_messages_are_dropped_but_notices_survive() {
         live.iter().any(|m| matches!(
             m,
             ConversationMessage::Assistant { content, .. }
-                if content.iter().any(|b| matches!(b, lingxi_core::types::ContentBlock::Text { text } if text == "live output"))
+                if content.iter().any(|b| matches!(b, lingxi_core::types::ContentBlock::Text { text, .. } if text == "live output"))
         )),
         "the unretracted message survives"
     );
@@ -7449,6 +11578,7 @@ async fn skill_preload_read_error_fails_before_model_request() {
             _: &str,
             _: &str,
             _cwd: Option<&std::path::Path>,
+            _model: Option<&str>,
         ) -> Result<Option<lingxi_core::host::skill_loader::SkillLoad>, String> {
             Err("loop.md denied".into())
         }
@@ -7486,7 +11616,7 @@ async fn skill_preload_read_error_fails_before_model_request() {
 }
 
 #[tokio::test]
-async fn tool_reported_error_reaches_model_history_and_message_events() {
+async fn tool_reported_error_and_context_reach_model_history() {
     struct ReportedErrorInvoker;
     #[async_trait]
     impl lingxi_core::host::ToolInvoker for ReportedErrorInvoker {
@@ -7512,6 +11642,14 @@ async fn tool_reported_error_reaches_model_history_and_message_events() {
                 data: serde_json::json!({"code": "unavailable"}),
                 model_content: Some("Contract unavailable".into()),
                 is_error: true,
+                turn_end: None,
+                new_messages: Vec::new(),
+                context_modifier: None,
+                mcp_meta: None,
+                context: lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                    serde_json::json!(["Contents of /tmp/AGENTS.md:\n\nNested rule"]),
+                ),
+                context_state: None,
             })
         }
         fn as_any(&self) -> &dyn std::any::Any {
@@ -7534,18 +11672,889 @@ async fn tool_reported_error_reaches_model_history_and_message_events() {
     let ctx = loop_ctx(api.clone(), Some(Arc::new(ReportedErrorInvoker)), 3);
     let (_tx, rx) = mpsc::channel(8);
     let (out, events) = mpsc::channel(32);
-    run_subagent(ctx, rx, out).await;
+    tokio::spawn(run_subagent(ctx, rx, out)).await.unwrap();
     let events = drain(events).await;
     assert_eq!(api.call_count(), 2);
     one_completed(&events);
     assert!(api.histories.lock().unwrap()[1].iter().any(|message| {
         matches!(message, ConversationMessage::User { content, .. } if content.iter().any(|block| {
-            matches!(block, ContentBlock::ToolResult { is_error: true, content, .. } if content == "Contract unavailable")
+            matches!(block, ContentBlock::ToolResult { is_error: Some(true), content, .. } if content == "Contract unavailable")
         }))
+    }));
+    assert!(api.histories.lock().unwrap()[1].iter().any(|message| {
+        message.is_meta()
+            && message.text_content()
+                == "<system-reminder>\ntool.call hook additional context: Contents of /tmp/AGENTS.md:\n\nNested rule\n</system-reminder>"
     }));
     assert!(events.iter().any(|event| {
         matches!(event, SubagentEvent::Message { message, .. } if message["content"].as_array().is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "tool_result" && block["is_error"] == true && block["content"] == "Contract unavailable")))
     }));
+}
+
+#[tokio::test]
+async fn child_tool_context_is_one_plugin_attachment_in_the_model_snapshot() {
+    struct ContextInvoker;
+    #[async_trait]
+    impl lingxi_core::host::ToolInvoker for ContextInvoker {
+        async fn invoke(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+        ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
+            unreachable!("runner must preserve detailed results")
+        }
+
+        async fn invoke_detailed(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+            _: Option<u64>,
+        ) -> Result<
+            lingxi_core::host::tool_invoker::ToolInvocationResult,
+            lingxi_core::host::tool_invoker::ToolInvokerError,
+        > {
+            Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
+                data: serde_json::json!({"ok":true}),
+                model_content: Some("read ok".into()),
+                is_error: false,
+                turn_end: None,
+                new_messages: Vec::new(),
+                context_modifier: None,
+                mcp_meta: None,
+                context: lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                    serde_json::json!(["first", "second"]),
+                ),
+                context_state: None,
+            })
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("attachment.js");
+    std::fs::write(
+        &module,
+        r#"export function register(on) {
+  let appended = [];
+  on('prompt.attachment', { type: 'hook_additional_context' }, ($, e, next) => {
+    if (e.origin.kind !== 'plugin' || e.origin.event !== 'tool.call' || !e.agentId)
+      throw new Error('child attachment lost its origin or agentId');
+    return { text: `rewritten:${e.agentId}:${e.text}` };
+  });
+  on('session.append', ($, e, next) => {
+    appended.push({type:e.message.type, name:e.message.name, door:e.door,
+      origin:e.origin, uuid:e.uuid, agentId:e.agentId,
+      content:e.message.content});
+    if (e.message.type === 'attachment' && e.message.name === 'hook_additional_context') {
+      return next({ ...e, message: { ...e.message,
+        content: [{type:'text', text:'source rewritten'}] } });
+    }
+    if (e.message.type === 'user' && e.message.isMeta === true &&
+        e.message.content.some(block => block.text?.includes('tool.call hook additional context'))) {
+      return next({ ...e, message: { ...e.message,
+        content: e.message.content.map(block => ({...block,
+          text:block.text.replace('\n</system-reminder>', '\nrow rewritten\n</system-reminder>')})) } });
+    }
+    return next(e);
+  });
+  on('prompt.submit', ($, e, next) => next({ ...e, text: JSON.stringify(appended) }));
+}"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "child-attachment",
+        dir.path(),
+        &module,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host.clone());
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    let api = ResultStreamMockApiClient::new(vec![
+        streamed_tool_use_turn("Read", "tool_use")
+            .into_iter()
+            .map(Ok)
+            .collect(),
+        llm_runtime::stream_accumulator::response_to_stream_events(text_response(
+            "done",
+            Some("end_turn"),
+        ))
+        .into_iter()
+        .map(Ok)
+        .collect(),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), Some(Arc::new(ContextInvoker)), 3);
+    ctx.hook_executor = Some(executor);
+    ctx.hook_cwd = dir.path().to_path_buf();
+    ctx.transcript_subdir = dir.path().to_path_buf();
+    ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
+        dir.path().to_path_buf(),
+    )));
+    let agent_id = ctx.agent_id.as_uuid().to_string();
+    let agent_file_id = ctx.agent_id.to_string();
+    let (_tx, rx) = mpsc::channel(8);
+    let (out, events) = mpsc::channel(32);
+    run_subagent(ctx, rx, out).await;
+    let events = drain(events).await;
+    assert_eq!(one_completed(&events)["text"], "done");
+    let histories = api.histories.lock().unwrap();
+    assert_eq!(histories.len(), 2);
+    let second = &histories[1];
+    let attachments = second
+        .iter()
+        .filter(|message| {
+            message.is_meta()
+                && message
+                    .text_content()
+                    .contains("tool.call hook additional context")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(
+        attachments[0].text_content(),
+        format!(
+            "<system-reminder>\nrewritten:{agent_id}:tool.call hook additional context: first\nsecond\nrow rewritten\n</system-reminder>"
+        )
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SubagentEvent::Message { message, .. }
+            if message.to_string().contains("tool.call hook additional context: first\\nsecond")
+                && !message.to_string().contains("rewritten:")
+    )));
+    let transcript =
+        std::fs::read_to_string(dir.path().join(format!("agent-{agent_file_id}.jsonl"))).unwrap();
+    let sources = transcript
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|row| row.get("source_attachment").cloned())
+        .collect::<Vec<_>>();
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0]["type"], "hook_additional_context");
+    assert_eq!(
+        sources[0]["content"],
+        serde_json::json!(["source rewritten"])
+    );
+    assert_eq!(sources[0]["hookName"], "tool.call");
+    assert!(sources[0]["toolUseID"]
+        .as_str()
+        .is_some_and(|id| id.ends_with("-context")));
+    assert_eq!(sources[0]["hookEvent"], "PostToolUse");
+    let entry = transcript
+        .lines()
+        .filter_map(|line| serde_json::from_str::<crate::transcript::TranscriptEntry>(line).ok())
+        .find(|entry| entry.source_attachment.is_some())
+        .expect("the rewritten source attachment is persisted with its row");
+    assert!(entry.message.text_content().contains("row rewritten"));
+    assert!(entry.source_attachment_uuid.is_some());
+    let append_events: Vec<serde_json::Value> = host
+        .dispatch(
+            "prompt.submit",
+            serde_json::json!({"text":"probe"}),
+            |event| async move { Ok(event) },
+        )
+        .await
+        .unwrap()["text"]
+        .as_str()
+        .and_then(|text| serde_json::from_str(text).ok())
+        .expect("the Mod captured session.append inputs");
+    let attachment_event = append_events
+        .iter()
+        .find(|event| event["type"] == "attachment" && event["name"] == "hook_additional_context")
+        .expect("the original attachment side row is appended");
+    let user_event = append_events
+        .iter()
+        .find(|event| {
+            event["type"] == "user"
+                && event["content"]
+                    .to_string()
+                    .contains("tool.call hook additional context")
+        })
+        .expect("the retained child user row is appended");
+    assert_eq!(attachment_event["door"], "hook-context");
+    assert_eq!(
+        attachment_event["origin"],
+        serde_json::json!({"kind":"plugin","event":"tool.call"})
+    );
+    assert_eq!(attachment_event["agentId"], agent_id);
+    assert_eq!(attachment_event["content"][0]["text"], "first");
+    assert_eq!(user_event["door"], "note");
+    assert_eq!(user_event["origin"], serde_json::json!({"kind":"engine"}));
+    assert_eq!(user_event["agentId"], agent_id);
+    assert!(
+        append_events
+            .iter()
+            .position(|event| event == attachment_event)
+            < append_events.iter().position(|event| event == user_event)
+    );
+}
+
+#[tokio::test]
+async fn child_session_append_runs_without_a_transcript_filesystem() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("append-without-transcript.js");
+    std::fs::write(
+        &module,
+        r#"export function register(on) {
+  const types = [];
+  on('session.append', ($, e, next) => {
+    types.push(e.message.type);
+    return next(e);
+  });
+  on('prompt.submit', ($, e, next) => next({ ...e, text: types.join(',') }));
+}"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "append-without-transcript",
+        dir.path(),
+        &module,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host.clone());
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    let api = MockSubagentApiClient::new(vec![Ok(text_response("done", Some("end_turn")))]);
+    let mut ctx = loop_ctx(api, None, 1);
+    ctx.hook_executor = Some(executor);
+    ctx.hook_cwd = dir.path().to_path_buf();
+    assert!(ctx.transcript_fs.is_none());
+
+    let (_tx, rx) = mpsc::channel(8);
+    let (out, events) = mpsc::channel(16);
+    run_subagent(ctx, rx, out).await;
+    assert_eq!(one_completed(&drain(events).await)["text"], "done");
+    let observed = host
+        .dispatch(
+            "prompt.submit",
+            serde_json::json!({"text":"probe"}),
+            |event| async move { Ok(event) },
+        )
+        .await
+        .unwrap();
+    assert!(observed["text"]
+        .as_str()
+        .is_some_and(|types| types.split(',').any(|kind| kind == "assistant")));
+}
+
+#[tokio::test]
+async fn accepted_text_only_session_append_updates_query_row_without_changing_tool_use_or_request_snapshot(
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("accepted-tool-row.js");
+    std::fs::write(
+        &module,
+        r#"export function register(on) {
+  const rows = [];
+  on('session.append', ($, e, next) => {
+    if (e.message.type === 'assistant' && e.message.content.some(block => block.type === 'tool_use')) {
+      rows.push({ uuid:e.uuid, type:e.message.type, content:e.message.content });
+      return next({ ...e, message:{ ...e.message,
+        content:[{type:'text', text:'Mod accepted text only'}] } });
+    }
+    return next(e);
+  });
+  on('prompt.submit', ($, e, next) => next({ ...e, text:JSON.stringify(rows) }));
+}"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "accepted-tool-row",
+        dir.path(),
+        &module,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host.clone());
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+
+    let tool_id = "toolu_accepted_row_original";
+    let tool_input = serde_json::json!({"command":"echo original input"});
+    let api = StreamingMockApiClient::new(vec![
+        streamed_tool_use_with_input_turn(tool_id, "Bash", &tool_input, "tool_use"),
+        streamed_text_turn("next request answer", "end_turn"),
+    ]);
+    let invoker = Arc::new(InputCapturingInvoker::default());
+    let pre_query = ConversationMessage::user(MessageId::new(), "pre-query snapshot".into());
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 3);
+    ctx.prompt_messages = vec![pre_query.clone()];
+    ctx.hook_executor = Some(executor);
+    ctx.hook_cwd = dir.path().to_path_buf();
+    ctx.transcript_subdir = dir.path().to_path_buf();
+    ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
+        dir.path().to_path_buf(),
+    )));
+    let agent_file_id = ctx.agent_id.to_string();
+
+    let (_event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(32);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+    assert_eq!(one_completed(&events)["text"], "next request answer");
+    let invoked = invoker.calls.lock().unwrap().clone();
+    assert_eq!(invoked.len(), 1, "the source ToolUse is dispatched once");
+    assert_eq!(invoked[0].0, "Bash");
+    assert_eq!(invoked[0].1, tool_input);
+    assert!(invoked[0]
+        .2
+        .iter()
+        .any(|message| message.id() == pre_query.id()));
+    assert!(
+        !invoked[0]
+            .2
+            .iter()
+            .any(|message| message.text_content().contains("Mod accepted text only")),
+        "W1 retains the immutable pre-query history snapshot"
+    );
+    let w1_assistant_row = invoked[0]
+        .3
+        .as_ref()
+        .expect("W1 receives the accepted current assistant row");
+    assert!(w1_assistant_row
+        .text_content()
+        .contains("Mod accepted text only"));
+    assert_eq!(
+        match w1_assistant_row {
+            ConversationMessage::Assistant { content, .. } => content
+                .iter()
+                .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))
+                .count(),
+            _ => 0,
+        },
+        1,
+        "W1 sees accepted Text and the original ToolUse in the same row"
+    );
+    assert!(
+        invoked[0].4.is_empty(),
+        "a preceding text-only row does not leak into Native sameTurnToolUses"
+    );
+
+    let accepted_row = events
+        .iter()
+        .filter_map(|event| match event {
+            SubagentEvent::Message { message, .. } => {
+                serde_json::from_value::<ConversationMessage>(message.clone()).ok()
+            }
+            _ => None,
+        })
+        .find(|message| match message {
+            ConversationMessage::Assistant { content, .. } => content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text { text, .. } if text == "Mod accepted text only"
+                )
+            }),
+            _ => false,
+        })
+        .expect("the accepted query row is emitted through the Agent event stream");
+    let accepted_id = accepted_row.id();
+    let accepted_content = match &accepted_row {
+        ConversationMessage::Assistant { content, .. } => content,
+        _ => unreachable!("accepted row was selected as an assistant message"),
+    };
+    assert_eq!(accepted_content.len(), 2);
+    assert!(matches!(
+        &accepted_content[0],
+        ContentBlock::Text { text, .. } if text == "Mod accepted text only"
+    ));
+    assert!(matches!(
+        &accepted_content[1],
+        ContentBlock::ToolUse { id, name, input, .. }
+            if id.as_str() == tool_id && name == "Bash" && input == &tool_input
+    ));
+    assert_eq!(
+        accepted_content
+            .iter()
+            .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))
+            .count(),
+        1,
+        "the merge restores one source ToolUse rather than duplicating or dropping it"
+    );
+
+    let physical_calls = api.physical_calls();
+    assert_eq!(physical_calls.len(), 2);
+    let first_request = &physical_calls[0].request.messages;
+    assert!(first_request
+        .iter()
+        .any(|message| message.id() == pre_query.id()));
+    assert!(
+        !first_request
+            .iter()
+            .any(|message| { message.text_content().contains("Mod accepted text only") }),
+        "the already-dispatched request snapshot is not retroactively rewritten"
+    );
+    let next_request_row = physical_calls[1]
+        .request
+        .messages
+        .iter()
+        .find(|message| message.id() == accepted_id)
+        .expect("the accepted row enters K for the next provider request");
+    assert_eq!(
+        match next_request_row {
+            ConversationMessage::Assistant { content, .. } => content,
+            _ => unreachable!("the next request accepted row is assistant"),
+        },
+        accepted_content
+    );
+    assert!(matches!(
+        next_request_row,
+        ConversationMessage::Assistant { stop_reason: Some(stop_reason), .. }
+            if stop_reason == "tool_use"
+    ));
+
+    let hook_rows: Vec<serde_json::Value> = host
+        .dispatch(
+            "prompt.submit",
+            serde_json::json!({"text":"inspect accepted row"}),
+            |event| async move { Ok(event) },
+        )
+        .await
+        .unwrap()["text"]
+        .as_str()
+        .and_then(|text| serde_json::from_str(text).ok())
+        .expect("the hook captured its accepted session.append row");
+    assert_eq!(hook_rows.len(), 1);
+    assert_eq!(hook_rows[0]["uuid"], accepted_id.as_uuid().to_string());
+    assert_eq!(hook_rows[0]["content"][0]["type"], "tool_use");
+    assert_eq!(hook_rows[0]["content"][0]["id"], tool_id);
+    assert_eq!(hook_rows[0]["content"][0]["input"], tool_input);
+    assert_eq!(hook_rows[0]["content"].as_array().unwrap().len(), 1);
+
+    let transcript =
+        std::fs::read_to_string(dir.path().join(format!("agent-{agent_file_id}.jsonl"))).unwrap();
+    let persisted_rows = transcript
+        .lines()
+        .filter_map(|line| serde_json::from_str::<crate::transcript::TranscriptEntry>(line).ok())
+        .filter(|entry| entry.message.id() == accepted_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        persisted_rows.len(),
+        1,
+        "the accepted outer UUID is appended once"
+    );
+    assert_eq!(persisted_rows[0].message.id(), accepted_id);
+    assert_eq!(
+        match &persisted_rows[0].message {
+            ConversationMessage::Assistant { content, .. } => content,
+            _ => unreachable!("the persisted row is assistant"),
+        },
+        accepted_content,
+        "JSONL persists the same accepted block sequence"
+    );
+    assert!(matches!(
+        &persisted_rows[0].message,
+        ConversationMessage::Assistant { stop_reason: Some(stop_reason), .. }
+            if stop_reason == "tool_use"
+    ));
+}
+
+#[tokio::test]
+async fn complete_only_assistant_row_keeps_one_native_row_for_mod_and_sibling_tool_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("complete-row.js");
+    std::fs::write(
+        &module,
+        r#"export function register(on) {
+  const rows = [];
+  on('session.append', ($, e, next) => {
+    if (e.message.type === 'assistant' &&
+        e.message.content.some(block => block.type === 'tool_use')) {
+      rows.push({ uuid:e.uuid, content:e.message.content,
+        stop_reason_present:Object.hasOwn(e.message, 'stop_reason') });
+      const text = e.message.content
+        .filter(block => block.type === 'text')
+        .map(block => ({ ...block, text:'accepted ' + block.text }));
+      return next({ ...e, message:{ ...e.message, content:text } });
+    }
+    return next(e);
+  });
+  on('prompt.submit', ($, e, next) => next({ ...e, text:JSON.stringify(rows) }));
+}"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load("complete-row", dir.path(), &module, serde_json::json!({}))
+        .await
+        .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host.clone());
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+
+    let tool_a_id = "toolu_complete_a";
+    let tool_b_id = "toolu_complete_b";
+    let tool_a_input = serde_json::json!({"command":"first source input"});
+    let tool_b_input = serde_json::json!({"command":"second source input"});
+    let response = llm_runtime::HistoryResponse {
+        id: "complete-row-response".into(),
+        model: "mock".into(),
+        content: vec![
+            llm_runtime::ContentBlock::Text {
+                text: "TextA".into(),
+                cache_control: None,
+                citations: None,
+            },
+            llm_runtime::ContentBlock::ToolCall {
+                id: tool_a_id.into(),
+                name: "ToolA".into(),
+                input: tool_a_input.clone(),
+            },
+            llm_runtime::ContentBlock::Text {
+                text: "TextB".into(),
+                cache_control: None,
+                citations: None,
+            },
+            llm_runtime::ContentBlock::ToolCall {
+                id: tool_b_id.into(),
+                name: "ToolB".into(),
+                input: tool_b_input.clone(),
+            },
+        ],
+        stop_reason: Some("tool_use".into()),
+        stop_details: None,
+        usage: llm_runtime::ExecutionUsage::default(),
+        cost: None,
+        provider_metadata: serde_json::Value::Null,
+    };
+    let api = StreamingMockApiClient::new(vec![
+        vec![llm_runtime::HistoryEvent::Completed {
+            response: Box::new(response),
+        }],
+        streamed_text_turn("next request answer", "end_turn"),
+    ]);
+    let watchdog_api: Arc<dyn crate::api::SubagentApiClient> =
+        Arc::new(crate::api::WorkflowWatchdogApiClient::new(
+            api.clone(),
+            lingxi_core::host::WorkflowQueryWatchdog {
+                stall_timeout_ms: 60_000,
+                max_retries: 1,
+                retry_response_body: true,
+            },
+            Vec::new(),
+        ));
+    let invoker = Arc::new(InputCapturingInvoker::default());
+    let pre_query = ConversationMessage::user(MessageId::new(), "pre-query snapshot".into());
+    let mut ctx = loop_ctx(watchdog_api, Some(invoker.clone()), 3);
+    ctx.prompt_messages = vec![pre_query.clone()];
+    ctx.hook_executor = Some(executor);
+    ctx.hook_cwd = dir.path().to_path_buf();
+    ctx.transcript_subdir = dir.path().to_path_buf();
+    ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
+        dir.path().to_path_buf(),
+    )));
+    let agent_file_id = ctx.agent_id.to_string();
+
+    let (_event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(32);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let events = drain(out_rx).await;
+    assert_eq!(one_completed(&events)["text"], "next request answer");
+
+    let assistant_rows = events
+        .iter()
+        .filter_map(|event| match event {
+            SubagentEvent::Message { message, .. } => {
+                serde_json::from_value::<ConversationMessage>(message.clone()).ok()
+            }
+            _ => None,
+        })
+        .filter(|message| match message {
+            ConversationMessage::Assistant { content, .. } => {
+                content.iter().any(|block| {
+                    matches!(block,
+                    ContentBlock::ToolUse { id, .. } if id.as_str() == tool_a_id)
+                }) && content.iter().any(|block| {
+                    matches!(block,
+                    ContentBlock::ToolUse { id, .. } if id.as_str() == tool_b_id)
+                })
+            }
+            _ => false,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        assistant_rows.len(),
+        1,
+        "the complete response is one assistant row"
+    );
+    let accepted_row = assistant_rows[0].clone();
+    let accepted_id = accepted_row.id();
+    assert!(
+        matches!(
+            &accepted_row,
+            ConversationMessage::Assistant {
+                stop_reason: Some(stop_reason),
+                ..
+            } if stop_reason == "tool_use"
+        ),
+        "the complete response stop reason is available at W1 and event time"
+    );
+    let accepted_content = match &accepted_row {
+        ConversationMessage::Assistant { content, .. } => content,
+        _ => unreachable!("the completed provider row is assistant"),
+    };
+    assert!(
+        matches!(
+            accepted_content.as_slice(),
+            [
+                ContentBlock::Text { text: accepted_a, .. },
+                ContentBlock::Text { text: accepted_b, .. },
+                ContentBlock::ToolUse {
+                    id: id_a,
+                    name: name_a,
+                    input: input_a,
+                    ..
+                },
+                ContentBlock::ToolUse {
+                    id: id_b,
+                    name: name_b,
+                    input: input_b,
+                    ..
+                },
+            ] if accepted_a.as_str() == "accepted TextA"
+                && accepted_b.as_str() == "accepted TextB"
+                && id_a.as_str() == tool_a_id
+                && name_a == "ToolA"
+                && input_a == &tool_a_input
+                && id_b.as_str() == tool_b_id
+                && name_b == "ToolB"
+                && input_b == &tool_b_input
+        ),
+        "Native projection places unanchored accepted text before source ToolUses: {accepted_content:?}"
+    );
+
+    let calls = invoker.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2);
+    assert_eq!((calls[0].0.as_str(), &calls[0].1), ("ToolA", &tool_a_input));
+    assert_eq!((calls[1].0.as_str(), &calls[1].1), ("ToolB", &tool_b_input));
+    for call in &calls {
+        assert!(
+            call.2.iter().any(|message| message.id() == pre_query.id()),
+            "each W1 snapshot keeps the immutable pre-query history"
+        );
+        assert!(
+            !call.2.iter().any(|message| message.id() == accepted_id),
+            "the current assistant row is passed separately from history"
+        );
+        assert_eq!(
+            call.3.as_ref(),
+            Some(&accepted_row),
+            "each W1 call receives the full accepted assistant source row"
+        );
+        assert!(matches!(
+            call.3.as_ref(),
+            Some(ConversationMessage::Assistant {
+                stop_reason: Some(stop_reason),
+                ..
+            }) if stop_reason == "tool_use"
+        ));
+    }
+    assert!(
+        calls[0].4.is_empty(),
+        "the first ToolUse has no prior sibling"
+    );
+    assert!(
+        matches!(
+            calls[1].4.as_slice(),
+            [ContentBlock::ToolUse { id, name, input, .. }]
+                if id.as_str() == tool_a_id && name == "ToolA" && input == &tool_a_input
+        ),
+        "the second ToolUse receives only its earlier same-row sibling"
+    );
+
+    let physical_calls = api.physical_calls();
+    assert_eq!(physical_calls.len(), 2);
+    let next_assistant_rows = physical_calls[1]
+        .request
+        .messages
+        .iter()
+        .filter(|message| message.id() == accepted_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        next_assistant_rows.len(),
+        1,
+        "the full accepted response enters the next request once"
+    );
+    assert_eq!(next_assistant_rows[0], &accepted_row);
+
+    let hook_rows: Vec<serde_json::Value> = host
+        .dispatch(
+            "prompt.submit",
+            serde_json::json!({"text":"inspect complete row"}),
+            |event| async move { Ok(event) },
+        )
+        .await
+        .unwrap()["text"]
+        .as_str()
+        .and_then(|text| serde_json::from_str(text).ok())
+        .expect("the real Mod captured the accepted session.append input");
+    assert_eq!(
+        hook_rows.len(),
+        1,
+        "Native complete-only content appends once"
+    );
+    assert_eq!(hook_rows[0]["uuid"], accepted_id.as_uuid().to_string());
+    assert_eq!(hook_rows[0]["stop_reason_present"], false);
+    assert_eq!(
+        hook_rows[0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|block| {
+                if block["type"] == "text" {
+                    block["text"].as_str().unwrap().to_owned()
+                } else {
+                    block["id"].as_str().unwrap().to_owned()
+                }
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            "TextA".to_owned(),
+            tool_a_id.to_owned(),
+            "TextB".to_owned(),
+            tool_b_id.to_owned(),
+        ]
+    );
+
+    let transcript =
+        std::fs::read_to_string(dir.path().join(format!("agent-{agent_file_id}.jsonl"))).unwrap();
+    let persisted_rows = transcript
+        .lines()
+        .filter_map(|line| serde_json::from_str::<crate::transcript::TranscriptEntry>(line).ok())
+        .filter(|entry| entry.message.id() == accepted_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        persisted_rows.len(),
+        1,
+        "the one accepted outer UUID is stored once"
+    );
+    assert_eq!(persisted_rows[0].message, accepted_row);
+    assert!(matches!(
+        &persisted_rows[0].message,
+        ConversationMessage::Assistant {
+            stop_reason: Some(stop_reason),
+            ..
+        } if stop_reason == "tool_use"
+    ));
+}
+
+#[tokio::test]
+async fn cold_resumed_child_screens_source_attachment_without_sending_restore_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("resume-attachment.js");
+    std::fs::write(
+        &module,
+        r#"export function register(on) {
+  on('prompt.attachment', { type: 'hook_additional_context' }, ($, e) => {
+    if (e.origin.kind !== 'plugin' || e.origin.event !== 'tool.call' || !e.agentId)
+      throw new Error('cold child lost source identity');
+    return { text: `resumed:${e.text}` };
+  });
+}"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "resume-attachment",
+        dir.path(),
+        &module,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host);
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    let original = ConversationMessage::user_meta(
+        MessageId::new(),
+        "<system-reminder>\ntool.call hook additional context: original\n</system-reminder>".into(),
+    );
+    let marker = ConversationMessage::System {
+        id: MessageId::new(),
+        content: serde_json::json!({
+            "messageId":original.id(),
+            "attachment":{
+                "type":"hook_additional_context",
+                "content":["original"],
+                "hookName":"tool.call",
+                "toolUseID":"toolu_before_restart-context",
+                "hookEvent":"PostToolUse",
+            },
+        })
+        .to_string(),
+        subtype: Some("mod_attachment_source".into()),
+        compact_metadata: None,
+        model_fallback: None,
+        refusal_fallback: None,
+    };
+    let api = MockSubagentApiClient::new(vec![Ok(text_response("done", Some("end_turn")))]);
+    let mut ctx = loop_ctx(api.clone(), None, 1);
+    ctx.resumed_history = Some(vec![marker, original.clone()]);
+    ctx.hook_executor = Some(executor);
+    ctx.hook_cwd = dir.path().to_path_buf();
+    let (_tx, rx) = mpsc::channel(8);
+    let (out, events) = mpsc::channel(16);
+    run_subagent(ctx, rx, out).await;
+    assert_eq!(one_completed(&drain(events).await)["text"], "done");
+    let model_messages = api.last_messages();
+    assert_eq!(
+        model_messages.len(),
+        2,
+        "cold announced context adds its date row"
+    );
+    let restored_attachment = model_messages
+        .iter()
+        .find(|message| message.id() == original.id())
+        .expect("the restored attachment row remains in the request");
+    assert_eq!(
+        restored_attachment.text_content(),
+        "<system-reminder>\nresumed:tool.call hook additional context: original\n</system-reminder>"
+    );
+    assert!(matches!(
+        &model_messages[1],
+        ConversationMessage::User { content, is_meta: true, .. }
+            if content.iter().any(|block| matches!(block,
+                ContentBlock::Text { text, .. }
+                    if text.starts_with("<system-reminder>\nToday's date is ")
+                        && text.ends_with(".\n</system-reminder>")))
+    ));
+    assert!(!model_messages.iter().any(|message| matches!(
+        message,
+        ConversationMessage::System { subtype: Some(subtype), .. }
+            if subtype == "mod_attachment_source"
+    )));
 }
 
 #[tokio::test]
@@ -7569,6 +12578,8 @@ async fn foreground_park_publishes_idle_and_preserves_notification_wake() {
             parked_fold: tokio::sync::Notify::new(),
             owner: ctx.agent_id,
             pending: Mutex::new(vec![]),
+            agent_fact_updates: Mutex::new(vec![]),
+            records: Mutex::new(vec![]),
             revision: tokio::sync::watch::channel(0).0,
         });
         ctx.task_registry = Some(registry.clone());
@@ -7582,7 +12593,7 @@ async fn foreground_park_publishes_idle_and_preserves_notification_wake() {
                         SubagentEvent::Message { message, .. }
                             if message["subtype"] == "agent_idle" =>
                         {
-                            break
+                            break;
                         }
                         SubagentEvent::Completed { .. } => {
                             panic!("rest must not tear down the foreground pump")
@@ -7618,445 +12629,33 @@ async fn foreground_park_publishes_idle_and_preserves_notification_wake() {
     }
 }
 
+#[path = "instruction_request_tests.rs"]
+mod instruction_request_tests;
+
+#[path = "runner_turn_end_tests.rs"]
+mod runner_turn_end_tests;
+
+#[path = "runner_handback_tests.rs"]
+mod runner_handback_tests;
+
 #[derive(Clone, Debug)]
-struct CapturedSubagentCall {
-    request: crate::api::SubagentApiRequest,
-    response: Option<llm_runtime::HistoryResponse>,
-    fallback_target: Option<lingxi_core::host::refusal_driver::FallbackTargetContext>,
+struct NestedToolContextSnapshot {
+    name: String,
+    model: String,
+    profile: Option<String>,
+    verbose: bool,
+    custom_system_prompt: Option<String>,
+    append_system_prompt: Option<String>,
+    messages: Vec<ConversationMessage>,
 }
 
-#[tokio::test]
-async fn agent_terminal_paths_await_cleanup_for_the_exact_agent_and_session() {
-    for response in [
-        Ok(text_response("done", Some("end_turn"))),
-        Err(llm_runtime::LlmError::InvalidRequest {
-            message: "failed".into(),
-        }),
-    ] {
-        let invoker = CountingInvoker::new();
-        let mut ctx = loop_ctx(
-            MockSubagentApiClient::new(vec![response]),
-            Some(invoker.clone()),
-            1,
-        );
-        let session = lingxi_core::types::SessionId::new();
-        ctx.origin_session_id = Some(session);
-        let agent = ctx.agent_id;
-        let (_event_tx, event_rx) = mpsc::channel(8);
-        let (out_tx, out_rx) = mpsc::channel(64);
-        run_subagent(ctx, event_rx, out_tx).await;
-        assert!(invoker
-            .cleanups
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|identity| *identity == (agent, Some(session))));
-        assert!(!invoker.cleanups.lock().unwrap().is_empty());
-        assert!(drain(out_rx).await.iter().any(|event| matches!(
-            event,
-            SubagentEvent::Completed { .. } | SubagentEvent::Failed { .. }
-        )));
-    }
-}
-
-#[tokio::test]
-async fn failed_input_cleanup_never_reports_success_or_parks_a_persistent_agent() {
-    for persistent in [false, true] {
-        let invoker = CountingInvoker::new();
-        invoker.cleanup_failures.store(usize::MAX, Ordering::SeqCst);
-        let mut ctx = loop_ctx(
-            MockSubagentApiClient::new(vec![Ok(text_response("done", Some("end_turn")))]),
-            Some(invoker.clone()),
-            1,
-        );
-        ctx.persistent = persistent;
-        let (_event_tx, event_rx) = mpsc::channel(8);
-        let (out_tx, out_rx) = mpsc::channel(64);
-        tokio::time::timeout(Duration::from_secs(3), run_subagent(ctx, event_rx, out_tx))
-            .await
-            .unwrap();
-        let events = drain(out_rx).await;
-        assert!(events.iter().any(|event| matches!(event, SubagentEvent::Failed { error, .. } if error.contains("desktop remains reserved"))));
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, SubagentEvent::Completed { .. })));
-        assert!(invoker.cleanups.lock().unwrap().len() >= 3);
-    }
-}
-
-fn attach_failure_hook_executor(ctx: &mut SubagentContext) -> Arc<hooks::HookExecutorImpl> {
-    let executor = Arc::new(hooks::HookExecutorImpl::new(
-        Arc::new(tokio::sync::RwLock::new(hooks::HookRegistry::new())),
-        Arc::new(test_harness::mocks::MockHttpTransport::new()),
-        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
-    ));
-    ctx.hook_executor = Some(executor.clone());
-    ctx.hook_session_id = lingxi_core::types::SessionId::new();
-    ctx.agent_definition.model = AgentModel::Explicit("failure-child-model".into());
-    ctx.model_profile = Some("failure-child-profile".into());
-    executor
-}
-
-struct RouteChangingCleanupInvoker;
-
-#[async_trait]
-impl lingxi_core::host::ToolInvoker for RouteChangingCleanupInvoker {
-    async fn invoke(
-        &self,
-        _: &str,
-        _: serde_json::Value,
-        _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
-        Ok(serde_json::Value::Null)
-    }
-    async fn invoke_detailed(
-        &self,
-        _: &str,
-        _: serde_json::Value,
-        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        _: Option<u64>,
-    ) -> Result<
-        lingxi_core::host::tool_invoker::ToolInvocationResult,
-        lingxi_core::host::tool_invoker::ToolInvokerError,
-    > {
-        let mut context = tool_api::test_support::fresh_ctx();
-        context.options.main_loop_model = ctx.parent_model.unwrap();
-        context.options.model_profile = ctx.parent_model_profile;
-        Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
-            is_error: false,
-            data: serde_json::Value::Null,
-            model_content: None,
-            new_messages: Vec::new(),
-            context_modifier: Some(nested_route_modifier(
-                "failure-live-model",
-                Some("failure-live-profile"),
-            )),
-            mcp_meta: None,
-            turn_end: None,
-            context: lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!(
-                []
-            )),
-            context_state: Some(
-                lingxi_core::host::tool_invoker::ToolInvocationContextState::new(Arc::new(context)),
-            ),
-        })
-    }
-    async fn cleanup_computer_inputs(
-        &self,
-        _: AgentId,
-        _: Option<lingxi_core::types::SessionId>,
-    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
-        Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
-            "key release failed".into(),
-        ))
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-#[tokio::test]
-async fn cleanup_failure_publishes_live_skill_route_before_failed_terminal() {
-    let api = MockSubagentApiClient::new(vec![
-        Ok(tool_use_response("Skill", Some("tool_use"))),
-        Ok(text_response("done on the new route", Some("end_turn"))),
-    ]);
-    let mut ctx = loop_ctx(api.clone(), Some(Arc::new(RouteChangingCleanupInvoker)), 2);
-    let executor = attach_failure_hook_executor(&mut ctx);
-    ctx.model_resolution_context_provider = Some(Arc::new(|model: &str, profile: Option<&str>| {
-        Ok(crate::model_resolution::ModelResolutionContext {
-            route: crate::model_resolution::ModelRouteFacts {
-                model: model.to_string(),
-                profile: profile.map(str::to_string),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-    }));
-    let session_id = ctx.hook_session_id;
-    let agent_id = ctx.agent_id;
-    let (_event_tx, event_rx) = mpsc::channel(1);
-    let (out_tx, mut out_rx) = mpsc::channel(1);
-    let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
-    loop {
-        match out_rx.recv().await.expect("a terminal event") {
-            SubagentEvent::Failed { error, .. } => {
-                assert!(error.contains("desktop remains reserved"));
-                break;
-            }
-            SubagentEvent::Completed { .. } => panic!("cleanup failure cannot complete"),
-            _ => {}
-        }
-    }
-    let (route, transcript) = executor
-        .take_agent_prompt_transcript(session_id, agent_id)
-        .expect("cleanup failure publishes before Failed");
-    assert_eq!(route.model, "failure-live-model");
-    assert_eq!(route.model_profile.as_deref(), Some("failure-live-profile"));
-    assert!(transcript
-        .messages
-        .iter()
-        .any(|message| message.text_content() == "done on the new route"));
-    assert_eq!(api.call_count(), 2);
-    runner.await.unwrap();
-}
-
-#[tokio::test]
-async fn transient_input_cleanup_retries_before_completed_publication() {
-    let invoker = CountingInvoker::new();
-    invoker.cleanup_failures.store(2, Ordering::SeqCst);
-    let ctx = loop_ctx(
-        MockSubagentApiClient::new(vec![Ok(text_response("done", Some("end_turn")))]),
-        Some(invoker.clone()),
-        1,
-    );
-    let (_event_tx, event_rx) = mpsc::channel(8);
-    let (out_tx, out_rx) = mpsc::channel(64);
-    run_subagent(ctx, event_rx, out_tx).await;
-    let events = drain(out_rx).await;
-    assert!(events
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Failed { .. })));
-    assert!(invoker.cleanups.lock().unwrap().len() >= 3);
-}
-
-struct PendingAfterInputApi {
-    first: Arc<MockSubagentApiClient>,
-    calls: AtomicUsize,
-}
-#[async_trait]
-impl crate::api::SubagentApiClient for PendingAfterInputApi {
-    async fn stream(
-        &self,
-        request: crate::api::SubagentApiRequest,
-    ) -> Result<
-        futures::stream::BoxStream<
-            'static,
-            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
-        >,
-        llm_runtime::LlmError,
-    > {
-        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            self.first.stream(request).await
-        } else {
-            std::future::pending().await
-        }
-    }
-}
-
-#[tokio::test]
-async fn cancellation_between_agent_tool_calls_awaits_input_cleanup() {
-    let api = Arc::new(PendingAfterInputApi {
-        first: MockSubagentApiClient::new(vec![Ok(tool_use_response(
-            "computer",
-            Some("tool_use"),
-        ))]),
-        calls: AtomicUsize::new(0),
-    });
-    let invoker = CountingInvoker::new();
-    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 3);
-    let session = lingxi_core::types::SessionId::new();
-    ctx.origin_session_id = Some(session);
-    let agent = ctx.agent_id;
-    let (event_tx, event_rx) = mpsc::channel(8);
-    let (out_tx, out_rx) = mpsc::channel(64);
-    let run = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while api.calls.load(Ordering::SeqCst) < 2 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(invoker.calls.load(Ordering::SeqCst), 1);
-    event_tx
-        .send(lingxi_core::Event::UserInterrupt)
-        .await
-        .unwrap();
-    run.await.unwrap();
-    assert!(invoker
-        .cleanups
-        .lock()
-        .unwrap()
-        .iter()
-        .all(|identity| *identity == (agent, Some(session))));
-    assert!(!invoker.cleanups.lock().unwrap().is_empty());
-    assert!(drain(out_rx)
-        .await
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Killed { .. })));
-}
-
-#[tokio::test]
-async fn persistent_agent_releases_inputs_before_completed_event_and_pool_abort() {
-    let invoker = CountingInvoker::new();
-    let api = MockSubagentApiClient::new(vec![
-        Ok(tool_use_response("computer", Some("tool_use"))),
-        Ok(text_response("done", Some("end_turn"))),
-    ]);
-    let mut ctx = loop_ctx(api, Some(invoker.clone()), 3);
-    ctx.persistent = true;
-    let session = lingxi_core::types::SessionId::new();
-    ctx.origin_session_id = Some(session);
-    let agent = ctx.agent_id;
-    let (_event_tx, event_rx) = mpsc::channel(8);
-    let (out_tx, mut out_rx) = mpsc::channel(64);
-    let run = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if matches!(out_rx.recv().await, Some(SubagentEvent::Completed { .. })) {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(invoker.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        *invoker.cleanups.lock().unwrap(),
-        vec![(agent, Some(session))]
-    );
-    assert!(
-        !run.is_finished(),
-        "persistent Agent still owns its idle event pump"
-    );
-    // The real pool deallocates/aborts upon seeing terminal publication.
-    run.abort();
-    assert!(run.await.unwrap_err().is_cancelled());
-}
-
-#[test]
-fn companion_note_workflow_follows_tool_permissions() {
-    assert!(companion_note_for_disallowed_tool("Workflow").is_none());
-    assert!(companion_note_for_disallowed_tool("TaskOutput").is_some());
-}
-
-#[tokio::test]
-async fn scoped_only_child_fires_frontmatter_stop_without_global_snapshot_buffer() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let api = MockSubagentApiClient::new(vec![Ok(text_response("done", Some("end_turn")))]);
-    let mut ctx = loop_ctx(api, None, 1);
-    ctx.stop_hook_scope = lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped;
-    ctx.agent_definition.frontmatter_hooks =
-        vec![frontmatter_stop_hook("record-subagent-stop-in-runner")];
-    let executor = exec_recording_stop(seen.clone());
-    ctx.hook_executor = Some(executor.clone());
-    let session = ctx.hook_session_id;
-    let child = ctx.agent_id;
-    let (events, input) = mpsc::channel(8);
-    drop(events);
-    let (output, results) = mpsc::channel(32);
-    run_subagent(ctx, input, output).await;
-    assert!(drain(results)
-        .await
-        .iter()
-        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
-    assert_eq!(*seen.lock().unwrap(), vec!["completed".to_string()]);
-    assert!(
-        executor
-            .take_agent_prompt_transcript(session, child)
-            .is_none(),
-        "a child without a global consumer cannot retain a global snapshot"
-    );
-}
-
-#[tokio::test]
-async fn skill_selection_of_the_serving_model_clears_the_refusal_target() {
-    for second_tool in [
-        Some("NestedMutateSecond"),
-        Some("NestedReselectInitial"),
-        None,
-    ] {
-        let mut registry = tool_api::ToolRegistry::new();
-        for name in std::iter::once("Skill").chain(second_tool) {
-            registry.register_builtin(Arc::new(NestedToolEffectsProbe {
-                name,
-                schema: serde_json::json!({"type":"object","additionalProperties":true}),
-                snapshots: Arc::new(Mutex::new(Vec::new())),
-                modifier_order: Arc::new(Mutex::new(Vec::new())),
-                meta_seen: Arc::new(AtomicUsize::new(0)),
-                modifier_calls: Arc::new(AtomicUsize::new(0)),
-            }));
-        }
-        let invoker: Arc<dyn lingxi_core::host::ToolInvoker> =
-            Arc::new(tool_api::RegistryToolInvoker::new(Arc::new(registry)));
-        let mut picked = tool_use_response("Skill", Some("tool_use"));
-        if let Some(name) = second_tool {
-            picked.content.push(llm_runtime::ContentBlock::ToolCall {
-                id: ToolUseId::new().to_string(), name: name.into(), input: serde_json::json!({}),
-            });
-        }
-        let api = MockSubagentApiClient::new(vec![
-            Ok(text_response("", Some("refusal"))),
-            Ok(picked),
-            Ok(text_response("done", Some("end_turn"))),
-        ]);
-        let mut ctx = loop_ctx(api.clone(), Some(invoker), 4);
-        ctx.agent_definition.model = AgentModel::Explicit("initial".into());
-        ctx.model_profile = Some("origin-provider".into());
-        ctx.refusal_fallback_chain = vec!["nested-model-final".into()];
-        ctx.model_resolution_context_provider = Some(Arc::new(
-            |model: &str, profile: Option<&str>| {
-                Ok(crate::model_resolution::ModelResolutionContext {
-                    route: crate::model_resolution::ModelRouteFacts {
-                        model: model.to_string(),
-                        profile: profile.or(Some("origin-provider")).map(str::to_string),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                })
-            }));
-        let transcript_dir = tempfile::tempdir().unwrap();
-        ctx.transcript_subdir = transcript_dir.path().to_path_buf();
-        ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
-            transcript_dir.path().to_path_buf(),
-        )));
-        let transcript_path = transcript_dir.path().join(format!("agent-{}.jsonl", ctx.agent_id));
-        let (event_tx, event_rx) = mpsc::channel(1);
-        drop(event_tx);
-        let (out_tx, out_rx) = mpsc::channel(64);
-        run_subagent(ctx, event_rx, out_tx).await;
-        assert!(drain(out_rx).await.iter().any(|event| matches!(event, SubagentEvent::Completed { .. })));
-        let calls = api.physical_calls();
-        let physical_model = if second_tool == Some("NestedReselectInitial") {
-            "initial"
-        } else {
-            "nested-model-final"
-        };
-        assert_eq!(calls.iter().map(|call| call.request.model.as_str()).collect::<Vec<_>>(),
-            ["initial", "nested-model-final", physical_model]);
-        let serving = calls[1].fallback_target.as_ref().unwrap();
-        assert_eq!(serving.user_model, "initial");
-        assert!(serving.is_target("nested-model-final", str::to_string));
-        let selected = calls[2].fallback_target.as_ref().unwrap();
-        if second_tool.is_some() {
-            assert_eq!(selected.user_model, physical_model);
-            assert_eq!(selected.turn_override, None);
-            assert!(!selected.is_target(physical_model, str::to_string));
-        } else {
-            assert_eq!(selected.user_model, "initial");
-            assert_eq!(selected.turn_override.as_deref(), Some("nested-model-final"));
-            assert!(selected.is_target(physical_model, str::to_string),
-                "a prompt-only modifier retains the serving refusal route");
-        }
-        let expected_profile = if second_tool == Some("NestedMutateSecond") {
-            "nested-profile-final"
-        } else { "origin-provider" };
-        assert_eq!(calls[2].request.profile.as_deref(), Some(expected_profile));
-        let transcript = tokio::fs::read_to_string(transcript_path).await.unwrap();
-        let selections: Vec<serde_json::Value> = transcript.lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .filter(|row| row["type"] == "model-selection")
-            .collect();
-        assert_eq!(selections.len(), usize::from(second_tool.is_some()));
-        if let Some(selection) = selections.first() {
-            assert_eq!(selection["model"], physical_model);
-            assert_eq!(selection["model_profile"], expected_profile);
-        }
-    }
+struct NestedToolEffectsProbe {
+    name: &'static str,
+    schema: serde_json::Value,
+    snapshots: Arc<Mutex<Vec<NestedToolContextSnapshot>>>,
+    modifier_order: Arc<Mutex<Vec<&'static str>>>,
+    meta_seen: Arc<AtomicUsize>,
+    modifier_calls: Arc<AtomicUsize>,
 }
 
 struct RecordingChildHookRoute {
@@ -8187,6 +12786,66 @@ fn nested_model_modifiers_resolve_in_order_without_mutating_original_state() {
 
 #[async_trait]
 impl tool_api::Tool for NestedToolEffectsProbe {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn input_schema(&self) -> &serde_json::Value {
+        &self.schema
+    }
+
+    fn is_enabled(&self, _: &tool_api::ToolStaticContext) -> bool {
+        true
+    }
+
+    fn max_result_size_chars(&self) -> usize {
+        1024
+    }
+
+    fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+        true
+    }
+
+    fn is_read_only(&self, _: &serde_json::Value) -> bool {
+        true
+    }
+
+    fn result_ends_turn(&self, result: &tool_api::ToolCallResult) -> bool {
+        if self.name == "Skill" {
+            assert_eq!(result.data, serde_json::json!({"structured":"first"}));
+            assert_eq!(result.model_content.as_deref(), Some("first model text"));
+            assert!(!result.is_error);
+            assert_eq!(
+                result.mcp_meta,
+                Some(serde_json::json!({"opaque":"nested"}))
+            );
+            self.meta_seen.fetch_add(1, Ordering::SeqCst);
+        }
+        false
+    }
+
+    async fn check_permissions(
+        &self,
+        _: &serde_json::Value,
+        _: &tool_api::ToolUseContext,
+    ) -> permission::PermissionResult {
+        permission::PermissionResult::Allow {
+            reason: permission::PermissionDecisionReason::Other {
+                reason: "nested effects test".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: permission::result::PermissionMetadata::default(),
+        }
+    }
+
+    async fn description(&self, _: &serde_json::Value, _: &tool_api::DescriptionOptions) -> String {
+        String::new()
+    }
+
+    async fn prompt(&self, _: &tool_api::PromptOptions) -> String {
+        String::new()
+    }
 
     async fn call(
         &self,
@@ -8276,7 +12935,8 @@ impl tool_api::Tool for NestedToolEffectsProbe {
                 serde_json::json!({"observed":true}),
             )),
         }
-    }}
+    }
+}
 
 #[tokio::test]
 async fn concurrency_safe_skill_override_updates_the_next_query_after_same_turn_tools() {

@@ -8,6 +8,107 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Presence of a JavaScript-origin field when lowering host state for native
+/// agent APIs. `Option<T>` cannot distinguish a missing property from an
+/// explicitly present JSON `null`, and the native output spreads preserve that
+/// distinction.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FieldPresence<T> {
+    /// The source object did not have the property.
+    #[default]
+    Missing,
+    /// The property existed and contained JSON `null`.
+    Null,
+    /// The property existed and contained a non-null value.
+    Value(T),
+}
+
+/// Host-only source facts consumed by the 2.1.289 `$.agent.list` reducer.
+/// This deliberately lives beside `TaskRecord` so the normal TaskList DTO and
+/// wire representation remain unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AgentTaskFacts {
+    /// Position in the insertion-ordered task registry snapshot (`Object.values`).
+    pub source_order: usize,
+    /// Stable loop identity for agent rows, when the host has one.
+    pub stable_agent_id: FieldPresence<String>,
+    /// Teammate address, independent of the stable loop identity.
+    pub teammate_id: FieldPresence<serde_json::Value>,
+    /// Direct resumable identity fact. Missing remains distinct from null.
+    pub resumable_agent_id: FieldPresence<String>,
+    /// The source task row's description property, including null/missing.
+    pub row_description: FieldPresence<serde_json::Value>,
+    /// Spawn-time description, distinct from the live task row description.
+    pub spawned_description: FieldPresence<String>,
+    /// Resolved agent type when the spawn producer has one.
+    pub agent_type: FieldPresence<String>,
+    /// Direct parent agent identity, not plugin provenance.
+    pub parent_id: FieldPresence<serde_json::Value>,
+    /// Plugin caller identity (`hookCaller`) for this spawn.
+    pub spawned_by: FieldPresence<serde_json::Value>,
+    /// Hook-origin chain retained for provenance diagnostics; Native list does
+    /// not expose this field.
+    pub hook_origin: FieldPresence<serde_json::Value>,
+    /// Display name supplied by the task identity/name registry.
+    pub name: FieldPresence<serde_json::Value>,
+    /// Team name attached to the persistent teammate identity.
+    pub team_name: FieldPresence<String>,
+    /// Concrete model selected for an in-process teammate at admission. This
+    /// is host-only route authority for follow-up Agent projections and is
+    /// deliberately absent from the public task/list wire.
+    pub child_model: FieldPresence<String>,
+    /// Provider profile selected for the teammate's model route, when the
+    /// host resolved one without ambiguity. Also host-only.
+    pub child_model_profile: FieldPresence<String>,
+    /// Direct idle and plan-review state for persistent teammates.
+    pub is_idle: FieldPresence<bool>,
+    pub awaiting_plan_approval: FieldPresence<bool>,
+    /// Native local-agent status inputs. Missing means the producer has no
+    /// equivalent fact; it must not be inferred from `is_parked` or eviction.
+    pub finalizing: FieldPresence<bool>,
+    pub keepalive_reasons: FieldPresence<Vec<String>>,
+    /// Agent identity attached to activity rows used by Native `GTe`.
+    pub activity_agent_id: FieldPresence<String>,
+    /// Whether a background-shell row is active for the agent-list activity
+    /// predicate. Other task kinds leave this missing.
+    pub is_backgrounded: FieldPresence<bool>,
+    /// Exact team-membership `isActive` fact. Missing when no membership
+    /// producer is wired; never synthesized from task status.
+    pub team_member_active: FieldPresence<bool>,
+}
+
+/// Live source facts used by Native `PAt` for a local Agent row. Each field
+/// begins `Missing` and changes only when its real producer reports a value.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AgentListLocalLifecycleFacts {
+    pub is_idle: FieldPresence<bool>,
+    pub finalizing: FieldPresence<bool>,
+    pub keepalive_reasons: FieldPresence<Vec<String>>,
+}
+
+impl AgentListLocalLifecycleFacts {
+    /// Native local-Agent creation initializes `isIdle` to false and creates
+    /// an empty `keepaliveReasons` Set. `finalizing` stays missing until the
+    /// completion transition producer sets it.
+    #[must_use]
+    pub fn initialized_local_agent() -> Self {
+        Self {
+            is_idle: FieldPresence::Value(false),
+            keepalive_reasons: FieldPresence::Value(Vec::new()),
+            ..Self::default()
+        }
+    }
+}
+
+/// One exact local-Agent lifecycle fact update. The runner and task registry
+/// have different authoritative sources, so updates are independent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentListLocalFactUpdate {
+    IsIdle(bool),
+    Finalizing(bool),
+    KeepaliveReason { reason: String, active: bool },
+}
+
 /// Input to [`TaskRegistryHandle::create`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskCreateInput {
@@ -159,12 +260,27 @@ pub struct ForegroundAgentRegistration {
     pub creator_agent_id: Option<crate::types::AgentId>,
     pub creator_teammate_name: Option<String>,
     pub creator_team_name: Option<String>,
+    /// Trusted plugin provenance captured before the spawn hook can rewrite
+    /// its JSON input. This is internal lifecycle state, not model input.
+    pub agent_spawn_provenance: crate::host::subagent_spawn::AgentSpawnProvenance,
 }
 
 /// Delivers an intentional message to a retained externally driven agent.
 #[async_trait]
 pub trait TaskMessageReceiver: Send + Sync {
     async fn send(&self, message: String) -> Result<(), TaskRegistryError>;
+
+    /// Accept a trusted peer envelope into the recipient-owned queue. An
+    /// implementation must retain its origin and stable message identity.
+    /// String receivers cannot acquire human resume authority for peer output.
+    async fn send_peer(
+        &self,
+        _envelope: crate::host::handback::HandbackEnvelope,
+    ) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "typed peer delivery is unavailable for this receiver".into(),
+        ))
+    }
 }
 
 /// Moves a still-running FOREGROUND task to the background on request.
@@ -388,6 +504,11 @@ pub struct TaskRecord {
     /// its first `FusionProgress` event lands. Additive default `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
+    /// Source facts for Native `$.agent.list`, kept off the public TaskList
+    /// wire. The reducer needs these to distinguish missing versus explicit
+    /// null and to preserve registry order and spawn provenance.
+    #[serde(skip)]
+    pub agent_facts: Option<AgentTaskFacts>,
 }
 
 /// A `local_workflow` run projected for the interactive `/workflows` picker
@@ -460,6 +581,10 @@ pub struct WorkflowRecord {
 /// a killed run with a worktree but no result — is safe.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTerminalOutcome {
+    /// Current reporting state. The lifecycle owner archives previous runs
+    /// separately and resets this state when it issues a fresh run token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handback: Option<crate::host::handback::HandbackState>,
     /// The agent's final text response → the `<result>` section (claude
     /// `finalMessage`, `wc(content,"\n")` — text blocks joined with `\n`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -748,6 +873,55 @@ pub struct TaskOutputChunk {
     pub mcp: Option<McpTaskOutputMeta>,
 }
 
+/// Result of waiting for an Agent tool's asynchronous launch to settle. This
+/// follows Native `UOt`: once the launched local-agent row is observed, its
+/// notification is claimed while waiting; a wait interrupted after launch
+/// restores notification eligibility and returns the observed task id so the
+/// caller can watch the still-running agent settle in the background.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTerminalSnapshot {
+    /// Registry identity matching Native's local-agent task row.
+    pub task_id: String,
+    /// `pae` output: the last non-empty assistant transcript text, extracted
+    /// from the task's messages rather than its spool/result envelope.
+    pub native_transcript_text: String,
+    /// The task's direct failure text, if it is a string.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentTerminalWaitOutcome {
+    /// The agent produced its completed result.
+    Completed(AgentTerminalSnapshot),
+    /// The agent ended with a failure.
+    Failed(AgentTerminalSnapshot),
+    /// The agent was stopped before completing.
+    Killed(AgentTerminalSnapshot),
+    /// Waiting ended before a terminal result. `observed_task_id` is present
+    /// only after a matching local-agent row was seen; that case has reset
+    /// `notified` and may be followed by [`TaskRegistryHandle::wait_for_agent_settled`].
+    Interrupted {
+        reason: AgentTerminalWaitReason,
+        observed_task_id: Option<String>,
+    },
+    /// The observed row disappeared before a terminal result. A transcript
+    /// snapshot is included when the registry can still read its last answer.
+    Evicted {
+        native_transcript_text: Option<String>,
+    },
+}
+
+/// Why an Agent terminal wait returned before the task ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTerminalWaitReason {
+    /// The caller's AbortSignal / cancellation token fired.
+    Aborted,
+    /// No matching task row appeared before the startup budget elapsed.
+    StartupTimeout,
+    /// A matching running row did not reach a terminal state before the wait budget elapsed.
+    SettleTimeout,
+}
+
 /// The `mcp_task` half of [`TaskNotification`] — see its `mcp` field.
 ///
 /// Claude-code passes these to `F` (`src_184372091.js` @12876) at the enqueue
@@ -829,6 +1003,90 @@ pub enum TaskRegistryError {
 /// CRUD surface used by the 6 `Task*` tools.
 #[async_trait]
 pub trait TaskRegistryHandle: Send + Sync {
+    /// The active main conversation binding used to mint a report run before
+    /// starting its model. A late report retains this binding unchanged.
+    async fn handback_scope(&self) -> Option<crate::host::handback::HandbackSessionScope> {
+        None
+    }
+
+    async fn begin_handback_run(
+        &self,
+        _input: crate::host::handback::BeginHandbackRun,
+    ) -> Result<crate::host::handback::HandbackRunToken, TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "handback admission is unavailable".into(),
+        ))
+    }
+
+    async fn handback_state(
+        &self,
+        _token: &crate::host::handback::HandbackRunToken,
+    ) -> Option<crate::host::handback::HandbackState> {
+        None
+    }
+
+    async fn handback_state_for_agent(
+        &self,
+        _agent_id: crate::types::AgentId,
+    ) -> Option<crate::host::handback::HandbackState> {
+        None
+    }
+
+    /// Archived sanitized reports for durable parked-agent storage, never a
+    /// source of live report authority or model instructions.
+    async fn handback_history_for_agent(
+        &self,
+        _agent_id: crate::types::AgentId,
+    ) -> Vec<crate::host::handback::HandbackState> {
+        Vec::new()
+    }
+
+    /// Snapshot a recipient-owned durable queue without claiming consumption.
+    async fn pending_handback_reports_for(
+        &self,
+        _agent_id: crate::types::AgentId,
+    ) -> Vec<crate::host::handback::HandbackEnvelope> {
+        Vec::new()
+    }
+
+    /// Remove only the exact receipt after its typed transcript row persisted.
+    async fn acknowledge_handback_consumption(
+        &self,
+        _agent_id: crate::types::AgentId,
+        _receipt: &crate::host::handback::HandbackReceipt,
+    ) -> bool {
+        false
+    }
+
+    async fn try_deliver_handback(
+        &self,
+        _token: &crate::host::handback::HandbackRunToken,
+        _report: crate::host::handback::PreparedHandbackReport,
+    ) -> crate::host::handback::HandbackAdmissionOutcome {
+        crate::host::handback::HandbackAdmissionOutcome::Rejected
+    }
+
+    /// Claim one enforcement reminder. No reminder is claimed after admission,
+    /// contract disablement, or the native three-bounce cap.
+    async fn next_handback_bounce(
+        &self,
+        _token: &crate::host::handback::HandbackRunToken,
+    ) -> Option<u8> {
+        None
+    }
+
+    async fn set_handback_disposition(
+        &self,
+        _token: &crate::host::handback::HandbackRunToken,
+        _disposition: crate::host::handback::HandbackDisposition,
+    ) {
+    }
+
+    /// Query retained owned work without parking or mutating its owner.
+    async fn agent_waiting_on_owned_work(&self, _agent_id: crate::types::AgentId) -> bool {
+        false
+    }
+
     /// Trusted host input only. Model tools must keep using their guarded message path.
     async fn send_human_task_message(
         &self,
@@ -943,6 +1201,73 @@ pub trait TaskRegistryHandle: Send + Sync {
 
     /// Look up a task by id.
     async fn get(&self, id: &str) -> Result<Option<TaskRecord>, TaskRegistryError>;
+
+    /// Wait for the local-agent task identified by the exact raw launch string
+    /// returned by Agent. Implementations match the actual `agentId` producer
+    /// (without parsing or normalizing the wire string), subscribe before the
+    /// initial snapshot, and follow Native's 150 ms polling order. `Some`
+    /// applies independently while waiting for the row to appear and after it
+    /// runs; `None` waits until cancellation or a terminal task state.
+    async fn wait_for_agent_terminal(
+        &self,
+        _raw_agent_id: &str,
+        _cancel: tokio_util::sync::CancellationToken,
+        _timeout: Option<std::time::Duration>,
+    ) -> Result<AgentTerminalWaitOutcome, TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "Agent terminal wait unavailable".into(),
+        ))
+    }
+
+    /// Observe a launched task after a timeout/abort without cancelling it.
+    /// Resolves when that exact row is removed or reaches one of Native's
+    /// terminal statuses (`completed`, `failed`, `killed`).
+    async fn wait_for_agent_settled(&self, _task_id: &str) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "Agent settle watch unavailable".into(),
+        ))
+    }
+
+    /// Replace the task's typed conversation snapshot with the runner's
+    /// terminally settled history. This is host-only state used to reproduce
+    /// Native transcript extraction for `$.tool.call(Agent)`; it is never
+    /// projected through TaskList/TaskOutput.
+    async fn replace_agent_transcript_messages(
+        &self,
+        _task_id: &str,
+        _messages: Vec<crate::types::ConversationMessage>,
+    ) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "Agent transcript snapshot storage unavailable".into(),
+        ))
+    }
+
+    /// Record a live Native `$.agent.list` local-Agent fact by its exact
+    /// identity. Implementations must not infer any sibling fact from this
+    /// update, parked state, or terminal status.
+    async fn update_agent_list_local_fact(
+        &self,
+        _agent_id: crate::types::AgentId,
+        _update: AgentListLocalFactUpdate,
+    ) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "local agent list lifecycle facts are unavailable".into(),
+        ))
+    }
+
+    /// Update the coordinator's exact teammate membership row after a real
+    /// query-entry or stop/failure boundary. The implementation resolves the
+    /// identity from its registered teammate row; callers cannot supply a
+    /// guessed display address or infer activity from task status.
+    async fn set_team_member_active(
+        &self,
+        _agent_id: crate::types::AgentId,
+        _active: bool,
+    ) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "team member activity is unavailable".into(),
+        ))
+    }
 
     /// Agent identities whose live OS process groups belong to this task loop.
     async fn process_owners_for_task(&self, id: &str) -> Vec<String> {
@@ -1482,6 +1807,15 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// The native supervisor is the sole terminal-output writer for this ID.
     async fn mark_shell_supervised(&self, _id: &str) {}
 
+    /// A background lifetime deadline killed the shell; retain the stop cause.
+    async fn settle_background_bash_deadline(
+        &self,
+        id: &str,
+        exit_code: Option<i32>,
+    ) -> Result<(), TaskRegistryError> {
+        self.settle_background_bash(id, exit_code, true).await
+    }
+
     async fn settle_background_bash(
         &self,
         id: &str,
@@ -1518,17 +1852,6 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// defaulted-method idiom).
     async fn set_exit_code(&self, _id: &str, _exit_code: i32) -> Result<(), TaskRegistryError> {
         Ok(())
-    }
-
-    /// Arm a one-shot "came to rest" notification for a PERSISTENT, still-alive
-    /// task — the read side of which is surfaced (without eviction) by
-    /// [`take_pending_task_notifications`]. Called via the task status sink's
-    /// `notify_rest` each time a backgrounded agent parks after a turn-set.
-    /// `result` is the agent's final-text response and `usage` its run usage —
-    /// both surfaced as the optional `<result>` / `<usage>` notification sections
-    /// (the binary `enqueueAgentNotification` always passes them when a result
-    /// exists). Default no-op so existing mock handles compile unchanged.
-    async fn mark_rested(&self, _id: &str, _result: Option<String>, _usage: Option<AgentRunUsage>) {
     }
 
     /// Drain the terminal tasks that have NOT yet been surfaced to the model,
@@ -1777,8 +2100,25 @@ mod tests {
             task_type: task_type.into(),
             status: "running".into(),
             description: "d".into(),
+            agent_facts: None,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn agent_task_facts_do_not_enter_the_task_record_wire() {
+        let mut record = running("a1", "local_agent");
+        record.agent_facts = Some(AgentTaskFacts {
+            source_order: 7,
+            stable_agent_id: FieldPresence::Value("agent:stable".into()),
+            spawned_by: FieldPresence::Null,
+            ..AgentTaskFacts::default()
+        });
+
+        let value = serde_json::to_value(&record).unwrap();
+        assert!(value.get("agent_facts").is_none());
+        let decoded: TaskRecord = serde_json::from_value(value).unwrap();
+        assert!(decoded.agent_facts.is_none());
     }
 
     #[tokio::test]

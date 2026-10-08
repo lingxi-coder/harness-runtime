@@ -48,8 +48,40 @@
 
 use crate::definition::{HookDefinition, HookExecutor};
 use crate::events::HookEvent;
+use crate::response::ExactHookText;
 use async_trait::async_trait;
 use serde_json::{Map, Value};
+use std::future::Future;
+use std::pin::Pin;
+
+/// Generation lease carried by tool-scoped hook dispatches. The host wraps
+/// externally visible hook publications in this lease so reset/drop can
+/// reject or cancel stale appends without coupling `hooks` to the orchestrator.
+pub trait HookPublicationGuard: Send + Sync {
+    /// Whether the executor generation that issued this guard is still active.
+    fn is_current(&self) -> bool;
+
+    /// Return the generation cancellation signal for host-level admission.
+    /// `None` is valid for publications that do not belong to an autonomous
+    /// W1 generation.
+    fn generation_cancellation_token(&self) -> Option<lingxi_core::host::CancellationToken>;
+
+    /// Run one side effect only while its owning executor generation remains
+    /// current. The publication future is dropped when the generation resets.
+    fn publish_if_current<'a>(
+        &'a self,
+        publication: Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+
+    /// Admit one mutation while the generation is current, then let it finish
+    /// under the lease. Use this for durable writes that may delegate to
+    /// uncancellable blocking I/O; dropping their await does not stop the
+    /// underlying operation.
+    fn commit_if_current<'a>(
+        &'a self,
+        mutation: Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+}
 
 /// Sink the executor publishes each hook-run attachment to.
 ///
@@ -61,34 +93,100 @@ use serde_json::{Map, Value};
 #[async_trait]
 pub trait HookAttachmentSink: Send + Sync {
     /// Persist one hook-run attachment payload.
-    async fn record(&self, attachment: Value);
+    async fn record(&self, attachment: lingxi_core::types::utf16_json::Utf16JsonProjection);
 
-    /// Persist oversized hook output and return the transcript-visible path
-    /// reference. Hosts without session storage may return `None`; callers then
-    /// retain the legacy inline truncation fallback.
-    async fn persist_large_output(&self, text: &str) -> Option<String> {
+    /// Persist a large hook output up to the host's active byte ceiling and
+    /// return the exact persisted JS text prefix and path. The caller builds
+    /// Native's persisted-output wrapper from this metadata. A host without
+    /// storage returns the native persistence error for the inline fallback.
+    async fn persist_large_output(
+        &self,
+        text: &ExactHookText,
+    ) -> Result<PersistedHookOutput, String> {
         let _ = text;
-        None
+        Err("tool result was not saved".into())
     }
 }
 
-/// claude's inline cap for hook output spliced into an attachment's `content`
-/// (`P0u = 1e4`, BIN off **230268805**; `jKe(e,t,r,n=P0u)` returns `e`
-/// unchanged when `e.length <= n`).
-pub const HOOK_OUTPUT_INLINE_LIMIT: usize = 10_000;
+/// Result of the host's root-confined write for one large hook-output string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedHookOutput {
+    /// Absolute path included in the Native wrapper text.
+    pub path: String,
+    /// Exact JS string persisted after applying the host byte cap.
+    pub persisted_text: ExactHookText,
+    /// Native reports this cap only when the file is shorter than the source.
+    pub truncated_at_bytes: Option<usize>,
+}
 
-/// Apply claude's `jKe` inline-vs-persist threshold to hook output.
-///
-/// At or under [`HOOK_OUTPUT_INLINE_LIMIT`] chars the text is returned
-/// verbatim — the byte-exact common case. The production attachment sink
-/// persists larger output before this fallback is used; hosts without session
-/// storage still truncate safely at the same boundary.
+/// Native's large-output threshold (`Eis = 1e4`, 2.1.291 @ 182907021).
+pub const HOOK_OUTPUT_INLINE_LIMIT: usize = 10_000;
+/// Native previews the persisted prefix through `ZJe(text, Qwe)`, `Qwe=2000`.
+pub const HOOK_OUTPUT_PREVIEW_LIMIT: usize = 2_000;
+
+/// Format Native's 1024-based hook-output size label (`un`, 2.1.291 @
+/// 182723570).
 #[must_use]
-pub fn inline_hook_output(text: &str) -> String {
-    if text.chars().count() <= HOOK_OUTPUT_INLINE_LIMIT {
-        return text.to_string();
+pub fn native_hook_output_size(size: usize) -> String {
+    let kib = size as f64 / 1024.0;
+    if kib < 1.0 {
+        return format!("{size} bytes");
     }
-    text.chars().take(HOOK_OUTPUT_INLINE_LIMIT).collect()
+    if kib < 1024.0 {
+        return trim_decimal(kib, "KB");
+    }
+    let mib = kib / 1024.0;
+    if mib < 1024.0 {
+        return trim_decimal(mib, "MB");
+    }
+    trim_decimal(mib / 1024.0, "GB")
+}
+
+fn trim_decimal(value: f64, unit: &str) -> String {
+    let formatted = format!("{value:.1}");
+    format!("{}{}", formatted.strip_suffix(".0").unwrap_or(&formatted), unit)
+}
+
+/// Native `Fse` persistence wrapper (`eEe`, 2.1.291 @ 187991296).
+#[must_use]
+pub fn persisted_output_wrapper(output: &PersistedHookOutput, original: &ExactHookText) -> ExactHookText {
+    let header = if let Some(limit) = output.truncated_at_bytes {
+        format!(
+            "<persisted-output>\nOutput exceeded the {} persist limit; only the first {} were saved to: {}",
+            native_hook_output_size(limit),
+            native_hook_output_size(limit),
+            output.path,
+        )
+    } else {
+        format!(
+            "<persisted-output>\nOutput too large ({}). Full output saved to: {}",
+            native_hook_output_size(original.len_utf16()),
+            output.path,
+        )
+    };
+    let (preview, has_more) = output.persisted_text.preview(HOOK_OUTPUT_PREVIEW_LIMIT);
+    let mut wrapped = ExactHookText::from_text(header);
+    wrapped.push_text("\n\nPreview (first ");
+    wrapped.push_text(&native_hook_output_size(HOOK_OUTPUT_PREVIEW_LIMIT));
+    wrapped.push_text("):\n");
+    wrapped.push(&preview);
+    wrapped.push_text(if has_more { "\n...\n" } else { "\n" });
+    wrapped.push_text("</persisted-output>");
+    wrapped
+}
+
+/// Native `re` failure fallback, including its well-formed UTF-16 cap.
+#[must_use]
+pub fn failed_persistence_fallback(
+    text: &ExactHookText,
+    source: &str,
+    error: &str,
+) -> ExactHookText {
+    let mut result = text.truncate_well_formed(HOOK_OUTPUT_INLINE_LIMIT);
+    result.push_text(&format!(
+        "\n\n[Hook {source} truncated at {HOOK_OUTPUT_INLINE_LIMIT} chars — persist-to-disk failed: {error}]"
+    ));
+    result
 }
 
 /// The four identity fields every hook-run attachment leads with.
@@ -171,8 +269,10 @@ pub fn additional_context_attachment(
     hook_name: &str,
     tool_use_id: &str,
     hook_event: &str,
-    content: &[String],
-) -> Value {
+    content: &[ExactHookText],
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    use lingxi_core::types::utf16_json::{Utf16JsonProjection, Utf16JsonString};
+
     let mut m = Map::new();
     m.insert(
         "type".into(),
@@ -180,12 +280,30 @@ pub fn additional_context_attachment(
     );
     m.insert(
         "content".into(),
-        Value::Array(content.iter().cloned().map(Value::String).collect()),
+        Value::Array(
+            content
+                .iter()
+                .map(|text| Value::String(text.display.clone()))
+                .collect(),
+        ),
     );
     m.insert("hookName".into(), Value::String(hook_name.into()));
     m.insert("toolUseID".into(), Value::String(tool_use_id.into()));
     m.insert("hookEvent".into(), Value::String(hook_event.into()));
-    Value::Object(m)
+    let mut projection = Utf16JsonProjection::plain(Value::Object(m));
+    projection.strings = content
+        .iter()
+        .enumerate()
+        .filter_map(|(index, text)| {
+            (text.utf16_code_units != text.display.encode_utf16().collect::<Vec<_>>()).then_some(
+                Utf16JsonString {
+                    pointer: format!("/content/{index}"),
+                    code_units: text.utf16_code_units.clone(),
+                },
+            )
+        })
+        .collect();
+    projection
 }
 
 /// Build a `hook_error_during_execution` attachment payload (CONSUMER arm).
@@ -239,21 +357,30 @@ pub fn error_during_execution_attachment(
 #[must_use]
 pub fn success_attachment(
     id: &HookAttachmentIdentity,
-    content: &str,
+    content: &ExactHookText,
     stdout: &str,
     stderr: &str,
     exit_code: i32,
     command: &str,
     duration_ms: u64,
-) -> Value {
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
     let mut m = identity_head("hook_success", id);
-    m.insert("content".into(), Value::String(content.into()));
+    m.insert("content".into(), Value::String(content.display.clone()));
     m.insert("stdout".into(), Value::String(stdout.into()));
     m.insert("stderr".into(), Value::String(stderr.into()));
     m.insert("exitCode".into(), Value::from(exit_code));
     m.insert("command".into(), Value::String(command.into()));
     m.insert("durationMs".into(), Value::from(duration_ms));
-    Value::Object(m)
+    let mut projection = lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+        Value::Object(m),
+    );
+    if let Some(content) = content.json_projection().strings.into_iter().next() {
+        projection.strings.push(lingxi_core::types::utf16_json::Utf16JsonString {
+            pointer: "/content".into(),
+            code_units: content.code_units,
+        });
+    }
+    projection
 }
 
 /// Build a `hook_non_blocking_error` attachment payload.
@@ -413,9 +540,8 @@ pub fn stopped_continuation_attachment(id: &HookAttachmentIdentity, message: &st
 ///
 /// Key order `type, content, hookName, toolUseID, hookEvent` — `content` sits
 /// SECOND (a STRING, unlike `hook_additional_context`'s array), so this must
-/// NOT route through [`identity_head`]. `content` is passed through
-/// [`inline_hook_output`] (`jKe`, the 10 000-char cap) exactly as the oracle
-/// does before building the payload.
+/// NOT route through [`identity_head`]. `content` is the already transformed
+/// result of Native `Fse`; this helper keeps its exact UTF-16 units.
 ///
 /// # Oracle evidence
 ///
@@ -431,14 +557,26 @@ pub fn stopped_continuation_attachment(id: &HookAttachmentIdentity, message: &st
 /// + TUI record only, which is exactly what
 /// [`crate::AggregateHookResult::system_messages`]'s doc comment already says.
 #[must_use]
-pub fn system_message_attachment(id: &HookAttachmentIdentity, content: &str) -> Value {
+pub fn system_message_attachment(
+    id: &HookAttachmentIdentity,
+    content: &ExactHookText,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
     let mut m = Map::new();
     m.insert("type".into(), Value::String("hook_system_message".into()));
-    m.insert("content".into(), Value::String(inline_hook_output(content)));
+    m.insert("content".into(), Value::String(content.display.clone()));
     m.insert("hookName".into(), Value::String(id.hook_name.clone()));
     m.insert("toolUseID".into(), Value::String(id.tool_use_id.clone()));
     m.insert("hookEvent".into(), Value::String(id.hook_event.clone()));
-    Value::Object(m)
+    let mut projection = lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+        Value::Object(m),
+    );
+    if let Some(content) = content.json_projection().strings.into_iter().next() {
+        projection.strings.push(lingxi_core::types::utf16_json::Utf16JsonString {
+            pointer: "/content".into(),
+            code_units: content.code_units,
+        });
+    }
+    projection
 }
 
 /// Build a `hook_deferred_tool` attachment payload.
@@ -624,23 +762,24 @@ mod tests {
     /// `hook_additional_context` — but `content` is a STRING, not an array.
     #[test]
     fn system_message_matches_oracle_key_order() {
-        let v = system_message_attachment(&ident(), "reformatted 3 files");
+        let content = ExactHookText::from_text("reformatted 3 files");
+        let v = system_message_attachment(&ident(), &content);
         assert_eq!(
-            serde_json::to_string(&v).unwrap(),
+            v.to_json_string().unwrap(),
             r#"{"type":"hook_system_message","content":"reformatted 3 files","hookName":"PostToolUse:Bash","toolUseID":"toolu_01ApkBwAZMCAza47B5nAWiGS","hookEvent":"PostToolUse"}"#
         );
     }
 
-    /// `content` passes through `jKe` — the same 10 000-char inline cap every
-    /// other hook-output field uses.
+    /// Attachment projection preserves a lone code unit produced by Native's
+    /// `slice`-based persisted-output preview.
     #[test]
-    fn system_message_content_is_capped_at_the_inline_limit() {
-        let long = "x".repeat(HOOK_OUTPUT_INLINE_LIMIT + 500);
-        let v = system_message_attachment(&ident(), &long);
-        assert_eq!(
-            v["content"].as_str().unwrap().chars().count(),
-            HOOK_OUTPUT_INLINE_LIMIT
-        );
+    fn system_message_keeps_exact_utf16_content() {
+        let content = ExactHookText::from_utf16(vec![0xD800, u16::from(b'x')]);
+        let v = system_message_attachment(&ident(), &content);
+        assert_eq!(v.value["content"], "�x");
+        assert_eq!(v.strings[0].pointer, "/content");
+        assert_eq!(v.strings[0].code_units, [0xD800, u16::from(b'x')]);
+        assert!(v.to_json_string().unwrap().contains(r#""content":"\ud800x""#));
     }
 
     /// O2: `hook_deferred_tool` has NO identity block at all — `toolUseID`
@@ -713,10 +852,10 @@ mod tests {
             "PostToolUse:Edit",
             "toolu_01ApkBwAZMCAza47B5nAWiGS",
             "PostToolUse",
-            &["a".to_string(), "b".to_string()],
+            &["a".into(), "b".into()],
         );
         assert_eq!(
-            serde_json::to_string(&v).unwrap(),
+            v.to_json_string().unwrap(),
             r#"{"type":"hook_additional_context","content":["a","b"],"hookName":"PostToolUse:Edit","toolUseID":"toolu_01ApkBwAZMCAza47B5nAWiGS","hookEvent":"PostToolUse"}"#
         );
     }
@@ -732,10 +871,10 @@ mod tests {
             "SessionStart",
             "SessionStart",
             "SessionStart",
-            &["ctx".to_string()],
+            &["ctx".into()],
         );
         assert_eq!(
-            serde_json::to_string(&v).unwrap(),
+            v.to_json_string().unwrap(),
             r#"{"type":"hook_additional_context","content":["ctx"],"hookName":"SessionStart","toolUseID":"SessionStart","hookEvent":"SessionStart"}"#
         );
     }
@@ -758,11 +897,74 @@ mod tests {
 
     #[test]
     fn success_matches_oracle_key_order() {
-        let v = success_attachment(&ident(), "ok", "out\n", "", 0, "./hooks/fmt.sh", 37);
+        let v = success_attachment(
+            &ident(),
+            &ExactHookText::from_text("ok"),
+            "out\n",
+            "",
+            0,
+            "./hooks/fmt.sh",
+            37,
+        );
         assert_eq!(
-            serde_json::to_string(&v).unwrap(),
+            v.to_json_string().unwrap(),
             r#"{"type":"hook_success","hookName":"PostToolUse:Bash","toolUseID":"toolu_01ApkBwAZMCAza47B5nAWiGS","hookEvent":"PostToolUse","content":"ok","stdout":"out\n","stderr":"","exitCode":0,"command":"./hooks/fmt.sh","durationMs":37}"#
         );
+    }
+
+    #[test]
+    fn exact_context_attachment_keeps_split_surrogate_units() {
+        let content = ExactHookText::from_utf16(vec![0xD800, u16::from(b'!')]);
+        let projection = additional_context_attachment(
+            "PreToolUse:Edit",
+            "toolu_01ApkBwAZMCAza47B5nAWiGS",
+            "PreToolUse",
+            &[content],
+        );
+        assert_eq!(projection.value["content"][0], "�!");
+        assert_eq!(projection.strings[0].pointer, "/content/0");
+        assert_eq!(projection.strings[0].code_units, [0xD800, u16::from(b'!')]);
+        assert!(projection
+            .to_json_string()
+            .unwrap()
+            .contains(r#""content":["\ud800!"]"#));
+    }
+
+    #[test]
+    fn native_size_and_persisted_wrapper_match_local_fse_branch() {
+        assert_eq!(native_hook_output_size(999), "999 bytes");
+        assert_eq!(native_hook_output_size(1_024), "1KB");
+        assert_eq!(native_hook_output_size(2_000), "2KB");
+        assert_eq!(native_hook_output_size(1_073_741_824), "1GB");
+
+        let original = ExactHookText::from_text("x".repeat(HOOK_OUTPUT_INLINE_LIMIT + 1));
+        let persisted = PersistedHookOutput {
+            path: "/session/tool-results/hook.txt".into(),
+            persisted_text: original.clone(),
+            truncated_at_bytes: None,
+        };
+        let wrapper = persisted_output_wrapper(&persisted, &original);
+        assert!(wrapper.display.starts_with(
+            "<persisted-output>\nOutput too large (9.8KB). Full output saved to: /session/tool-results/hook.txt\n\nPreview (first 2KB):\n"
+        ));
+        assert!(wrapper.display.ends_with("\n...\n</persisted-output>"));
+        assert_eq!(wrapper.utf16_code_units.len(), wrapper.display.encode_utf16().count());
+    }
+
+    #[test]
+    fn local_failure_fallback_drops_dangling_high_surrogate() {
+        let mut units = vec![u16::from(b'a'); HOOK_OUTPUT_INLINE_LIMIT - 1];
+        units.extend([0xD800, 0xDE00, u16::from(b'!')]);
+        let source = ExactHookText::from_utf16(units);
+        let fallback = failed_persistence_fallback(&source, "stdout", "disk full");
+        let suffix =
+            "\n\n[Hook stdout truncated at 10000 chars — persist-to-disk failed: disk full]";
+        // Removing the high surrogate leaves 9999 source units; the suffix
+        // starts at index 9999 rather than padding the truncated prefix.
+        let mut expected_units = vec![u16::from(b'a'); HOOK_OUTPUT_INLINE_LIMIT - 1];
+        expected_units.extend(suffix.encode_utf16());
+        assert_eq!(fallback.utf16_code_units, expected_units);
+        assert!(fallback.display.ends_with(suffix));
     }
 
     #[test]

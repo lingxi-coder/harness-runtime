@@ -1,9 +1,13 @@
 //! Registry tests.
 #![allow(clippy::unwrap_used)]
 
+#[path = "handback_regression_test.rs"]
+mod handback_regression;
+
 use super::*;
 use crate::task_trait::{Task, TaskContext, TaskHandle};
 use async_trait::async_trait;
+use futures::StreamExt;
 use lingxi_core::host::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -23,8 +27,16 @@ async fn parked_agent_is_completed_retained_resumable_and_stoppable() {
         .await;
     let sink = crate::registry_status_sink::RegistryStatusSink::new();
     sink.bind(registry.clone());
-    sink.notify_rest("aparktest", Some("answer".into()), None, None, None, None)
-        .await;
+    sink.notify_rest(
+        "aparktest",
+        Some("answer".into()),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
     let record = TaskRegistryHandle::get(registry.as_ref(), "aparktest")
         .await
         .unwrap()
@@ -67,6 +79,7 @@ async fn parked_agent_is_completed_retained_resumable_and_stoppable() {
         None,
         None,
         None,
+        None,
     )
     .await;
     assert_eq!(registry.take_pending_task_notifications().await.len(), 1);
@@ -95,6 +108,7 @@ async fn resumed_agent_clears_exhausted_turn_note_before_normal_rest() {
         .set_agent_outcome(
             "aresume01",
             AgentTerminalOutcome {
+                handback: None,
                 max_turns_reached: Some(2),
                 result: Some("partial".into()),
                 ..Default::default()
@@ -102,7 +116,15 @@ async fn resumed_agent_clears_exhausted_turn_note_before_normal_rest() {
         )
         .await;
     registry
-        .mark_task_rested("aresume01", Some("partial".into()), None, None, None, None)
+        .mark_task_rested(
+            "aresume01",
+            Some("partial".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
         .await;
     assert_eq!(
         registry.take_pending_task_notifications().await[0].max_turns_reached,
@@ -116,13 +138,22 @@ async fn resumed_agent_clears_exhausted_turn_note_before_normal_rest() {
         .set_agent_outcome(
             "aresume01",
             AgentTerminalOutcome {
+                handback: None,
                 result: Some("finished".into()),
                 ..Default::default()
             },
         )
         .await;
     registry
-        .mark_task_rested("aresume01", Some("finished".into()), None, None, None, None)
+        .mark_task_rested(
+            "aresume01",
+            Some("finished".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
         .await;
     let notifications = registry.take_pending_task_notifications().await;
     assert_eq!(notifications.len(), 1);
@@ -146,13 +177,14 @@ async fn notification_resume_clears_exhausted_turn_note() {
         .set_agent_outcome(
             "anoturn1",
             AgentTerminalOutcome {
+                handback: None,
                 max_turns_reached: Some(2),
                 ..Default::default()
             },
         )
         .await;
     registry
-        .mark_task_rested("anoturn1", None, None, Some(owner), None, None)
+        .mark_task_rested("anoturn1", None, None, Some(owner), None, None, None)
         .await;
     assert_eq!(registry.take_pending_task_notifications().await.len(), 1);
     let mut child = agent_state("cnoturn1", TaskStatus::Completed);
@@ -203,6 +235,7 @@ async fn nested_parked_keepalive_defers_notifications_and_cascades_only_its_tree
             Some(b),
             None,
             None,
+            None,
         )
         .await;
     // TaskOutput already consumed B's current answer, but its live child must
@@ -214,6 +247,7 @@ async fn nested_parked_keepalive_defers_notifications_and_cascades_only_its_tree
             Some("A resting".into()),
             None,
             Some(a),
+            None,
             None,
             None,
         )
@@ -260,7 +294,15 @@ async fn completed_child_keeps_parked_ancestors_until_recipient_fold() {
     registry.insert_state_for_test(parent).await;
     registry.insert_state_for_test(child).await;
     registry
-        .mark_task_rested("await001", Some("parent".into()), None, Some(a), None, None)
+        .mark_task_rested(
+            "await001",
+            Some("parent".into()),
+            None,
+            Some(a),
+            None,
+            None,
+            None,
+        )
         .await;
     registry
         .set_status("bwait001", TaskStatus::Completed)
@@ -283,6 +325,7 @@ async fn completed_child_keeps_parked_ancestors_until_recipient_fold() {
             Some("parent after fold".into()),
             None,
             Some(a),
+            None,
             None,
             None,
         )
@@ -308,11 +351,27 @@ async fn notified_empty_park_does_not_hold_its_parent() {
         registry.insert_state_for_test(state).await;
     }
     registry
-        .mark_task_rested("bempty01", Some("idle".into()), None, Some(b), None, None)
+        .mark_task_rested(
+            "bempty01",
+            Some("idle".into()),
+            None,
+            Some(b),
+            None,
+            None,
+            None,
+        )
         .await;
     registry.mark_notified("bempty01").await.unwrap();
     registry
-        .mark_task_rested("aempty01", Some("done".into()), None, Some(a), None, None)
+        .mark_task_rested(
+            "aempty01",
+            Some("done".into()),
+            None,
+            Some(a),
+            None,
+            None,
+            None,
+        )
         .await;
     let notifications = registry.take_pending_task_notifications().await;
     assert_eq!(notifications.len(), 1);
@@ -1208,6 +1267,12 @@ async fn an_agents_background_shell_defers_that_agents_rest_notification() {
     let agent_task = "a-owner-rest".to_string();
     registry
         .insert_state_for_test(TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+            handback: None,
+            handback_history: Vec::new(),
+
+            agent_spawn_provenance: Default::default(),
+            agent_list_lifecycle: Default::default(),
+            spawned_description: None,
             is_parked: false,
             is_observer: false,
             observed_agent_id: None,
@@ -1262,6 +1327,7 @@ async fn an_agents_background_shell_defers_that_agents_rest_notification() {
             Some(owner),
             None,
             None,
+            None,
         )
         .await;
     let held = registry.take_pending_task_notifications().await;
@@ -1289,6 +1355,7 @@ async fn an_agents_background_shell_defers_that_agents_rest_notification() {
             Some("done".into()),
             None,
             Some(owner),
+            None,
             None,
             None,
         )
@@ -2151,6 +2218,12 @@ async fn budget_stop_matches_claude_background_agent_filter() {
     // type and status as the background agent.
     registry
         .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
+            handback: None,
+            handback_history: Vec::new(),
+
+            agent_spawn_provenance: Default::default(),
+            agent_list_lifecycle: Default::default(),
+            spawned_description: None,
             is_parked: false,
             is_observer: false,
             observed_agent_id: None,
@@ -3485,10 +3558,13 @@ impl crate::task_trait::Task for AllocatingHandler {
             .append_file_no_follow(path.to_str().unwrap(), "spawned worker output\n")
             .await
             .map_err(|e| TaskError::Io(e.to_string()))?;
-        Ok(crate::task_trait::TaskHandle::new(
-            self.task_id.clone(),
-            None,
-        ))
+        Ok(
+            crate::task_trait::TaskHandle::new(self.task_id.clone(), None)
+                .with_teammate_model_route(
+                    "claude-sonnet-5".to_string(),
+                    Some("team-provider".to_string()),
+                ),
+        )
     }
     async fn kill(
         &self,
@@ -3543,7 +3619,33 @@ async fn spawn_does_not_reallocate_and_worker_output_survives() {
     );
 
     // And the registry recorded the task under the handler id.
-    assert!(registry.get(&id).await.is_some());
+    let state = registry.get(&id).await.expect("registry row exists");
+    let TaskState::InProcessTeammate(teammate) = &state else {
+        panic!("expected in-process teammate state");
+    };
+    assert_eq!(teammate.child_model.as_deref(), Some("claude-sonnet-5"));
+    assert_eq!(
+        teammate.child_model_profile.as_deref(),
+        Some("team-provider")
+    );
+    let typed_state = serde_json::to_value(&state).unwrap();
+    assert!(typed_state.get("child_model").is_none());
+    assert!(typed_state.get("child_model_profile").is_none());
+
+    let record = crate::handle::state_to_record(&state);
+    let facts = record.agent_facts.as_ref().expect("host-only facts");
+    assert_eq!(
+        facts.child_model,
+        lingxi_core::host::task_registry::FieldPresence::Value("claude-sonnet-5".into())
+    );
+    assert_eq!(
+        facts.child_model_profile,
+        lingxi_core::host::task_registry::FieldPresence::Value("team-provider".into())
+    );
+    let public_record = serde_json::to_value(record).unwrap();
+    assert!(public_record.get("agent_facts").is_none());
+    assert!(public_record.get("child_model").is_none());
+    assert!(public_record.get("child_model_profile").is_none());
 }
 
 #[tokio::test]
@@ -3713,52 +3815,138 @@ async fn mark_notified_unknown_id_is_not_found() {
 }
 
 #[tokio::test]
-async fn evict_terminal_tasks_sweeps_terminal_notified_only() {
-    // Terminal tasks are retained after notification; this compatibility method
-    // no longer performs implicit GC.
-    let (_d, registry) = make_registry();
+async fn notification_drain_obeys_real_shell_grace_and_parked_agent_retention() {
+    use crate::handlers::{LocalBashHandler, TaskStatusSink};
+    use crate::registry_status_sink::RegistryStatusSink;
 
-    // Task A: notified while pending, THEN driven terminal — eager evict did
-    // not fire (still pending then), so the sweep must catch it.
+    struct GatedRunner(tokio::sync::Semaphore);
+    #[async_trait]
+    impl lingxi_core::host::ProcessRunner for GatedRunner {
+        async fn run(
+            &self,
+            command: &lingxi_core::host::SandboxedCommand,
+        ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
+            self.0.acquire().await.unwrap().forget();
+            lingxi_core::host::ProcessRunner::run(&ExitZeroRunner, command).await
+        }
+        async fn spawn_background(
+            &self,
+            _command: &lingxi_core::host::SandboxedCommand,
+        ) -> Result<lingxi_core::host::ProcessHandle, mobile_linux_api::ProcessError> {
+            Err(mobile_linux_api::ProcessError::Unsupported)
+        }
+        async fn kill(
+            &self,
+            _handle: &lingxi_core::host::ProcessHandle,
+        ) -> Result<(), mobile_linux_api::ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    let (_dir, mut registry) = make_registry();
+    let sink = Arc::new(RegistryStatusSink::new());
+    let runner = Arc::new(GatedRunner(tokio::sync::Semaphore::new(0)));
+    registry.register_handler(
+        TaskType::LocalBash,
+        Arc::new(
+            LocalBashHandler::new(
+                runner.clone(),
+                Arc::new(PassSandbox),
+                registry.output_manager.clone(),
+            )
+            .with_status_sink(sink.clone()),
+        ),
+    );
+    let registry = Arc::new(registry);
+    sink.bind(registry.clone());
+    let shell = || TaskSpawnInput::LocalBash {
+        command: "echo done".into(),
+        timeout: None,
+        tool_use_id: None,
+    };
     let a = registry
-        .create(TaskType::LocalBash, teammate_input(), "a".into())
+        .spawn(TaskType::LocalBash, shell(), "previously notified".into())
         .await
         .unwrap();
-    registry.mark_notified(&a).await.unwrap(); // pending ⇒ kept, flag set
-    registry
-        .force_bash_terminal_for_test(&a, TaskStatus::Completed, Some(0))
-        .await;
-
-    // Task B: terminal but NOT notified — must survive the sweep.
     let b = registry
-        .create(TaskType::LocalBash, teammate_input(), "b".into())
+        .spawn(TaskType::LocalBash, shell(), "fresh completion".into())
+        .await
+        .unwrap();
+    runner.0.add_permits(2);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let a_complete = registry
+                .get(&a)
+                .await
+                .is_some_and(|row| row.base().status == TaskStatus::Completed);
+            let b_complete = registry
+                .get(&b)
+                .await
+                .is_some_and(|row| row.base().status == TaskStatus::Completed);
+            if a_complete && b_complete {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("real shell workers publish their terminal state");
+    registry.mark_notified(&a).await.unwrap();
+    let c = registry
+        .spawn(TaskType::LocalBash, shell(), "still running".into())
         .await
         .unwrap();
     registry
-        .force_bash_terminal_for_test(&b, TaskStatus::Failed, Some(1))
+        .insert_state_for_test(agent_state("aretained", TaskStatus::Running))
         .await;
+    sink.notify_rest(
+        "aretained",
+        Some("answer".into()),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
 
-    // Task C: notified but still pending (non-terminal) — must survive.
-    let c = registry
-        .create(TaskType::LocalBash, teammate_input(), "c".into())
-        .await
-        .unwrap();
-    registry.mark_notified(&c).await.unwrap();
-
-    let evicted = registry.evict_terminal_tasks().await;
-    assert!(evicted.is_empty(), "implicit terminal-task GC is disabled");
+    let notifications = registry.take_pending_task_notifications().await;
+    assert_eq!(notifications.len(), 2);
+    assert!(notifications.iter().any(|notice| notice.task_id == b));
+    assert!(notifications
+        .iter()
+        .any(|notice| notice.task_id == "aretained"));
     assert!(
-        registry.get(&a).await.is_some(),
-        "terminal+notified is retained"
+        registry.get(&a).await.is_none(),
+        "prior-notified shell is evicted"
     );
     assert!(
         registry.get(&b).await.is_some(),
-        "terminal but un-notified survives"
+        "fresh shell gets one-pass grace"
     );
     assert!(
         registry.get(&c).await.is_some(),
-        "notified but non-terminal survives"
+        "a live shell cannot be evicted"
     );
+    assert!(registry.get("aretained").await.unwrap().is_parked());
+
+    assert!(registry.take_pending_task_notifications().await.is_empty());
+    assert!(
+        registry.get(&b).await.is_none(),
+        "next pass evicts the notified shell"
+    );
+    assert!(
+        registry.get(&c).await.is_some(),
+        "live shell survives repeated passes"
+    );
+    assert!(
+        registry.get("aretained").await.unwrap().is_parked(),
+        "parked agent remains retained after notification"
+    );
+    registry.kill(&c).await.unwrap();
 }
 
 // ---- T35: take_pending_task_notifications drain --------------------------
@@ -4394,6 +4582,12 @@ async fn take_pending_carries_agent_error() {
     };
     registry
         .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
+            handback: None,
+            handback_history: Vec::new(),
+
+            agent_spawn_provenance: Default::default(),
+            agent_list_lifecycle: Default::default(),
+            spawned_description: None,
             is_parked: false,
             is_observer: false,
             observed_agent_id: None,
@@ -4424,6 +4618,12 @@ async fn take_pending_carries_agent_error() {
 fn agent_state(id: &str, status: TaskStatus) -> crate::state::TaskState {
     use crate::state::{LocalAgentTaskState, TaskState, TaskStateBase};
     TaskState::LocalAgent(LocalAgentTaskState {
+        handback: None,
+        handback_history: Vec::new(),
+
+        agent_spawn_provenance: Default::default(),
+        agent_list_lifecycle: Default::default(),
+        spawned_description: None,
         is_parked: false,
         is_observer: false,
         observed_agent_id: None,
@@ -4470,6 +4670,7 @@ async fn take_pending_carries_agent_result_usage_and_worktree() {
         .set_agent_outcome(
             "adone0001",
             lingxi_core::host::task_registry::AgentTerminalOutcome {
+                handback: None,
                 result: Some("the answer".into()),
                 usage: Some(lingxi_core::host::task_registry::AgentRunUsage {
                     subagent_tokens: 120,
@@ -4701,6 +4902,7 @@ async fn take_pending_carries_the_exhausted_turn_budget() {
         .set_agent_outcome(
             "aturn0001",
             lingxi_core::host::task_registry::AgentTerminalOutcome {
+                handback: None,
                 max_turns_reached: Some(12),
                 ..Default::default()
             },
@@ -4728,6 +4930,7 @@ async fn take_pending_leaves_the_turn_budget_unset_for_a_normal_completion() {
         .set_agent_outcome(
             "aturn0002",
             lingxi_core::host::task_registry::AgentTerminalOutcome {
+                handback: None,
                 result: Some("done".into()),
                 ..Default::default()
             },
@@ -4756,6 +4959,7 @@ async fn set_agent_outcome_error_reaches_the_failed_summary() {
         .set_agent_outcome(
             "afail0001",
             lingxi_core::host::task_registry::AgentTerminalOutcome {
+                handback: None,
                 error: Some("model refused".into()),
                 ..Default::default()
             },
@@ -4783,6 +4987,7 @@ async fn set_agent_outcome_merges_rather_than_replaces() {
         .set_agent_outcome(
             "amerge001",
             lingxi_core::host::task_registry::AgentTerminalOutcome {
+                handback: None,
                 result: Some("partial answer".into()),
                 ..Default::default()
             },
@@ -4792,6 +4997,7 @@ async fn set_agent_outcome_merges_rather_than_replaces() {
         .set_agent_outcome(
             "amerge001",
             lingxi_core::host::task_registry::AgentTerminalOutcome {
+                handback: None,
                 worktree_path: Some("/wt".into()),
                 ..Default::default()
             },
@@ -5600,6 +5806,12 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
     };
     registry
         .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
+            handback: None,
+            handback_history: Vec::new(),
+
+            agent_spawn_provenance: Default::default(),
+            agent_list_lifecycle: Default::default(),
+            spawned_description: None,
             is_parked: false,
             is_observer: false,
             observed_agent_id: None,
@@ -5632,6 +5844,7 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
                 tool_uses: 3,
                 duration_ms: 1500,
             }),
+            None,
             None,
             None,
             None,
@@ -5678,7 +5891,7 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
 
     // Re-armable: the NEXT rest surfaces again (same task-id notifies > once).
     registry
-        .mark_task_rested("a-rest-1", None, None, None, None, None)
+        .mark_task_rested("a-rest-1", None, None, None, None, None, None)
         .await;
     assert_eq!(
         registry.take_pending_task_notifications().await.len(),
@@ -5695,6 +5908,12 @@ async fn unnamed_rested_agent_waits_for_live_non_agent_children_before_notifying
 
     registry
         .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
+            handback: None,
+            handback_history: Vec::new(),
+
+            agent_spawn_provenance: Default::default(),
+            agent_list_lifecycle: Default::default(),
+            spawned_description: None,
             is_parked: false,
             is_observer: false,
             observed_agent_id: None,
@@ -5771,6 +5990,7 @@ async fn unnamed_rested_agent_waits_for_live_non_agent_children_before_notifying
             Some(parent_agent_id),
             None,
             None,
+            None,
         )
         .await;
 
@@ -5803,6 +6023,7 @@ async fn unnamed_rested_agent_waits_for_live_non_agent_children_before_notifying
                 duration_ms: 99,
             }),
             Some(parent_agent_id),
+            None,
             None,
             None,
         )
@@ -5846,6 +6067,12 @@ async fn seed_agent_described(
     use crate::state::{LocalAgentTaskState, TaskStateBase};
     registry
         .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
+            handback: None,
+            handback_history: Vec::new(),
+
+            agent_spawn_provenance: Default::default(),
+            agent_list_lifecycle: Default::default(),
+            spawned_description: None,
             is_parked: false,
             is_observer: false,
             observed_agent_id: None,
@@ -6100,6 +6327,14 @@ async fn not_found_rosters_list_running_teammates_and_unnamed_background_agents(
     // the `name@team` alias the spawn path records.
     registry
         .insert_state_for_test(TaskState::InProcessTeammate(InProcessTeammateTaskState {
+            child_model: None,
+            child_model_profile: None,
+            handback: None,
+            handback_history: Vec::new(),
+
+            agent_spawn_provenance: Default::default(),
+            spawned_agent_type: None,
+            spawned_description: None,
             is_idle: false,
             awaiting_plan_approval: false,
             base: TaskStateBase {
@@ -6175,6 +6410,90 @@ async fn not_found_rosters_list_running_teammates_and_unnamed_background_agents(
     assert_eq!(from_bg.background_agents, vec!["a-bare".to_string()]);
 }
 
+#[derive(Default)]
+struct RecordingTeamMemberActivity(StdMutex<Vec<(String, String, bool)>>);
+
+#[async_trait]
+impl lingxi_core::host::team_registry::TeamMemberActivityHandle for RecordingTeamMemberActivity {
+    async fn set_active(
+        &self,
+        team_name: &str,
+        member_name: &str,
+        active: bool,
+    ) -> Result<(), String> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((team_name.to_owned(), member_name.to_owned(), active));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn team_activity_uses_exact_registered_teammate_identity() {
+    use crate::state::{InProcessTeammateTaskState, TaskState, TaskStateBase};
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
+
+    let (_dir, registry) = make_registry();
+    let agent_id = lingxi_core::types::AgentId::new();
+    registry
+        .insert_state_for_test(TaskState::InProcessTeammate(InProcessTeammateTaskState {
+            child_model: None,
+            child_model_profile: None,
+            handback: None,
+            handback_history: Vec::new(),
+            agent_spawn_provenance: Default::default(),
+            spawned_agent_type: None,
+            spawned_description: None,
+            is_idle: false,
+            awaiting_plan_approval: false,
+            base: TaskStateBase {
+                id: "t-activity".into(),
+                task_type: TaskType::InProcessTeammate,
+                status: TaskStatus::Running,
+                description: "worker".into(),
+                tool_use_id: None,
+                start_time: SystemTime::now(),
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: std::path::PathBuf::from("/tmp/tasks/t-activity.output"),
+                evict_after: None,
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: Some("worker".into()),
+                creator_team_name: Some("alpha".into()),
+                creator_agent_id: None,
+            },
+            agent_id,
+            pending_messages: Vec::new(),
+        }))
+        .await;
+    let activity = Arc::new(RecordingTeamMemberActivity::default());
+    registry.set_team_member_activity_handle(activity.clone());
+
+    TaskRegistryHandle::set_team_member_active(&registry, agent_id, true)
+        .await
+        .unwrap();
+    TaskRegistryHandle::set_team_member_active(&registry, agent_id, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        activity.0.lock().unwrap().as_slice(),
+        &[
+            ("alpha".into(), "worker".into(), true),
+            ("alpha".into(), "worker".into(), false),
+        ],
+        "the registry resolves exact team/name from the typed teammate row"
+    );
+
+    let unknown = lingxi_core::types::AgentId::new();
+    assert!(
+        TaskRegistryHandle::set_team_member_active(&registry, unknown, true)
+            .await
+            .is_err()
+    );
+}
+
 /// claude-code's cascade block in `rY`: stopping a RESTING agent stops every
 /// live descendant with it, to any depth, and says nothing about them.
 #[tokio::test]
@@ -6208,7 +6527,7 @@ async fn stopping_a_resting_parent_cascades_to_its_whole_subtree_silently() {
 
     // Arm the parent's rest: `GS` needs BOTH a rest and a live child.
     registry
-        .mark_task_rested("a-parent", None, None, Some(parent), None, None)
+        .mark_task_rested("a-parent", None, None, Some(parent), None, None, None)
         .await;
 
     registry
@@ -6276,7 +6595,7 @@ async fn a_cyclic_parent_chain_terminates() {
     seed_agent(&registry, "a-loop-a", a, Some(b), TaskStatus::Running).await;
     seed_agent(&registry, "a-loop-b", b, Some(a), TaskStatus::Running).await;
     registry
-        .mark_task_rested("a-target", None, None, Some(target), None, None)
+        .mark_task_rested("a-target", None, None, Some(target), None, None, None)
         .await;
 
     tokio::time::timeout(
@@ -6295,6 +6614,12 @@ async fn named_rested_agent_waits_for_live_background_children_before_notifying(
 
     registry
         .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
+            handback: None,
+            handback_history: Vec::new(),
+
+            agent_spawn_provenance: Default::default(),
+            agent_list_lifecycle: Default::default(),
+            spawned_description: None,
             is_parked: false,
             is_observer: false,
             observed_agent_id: None,
@@ -6329,6 +6654,7 @@ async fn named_rested_agent_waits_for_live_background_children_before_notifying(
     registry
         .insert_state_for_test(TaskState::LocalBash(LocalBashTaskState {
             is_adopted: false,
+            stop_cause: None,
             caller: None,
             base: TaskStateBase {
                 id: "b-child-live".into(),
@@ -6367,6 +6693,7 @@ async fn named_rested_agent_waits_for_live_background_children_before_notifying(
             None,
             Some("reviewer".into()),
             Some("alpha".into()),
+            None,
         )
         .await;
 
@@ -6402,6 +6729,12 @@ async fn deferred_rest_requeue_preserves_newer_payload() {
 
     registry
         .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
+            handback: None,
+            handback_history: Vec::new(),
+
+            agent_spawn_provenance: Default::default(),
+            agent_list_lifecycle: Default::default(),
+            spawned_description: None,
             is_parked: false,
             is_observer: false,
             observed_agent_id: None,
@@ -6436,6 +6769,7 @@ async fn deferred_rest_requeue_preserves_newer_payload() {
     registry
         .insert_state_for_test(TaskState::LocalBash(LocalBashTaskState {
             is_adopted: false,
+            stop_cause: None,
             caller: None,
             base: TaskStateBase {
                 id: "b-child-live".into(),
@@ -6474,6 +6808,7 @@ async fn deferred_rest_requeue_preserves_newer_payload() {
             None,
             Some("reviewer".into()),
             Some("alpha".into()),
+            None,
         )
         .await;
     let stale = registry
@@ -6495,6 +6830,7 @@ async fn deferred_rest_requeue_preserves_newer_payload() {
             None,
             Some("reviewer".into()),
             Some("alpha".into()),
+            None,
         )
         .await;
     registry
@@ -6524,6 +6860,12 @@ async fn rested_agent_id_ignores_same_name_children_owned_by_someone_else() {
 
     registry
         .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
+            handback: None,
+            handback_history: Vec::new(),
+
+            agent_spawn_provenance: Default::default(),
+            agent_list_lifecycle: Default::default(),
+            spawned_description: None,
             is_parked: false,
             is_observer: false,
             observed_agent_id: None,
@@ -6557,6 +6899,12 @@ async fn rested_agent_id_ignores_same_name_children_owned_by_someone_else() {
         .await;
     registry
         .insert_state_for_test(TaskState::LocalAgent(LocalAgentTaskState {
+            handback: None,
+            handback_history: Vec::new(),
+
+            agent_spawn_provenance: Default::default(),
+            agent_list_lifecycle: Default::default(),
+            spawned_description: None,
             is_parked: false,
             is_observer: false,
             observed_agent_id: None,
@@ -6591,6 +6939,7 @@ async fn rested_agent_id_ignores_same_name_children_owned_by_someone_else() {
     registry
         .insert_state_for_test(TaskState::LocalBash(LocalBashTaskState {
             is_adopted: false,
+            stop_cause: None,
             caller: None,
             base: TaskStateBase {
                 id: "b-child-live".into(),
@@ -6625,6 +6974,7 @@ async fn rested_agent_id_ignores_same_name_children_owned_by_someone_else() {
             Some(owner_a),
             Some("reviewer".into()),
             Some("alpha".into()),
+            None,
         )
         .await;
     registry
@@ -6635,6 +6985,7 @@ async fn rested_agent_id_ignores_same_name_children_owned_by_someone_else() {
             Some(owner_b),
             Some("reviewer".into()),
             Some("alpha".into()),
+            None,
         )
         .await;
 
@@ -6669,6 +7020,7 @@ async fn rested_agent_id_ignores_same_name_children_owned_by_someone_else() {
             Some("rested-b".into()),
             None,
             Some(owner_b),
+            None,
             None,
             None,
         )
@@ -6708,6 +7060,7 @@ async fn take_pending_skips_already_notified_and_non_terminal() {
         registry
             .insert_state_for_test(TaskState::LocalBash(LocalBashTaskState {
                 is_adopted: false,
+                stop_cause: None,
                 caller: None,
                 base,
                 command: String::new(),
@@ -7441,7 +7794,15 @@ async fn owner_scoped_rest_is_not_consumed_by_main() {
     child.base_mut().creator_agent_id = Some(owner);
     registry.insert_state_for_test(child).await;
     registry
-        .mark_task_rested("arestowner", Some("done".into()), None, None, None, None)
+        .mark_task_rested(
+            "arestowner",
+            Some("done".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
         .await;
     assert!(registry.take_pending_task_notifications().await.is_empty());
     assert!(
@@ -7808,6 +8169,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for ForegroundOwne
                         creator_agent_id: None,
                         creator_teammate_name: None,
                         creator_team_name: None,
+                        agent_spawn_provenance: Default::default(),
                     },
                 )
                 .await
@@ -7863,51 +8225,59 @@ impl lingxi_core::host::budget::BudgetEnforcerHandle for ForegroundOwnerFixture 
 }
 #[async_trait]
 impl agent::api::SubagentApiClient for ForegroundOwnerFixture {
-    async fn messages_create(
+    async fn stream(
         &self,
-        _: &str,
-        _: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        _: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        let content = if call == 0 {
-            vec![llm_runtime::ContentBlock::ToolCall {
-                id: lingxi_core::types::ToolUseId::new().to_string(),
-                name: "SpawnOwnedTask".into(),
-                input: serde_json::json!({}),
-            }]
-        } else {
-            if call == 2 {
-                let child = self.child.lock().unwrap().clone().unwrap();
-                let transcript = serde_json::to_string(&messages).unwrap();
-                assert_eq!(
-                    transcript
-                        .matches(&format!("<task-id>{child}</task-id>"))
-                        .count(),
-                    1
-                );
-            }
-            vec![llm_runtime::ContentBlock::Text {
-                text: if call == 1 {
-                    "waiting for child"
-                } else {
-                    "observed child"
+        request: agent::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let messages = request.messages;
+        let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let content = if call == 0 {
+                vec![llm_runtime::ContentBlock::ToolCall {
+                    id: lingxi_core::types::ToolUseId::new().to_string(),
+                    name: "SpawnOwnedTask".into(),
+                    input: serde_json::json!({}),
+                }]
+            } else {
+                if call == 2 {
+                    let child = self.child.lock().unwrap().clone().unwrap();
+                    let transcript = serde_json::to_string(&messages).unwrap();
+                    assert_eq!(
+                        transcript
+                            .matches(&format!("<task-id>{child}</task-id>"))
+                            .count(),
+                        1
+                    );
                 }
-                .into(),
-                cache_control: None,
-            }]
+                vec![llm_runtime::ContentBlock::Text {
+                    text: if call == 1 {
+                        "waiting for child"
+                    } else {
+                        "observed child"
+                    }
+                    .into(),
+                    cache_control: None, citations: None,
+                }]
+            };
+            Ok(llm_runtime::HistoryResponse {
+                id: "owner-model".into(),
+                model: "test".into(),
+                content,
+                stop_reason: Some(if call == 0 { "tool_use" } else { "end_turn" }.into()),
+                stop_details: None,
+                usage: Default::default(),
+                cost: None,
+                provider_metadata: serde_json::Value::Null,
+            })
         };
-        Ok(llm_runtime::HistoryResponse {
-            id: "owner-model".into(),
-            model: "test".into(),
-            content,
-            stop_reason: Some(if call == 0 { "tool_use" } else { "end_turn" }.into()),
-            stop_details: None,
-            usage: Default::default(),
-            cost: None,
-            provider_metadata: serde_json::Value::Null,
-        })
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+        Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
     }
 }
 
@@ -8044,6 +8414,7 @@ async fn queued_memory_stop_keeps_nested_owners_alive_until_delivery_or_cascade(
                 Some(b),
                 None,
                 None,
+                None,
             )
             .await;
         registry.mark_notified("bqueueowner").await.unwrap();
@@ -8053,6 +8424,7 @@ async fn queued_memory_stop_keeps_nested_owners_alive_until_delivery_or_cascade(
                 Some("A waiting".into()),
                 None,
                 Some(a),
+                None,
                 None,
                 None,
             )
@@ -8174,6 +8546,7 @@ async fn natural_sdk_receipt_preserves_usage_and_scan_gates() {
         .set_agent_outcome(
             "asdkusage",
             lingxi_core::host::task_registry::AgentTerminalOutcome {
+                handback: None,
                 result: Some("agent final text".into()),
                 usage: Some(lingxi_core::host::task_registry::AgentRunUsage {
                     subagent_tokens: 42,
@@ -8876,6 +9249,59 @@ async fn adopted_shell_observer_preserves_stall_pressure_and_failure_semantics()
 }
 
 #[tokio::test]
+async fn background_deadline_cause_survives_early_and_registered_completion() {
+    for early in [true, false] {
+        let (_dir, registry) = make_registry();
+        let (id, output) = registry.allocate_bash_output().await.unwrap();
+        if early {
+            registry
+                .settle_background_bash_deadline(&id, None)
+                .await
+                .unwrap();
+        }
+        registry
+            .register_background_bash(
+                id.clone(),
+                "sleep 60".into(),
+                "watch build".into(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        if !early {
+            registry
+                .settle_background_bash_deadline(&id, None)
+                .await
+                .unwrap();
+        }
+        registry
+            .settle_background_bash(&id, Some(0), false)
+            .await
+            .unwrap();
+        let state = registry.get(&id).await.unwrap();
+        assert_eq!(state.base().status, TaskStatus::Killed);
+        assert!(
+            matches!(state, TaskState::LocalBash(shell) if shell.stop_cause.as_deref() == Some("deadline"))
+        );
+        let notices = registry.take_pending_task_notifications().await;
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].killed_by.as_deref(), Some("deadline"));
+        assert!(registry.take_pending_task_notifications().await.is_empty());
+        assert_eq!(
+            registry
+                .output_manager
+                .read(&output, crate::output_manager::OutputOptions::default())
+                .await
+                .unwrap()
+                .content,
+            "\n[killed]\n"
+        );
+    }
+}
+
+#[tokio::test]
 async fn shell_exit_before_registration_is_replayed_once_and_never_installs_stale_killer() {
     struct Killer(Arc<AtomicUsize>);
     #[async_trait]
@@ -9438,6 +9864,12 @@ async fn a_shell_whose_handler_flips_the_row_mid_kill_still_gets_the_trailer() {
 
 fn agent_row(id: &str) -> crate::state::LocalAgentTaskState {
     crate::state::LocalAgentTaskState {
+        handback: None,
+        handback_history: Vec::new(),
+
+        agent_spawn_provenance: Default::default(),
+        agent_list_lifecycle: Default::default(),
+        spawned_description: None,
         is_parked: false,
         is_observer: false,
         observed_agent_id: None,
@@ -9576,5 +10008,1169 @@ async fn a_kill_racing_a_finished_agent_reports_no_termination() {
     assert!(
         terminated_reasons(&sink).await.is_empty(),
         "an agent that finished on its own was not terminated by the kill"
+    );
+}
+
+#[tokio::test]
+async fn task_rows_keep_first_insertion_order_for_agent_list_sources() {
+    let (_dir, registry) = make_registry();
+    for id in ["order-first", "order-second", "order-third"] {
+        registry
+            .insert_state_for_test(TaskState::LocalAgent(agent_row(id)))
+            .await;
+    }
+
+    // Replacing an existing JS object property preserves its original order.
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(agent_row("order-first")))
+        .await;
+    let ordered_ids = |states: Vec<TaskState>| {
+        states
+            .into_iter()
+            .map(|state| state.base().id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ordered_ids(registry.list().await),
+        vec![
+            "order-first".to_string(),
+            "order-second".to_string(),
+            "order-third".to_string(),
+        ]
+    );
+
+    // Deleting and then re-adding a key creates a new property at the end.
+    {
+        let mut rows = registry.tasks.write().await;
+        rows.remove("order-second");
+        rows.insert(
+            "order-second",
+            TaskState::LocalAgent(agent_row("order-second")),
+        );
+    }
+    assert_eq!(
+        ordered_ids(registry.list().await),
+        vec![
+            "order-first".to_string(),
+            "order-third".to_string(),
+            "order-second".to_string(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn agent_list_facts_come_from_the_spawned_local_agent_state() {
+    use lingxi_core::host::task_registry::{FieldPresence, TaskListFilter, TaskRegistryHandle};
+
+    let (_dir, registry) = make_registry();
+    let agent_id = lingxi_core::types::AgentId::new();
+    let parent_id = lingxi_core::types::AgentId::new();
+    let provenance = lingxi_core::host::subagent_spawn::AgentSpawnProvenance {
+        hook_caller: FieldPresence::Value(serde_json::json!("trusted-plugin")),
+        hook_origin: FieldPresence::Value(serde_json::json!(["trusted-plugin", "parent-api"])),
+    };
+    let request = lingxi_core::host::subagent_spawn::SubagentSpawnRequest {
+        stop_hook_scope: Default::default(),
+        agent_spawn_provenance: provenance.clone(),
+        description: Some("the original task description".into()),
+        ..Default::default()
+    };
+    let base = crate::state::TaskStateBase {
+        id: "agent-facts-row".into(),
+        task_type: TaskType::LocalAgent,
+        status: TaskStatus::Running,
+        description: "the original task description".into(),
+        tool_use_id: None,
+        start_time: SystemTime::now(),
+        end_time: None,
+        total_paused_ms: 0,
+        output_file: std::path::PathBuf::from("/tmp/tasks/agent-facts-row.output"),
+        evict_after: None,
+        output_offset: 0,
+        notified: false,
+        creator_teammate_name: None,
+        creator_team_name: None,
+        creator_agent_id: None,
+    };
+    let input = TaskSpawnInput::LocalAgent {
+        agent_id,
+        subagent_type: "researcher".into(),
+        prompt: "inspect the policy".into(),
+        is_backgrounded: true,
+        tool_use_id: None,
+        creator_teammate_name: None,
+        creator_team_name: None,
+        creator_agent_id: Some(parent_id),
+        spawn_request: Some(request),
+        inheritance: None,
+    };
+    let state = state_for_spawn(base, &input);
+    let state_id = state.base().id.clone();
+    registry.insert_state_for_test(state).await;
+
+    let initial = TaskRegistryHandle::list(&registry, TaskListFilter::default())
+        .await
+        .unwrap();
+    let initial_facts = initial[0].agent_facts.as_ref().unwrap();
+    assert_eq!(initial_facts.is_idle, FieldPresence::Value(false));
+    assert_eq!(
+        initial_facts.keepalive_reasons,
+        FieldPresence::Value(Vec::new()),
+        "Native initializes each local Agent with an empty keepalive Set"
+    );
+
+    registry
+        .update_agent_list_local_fact(
+            agent_id,
+            lingxi_core::host::task_registry::AgentListLocalFactUpdate::IsIdle(true),
+        )
+        .await
+        .unwrap();
+    registry
+        .update_agent_list_local_fact(
+            agent_id,
+            lingxi_core::host::task_registry::AgentListLocalFactUpdate::Finalizing(true),
+        )
+        .await
+        .unwrap();
+    registry
+        .update_agent_list_local_fact(
+            agent_id,
+            lingxi_core::host::task_registry::AgentListLocalFactUpdate::KeepaliveReason {
+                reason: "agent:child-id".into(),
+                active: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    let records = TaskRegistryHandle::list(&registry, TaskListFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    let facts = records[0]
+        .agent_facts
+        .as_ref()
+        .expect("task list exposes trusted host facts to the reducer");
+    assert_eq!(
+        facts.stable_agent_id,
+        FieldPresence::Value(agent_id.as_uuid().to_string())
+    );
+    assert_eq!(
+        facts.parent_id,
+        FieldPresence::Value(serde_json::json!(parent_id.as_uuid().to_string()))
+    );
+    assert_eq!(
+        facts.activity_agent_id,
+        FieldPresence::Value(agent_id.as_uuid().to_string())
+    );
+    assert_eq!(facts.is_idle, FieldPresence::Value(true));
+    assert_eq!(facts.finalizing, FieldPresence::Value(true));
+    assert_eq!(
+        facts.keepalive_reasons,
+        FieldPresence::Value(vec!["agent:child-id".into()])
+    );
+
+    registry
+        .update_agent_list_local_fact(
+            agent_id,
+            lingxi_core::host::task_registry::AgentListLocalFactUpdate::KeepaliveReason {
+                reason: "bash:child-id".into(),
+                active: true,
+            },
+        )
+        .await
+        .unwrap();
+    registry
+        .update_agent_list_local_fact(
+            agent_id,
+            lingxi_core::host::task_registry::AgentListLocalFactUpdate::KeepaliveReason {
+                reason: "agent:child-id".into(),
+                active: false,
+            },
+        )
+        .await
+        .unwrap();
+    let record = TaskRegistryHandle::get(&registry, &state_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        record.agent_facts.unwrap().keepalive_reasons,
+        FieldPresence::Value(vec!["bash:child-id".into()]),
+        "removing one reason preserves concurrent independent reasons"
+    );
+    assert_eq!(
+        facts.spawned_description,
+        FieldPresence::Value("the original task description".into())
+    );
+    assert_eq!(facts.spawned_by, provenance.hook_caller);
+    assert_eq!(facts.hook_origin, provenance.hook_origin);
+    assert_eq!(facts.is_backgrounded, FieldPresence::Value(true));
+
+    let public_wire = serde_json::to_value(&records[0]).unwrap();
+    assert!(
+        public_wire.get("agent_facts").is_none(),
+        "host-only agent list facts must not change TaskList JSON"
+    );
+}
+
+#[tokio::test]
+async fn agent_finalizing_is_atomic_with_completed_status_and_clears_after_notification() {
+    use lingxi_core::host::mod_agent_list::{reduce_agent_list, AgentListSnapshot};
+    use lingxi_core::host::task_registry::{FieldPresence, TaskListFilter, TaskRegistryHandle};
+
+    let (_dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    let sink = crate::registry_status_sink::RegistryStatusSink::new();
+    sink.bind(registry.clone());
+    let mut agent = agent_row("agent-finalizing-row");
+    agent.agent_list_lifecycle =
+        lingxi_core::host::task_registry::AgentListLocalLifecycleFacts::initialized_local_agent();
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(agent))
+        .await;
+
+    crate::handlers::TaskStatusSink::set_agent_status_with_finalizing(
+        &sink,
+        "agent-finalizing-row",
+        TaskStatus::Completed,
+        true,
+    )
+    .await;
+    let completed = registry.get("agent-finalizing-row").await.unwrap();
+    assert_eq!(completed.base().status, TaskStatus::Completed);
+    let during_notification =
+        TaskRegistryHandle::list(registry.as_ref(), TaskListFilter::default())
+            .await
+            .unwrap();
+    let during_facts = during_notification[0].agent_facts.as_ref().unwrap();
+    assert_eq!(during_facts.finalizing, FieldPresence::Value(true));
+    let during = reduce_agent_list(AgentListSnapshot {
+        task_rows: &during_notification,
+        name_entries: &[],
+        inactive_teammate_addresses: Some(&std::collections::HashSet::new()),
+    });
+    assert_eq!(
+        during.entries[0].status,
+        FieldPresence::Value(serde_json::json!("running"))
+    );
+
+    let notifications = registry.take_pending_task_notifications().await;
+    assert_eq!(notifications.len(), 1);
+    let after_notification = TaskRegistryHandle::list(registry.as_ref(), TaskListFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        after_notification[0]
+            .agent_facts
+            .as_ref()
+            .unwrap()
+            .finalizing,
+        FieldPresence::Value(false)
+    );
+    let after = reduce_agent_list(AgentListSnapshot {
+        task_rows: &after_notification,
+        name_entries: &[],
+        inactive_teammate_addresses: Some(&std::collections::HashSet::new()),
+    });
+    assert_eq!(
+        after.entries[0].status,
+        FieldPresence::Value(serde_json::json!("completed"))
+    );
+}
+
+#[tokio::test]
+async fn claimed_running_agent_finishes_finalizing_through_direct_wait_handoff() {
+    use lingxi_core::host::mod_agent_list::{reduce_agent_list, AgentListSnapshot};
+    use lingxi_core::host::task_registry::{
+        AgentTerminalWaitOutcome, FieldPresence, TaskListFilter, TaskRegistryHandle,
+    };
+    use lingxi_core::types::AgentId;
+
+    let (_dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    registry.bind_self(&registry);
+    let task_id = "agent-wait-claimed-before-completion";
+    let mut agent = agent_row(task_id);
+    agent.agent_id = AgentId::new();
+    agent.agent_list_lifecycle =
+        lingxi_core::host::task_registry::AgentListLocalLifecycleFacts::initialized_local_agent();
+    let raw_agent_id = agent.agent_id.as_uuid().to_string();
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(agent))
+        .await;
+
+    let original_claim = registry
+        .claim_agent_wait_notification(task_id, &raw_agent_id)
+        .await
+        .unwrap()
+        .expect("the Running local Agent is an exact claim target");
+    registry
+        .set_agent_status_with_finalizing(task_id, TaskStatus::Completed, true)
+        .await
+        .unwrap();
+    let completed = registry.get(task_id).await.unwrap();
+    let TaskState::LocalAgent(completed) = completed else {
+        panic!("completion keeps a LocalAgent row")
+    };
+    assert!(
+        completed.base.notified,
+        "K3 already owns the result handoff"
+    );
+    assert_eq!(
+        completed.agent_list_lifecycle.finalizing,
+        FieldPresence::Value(true),
+        "the finalizing window remains visible until the direct wait returns"
+    );
+
+    let outcome = TaskRegistryHandle::wait_for_agent_terminal(
+        registry.as_ref(),
+        &raw_agent_id,
+        tokio_util::sync::CancellationToken::new(),
+        Some(Duration::from_secs(1)),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, AgentTerminalWaitOutcome::Completed(_)));
+    original_claim.release().await;
+    assert!(
+        registry.take_pending_task_notifications().await.is_empty(),
+        "the claimed completion must not produce a second notification"
+    );
+
+    let records = TaskRegistryHandle::list(registry.as_ref(), TaskListFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        records[0].agent_facts.as_ref().unwrap().finalizing,
+        FieldPresence::Value(false)
+    );
+    let reduced = reduce_agent_list(AgentListSnapshot {
+        task_rows: &records,
+        name_entries: &[],
+        inactive_teammate_addresses: Some(&std::collections::HashSet::new()),
+    });
+    assert_eq!(
+        reduced.entries[0].status,
+        FieldPresence::Value(serde_json::json!("completed"))
+    );
+}
+
+#[tokio::test]
+async fn persistent_rest_publishes_finalizing_with_the_completed_parked_row() {
+    let (_dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    let sink = crate::registry_status_sink::RegistryStatusSink::new();
+    sink.bind(registry.clone());
+    let mut agent = agent_row("agent-finalizing-rest");
+    let agent_id = agent.agent_id;
+    agent.agent_list_lifecycle =
+        lingxi_core::host::task_registry::AgentListLocalLifecycleFacts::initialized_local_agent();
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(agent))
+        .await;
+
+    crate::handlers::TaskStatusSink::notify_rest_with_finalizing(
+        &sink,
+        "agent-finalizing-rest",
+        Some("result text".into()),
+        None,
+        Some(agent_id),
+        None,
+        None,
+        None,
+        true,
+    )
+    .await;
+    let rested = registry.get("agent-finalizing-rest").await.unwrap();
+    let TaskState::LocalAgent(rested) = rested else {
+        panic!("rest transition keeps a local Agent row")
+    };
+    assert_eq!(rested.base.status, TaskStatus::Completed);
+    assert!(rested.is_parked);
+    assert_eq!(
+        rested.agent_list_lifecycle.finalizing,
+        lingxi_core::host::task_registry::FieldPresence::Value(true)
+    );
+    let notifications = registry.take_pending_task_notifications().await;
+    assert_eq!(notifications.len(), 1);
+    let TaskState::LocalAgent(rested) = registry.get("agent-finalizing-rest").await.unwrap() else {
+        panic!("rest transition keeps a local Agent row")
+    };
+    assert_eq!(
+        rested.agent_list_lifecycle.finalizing,
+        lingxi_core::host::task_registry::FieldPresence::Value(false)
+    );
+}
+
+#[tokio::test]
+async fn observer_rest_finishes_finalizing_after_its_suppressed_notification_handoff() {
+    use lingxi_core::host::task_registry::FieldPresence;
+
+    let (_dir, registry) = make_registry();
+    let mut agent = agent_row("agent-observer-finalizing");
+    let agent_id = agent.agent_id;
+    agent.is_observer = true;
+    agent.agent_list_lifecycle =
+        lingxi_core::host::task_registry::AgentListLocalLifecycleFacts::initialized_local_agent();
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(agent))
+        .await;
+
+    registry
+        .mark_task_rested_with_finalizing(
+            "agent-observer-finalizing",
+            None,
+            None,
+            Some(agent_id),
+            None,
+            None,
+            None,
+            true,
+        )
+        .await;
+
+    let TaskState::LocalAgent(observer) = registry
+        .get("agent-observer-finalizing")
+        .await
+        .expect("observer row remains available")
+    else {
+        panic!("observer completion keeps a LocalAgent row")
+    };
+    assert!(
+        observer.base.notified,
+        "observer suppresses ordinary notification"
+    );
+    assert_eq!(observer.base.status, TaskStatus::Completed);
+    assert_eq!(
+        observer.agent_list_lifecycle.finalizing,
+        FieldPresence::Value(false),
+        "the suppressed-notification branch still runs producer finalization"
+    );
+    assert!(registry.take_pending_task_notifications().await.is_empty());
+}
+
+#[tokio::test]
+async fn parked_foreground_completion_keeps_finalizing_until_its_notification_drain() {
+    let (_dir, registry) = make_registry();
+    let agent = agent_row("agent-parked-finalizing");
+    let agent_id = agent.agent_id;
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(agent))
+        .await;
+
+    assert!(
+        registry
+            .park_foreground_agent(
+                agent_id,
+                lingxi_core::host::task_registry::AgentTerminalOutcome {
+                    result: Some("completed answer".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+    );
+    let parked = registry.get("agent-parked-finalizing").await.unwrap();
+    let TaskState::LocalAgent(parked) = parked else {
+        panic!("park transition keeps a local Agent row")
+    };
+    assert!(parked.is_parked);
+    assert_eq!(
+        parked.agent_list_lifecycle.finalizing,
+        lingxi_core::host::task_registry::FieldPresence::Value(true)
+    );
+
+    let notifications = registry.take_pending_task_notifications().await;
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].result.as_deref(), Some("completed answer"));
+    let TaskState::LocalAgent(parked) = registry.get("agent-parked-finalizing").await.unwrap()
+    else {
+        panic!("park transition keeps a local Agent row")
+    };
+    assert_eq!(
+        parked.agent_list_lifecycle.finalizing,
+        lingxi_core::host::task_registry::FieldPresence::Value(false)
+    );
+}
+
+#[tokio::test]
+async fn terminal_agent_wait_uses_native_transcript_and_claims_completion() {
+    use lingxi_core::host::task_registry::{AgentTerminalWaitOutcome, TaskRegistryHandle};
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
+
+    let (_dir, registry) = make_registry();
+    let task_id = "agent-wait-row";
+    let agent_id = lingxi_core::types::AgentId::new();
+    let output = registry.output_manager.allocate(task_id).await.unwrap();
+    let mut state = agent_row(task_id);
+    state.agent_id = agent_id;
+    let settled_messages = vec![
+        ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: "transcript answer".into(), citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+        },
+        // Native kfo skips an empty assistant candidate and scans backward.
+        ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: String::new(), citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+        },
+    ];
+    state.outcome.result = Some("spool/result must not be used".into());
+    state.base.status = TaskStatus::Completed;
+    state.base.output_file = output;
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(state))
+        .await;
+
+    let wait_registry = Arc::new(registry);
+    let sink = crate::registry_status_sink::RegistryStatusSink::new();
+    sink.bind(wait_registry.clone());
+    crate::handlers::TaskStatusSink::replace_agent_transcript(
+        &sink,
+        task_id,
+        settled_messages.clone(),
+    )
+    .await;
+    let wrong_spelling_cancel = tokio_util::sync::CancellationToken::new();
+    wrong_spelling_cancel.cancel();
+    assert_eq!(
+        TaskRegistryHandle::wait_for_agent_terminal(
+            wait_registry.as_ref(),
+            &agent_id.to_string(),
+            wrong_spelling_cancel,
+            Some(std::time::Duration::from_secs(1)),
+        )
+        .await
+        .unwrap(),
+        AgentTerminalWaitOutcome::Interrupted {
+            reason: lingxi_core::host::task_registry::AgentTerminalWaitReason::Aborted,
+            observed_task_id: None,
+        },
+        "the prefixed AgentId display form is not accepted as an API alias"
+    );
+    assert!(!wait_registry.get(task_id).await.unwrap().base().notified);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    // Native checks terminal before AbortSignal/deadline, even when the
+    // caller's signal was already aborted.
+    cancel.cancel();
+    let outcome = TaskRegistryHandle::wait_for_agent_terminal(
+        wait_registry.as_ref(),
+        &agent_id.as_uuid().to_string(),
+        cancel,
+        Some(std::time::Duration::from_secs(1)),
+    )
+    .await
+    .unwrap();
+    let AgentTerminalWaitOutcome::Completed(snapshot) = outcome else {
+        panic!("completed local agent returns its terminal output")
+    };
+    assert_eq!(snapshot.task_id, task_id);
+    assert_eq!(snapshot.native_transcript_text, "transcript answer");
+    assert_eq!(snapshot.error, None);
+    let row = wait_registry.get(task_id).await.unwrap();
+    let TaskState::LocalAgent(agent) = row else {
+        panic!("row remains a local agent");
+    };
+    assert_eq!(agent.messages, settled_messages);
+    assert!(!agent
+        .messages
+        .iter()
+        .any(|message| message.text_content() == "spool/result must not be used"));
+
+    assert!(
+        agent.base.notified,
+        "Native K3 claims the completion notification on first observation"
+    );
+}
+
+#[tokio::test]
+async fn terminal_agent_wait_preserves_whitespace_and_prefers_task_error() {
+    use lingxi_core::host::task_registry::{AgentTerminalWaitOutcome, TaskRegistryHandle};
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
+
+    let (_dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    registry.bind_self(&registry);
+    let task_id = "agent-whitespace-row";
+    let agent_id = lingxi_core::types::AgentId::new();
+    let output = registry.output_manager.allocate(task_id).await.unwrap();
+    let mut state = agent_row(task_id);
+    state.agent_id = agent_id;
+    state.base.output_file = output;
+    state.base.status = TaskStatus::Failed;
+    state.error = Some("terminal failure".into());
+    state.outcome.result = Some("different task result".into());
+    state.messages = vec![ConversationMessage::Assistant {
+        id: MessageId::new(),
+        content: vec![ContentBlock::Text {
+            text: "  \n".into(), citations: None,
+        }],
+        stop_reason: Some("end_turn".into()),
+    }];
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(state))
+        .await;
+
+    let outcome = TaskRegistryHandle::wait_for_agent_terminal(
+        registry.as_ref(),
+        &agent_id.as_uuid().to_string(),
+        tokio_util::sync::CancellationToken::new(),
+        Some(std::time::Duration::from_secs(1)),
+    )
+    .await
+    .unwrap();
+    let AgentTerminalWaitOutcome::Failed(snapshot) = outcome else {
+        panic!("failed local agent returns its terminal snapshot")
+    };
+    assert_eq!(snapshot.native_transcript_text, "  \n");
+    assert_eq!(snapshot.error.as_deref(), Some("terminal failure"));
+}
+
+#[tokio::test]
+async fn interrupted_agent_wait_releases_notification_and_settled_watch_does_not_kill() {
+    use lingxi_core::host::task_registry::{
+        AgentTerminalWaitOutcome, AgentTerminalWaitReason, TaskRegistryHandle,
+    };
+
+    let (_dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    registry.bind_self(&registry);
+    let task_id = "agent-interrupted-row";
+    let agent_id = lingxi_core::types::AgentId::new();
+    let output = registry.output_manager.allocate(task_id).await.unwrap();
+    let mut state = agent_row(task_id);
+    state.agent_id = agent_id;
+    state.base.output_file = output;
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(state))
+        .await;
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    let outcome = TaskRegistryHandle::wait_for_agent_terminal(
+        registry.as_ref(),
+        &agent_id.as_uuid().to_string(),
+        cancel,
+        Some(std::time::Duration::from_secs(1)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outcome,
+        AgentTerminalWaitOutcome::Interrupted {
+            reason: AgentTerminalWaitReason::Aborted,
+            observed_task_id: Some(task_id.into()),
+        }
+    );
+    assert!(!registry.get(task_id).await.unwrap().base().notified);
+
+    // The separate settled watch observes the exact task id and leaves the
+    // running task alone; it returns only after a terminal transition.
+    let watcher = {
+        let registry = registry.clone();
+        tokio::spawn(async move {
+            TaskRegistryHandle::wait_for_agent_settled(registry.as_ref(), task_id).await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert_eq!(
+        registry.get(task_id).await.unwrap().base().status,
+        TaskStatus::Running
+    );
+    registry
+        .set_status(task_id, TaskStatus::Completed)
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), watcher)
+        .await
+        .expect("settled watcher observes terminal status")
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropped_agent_wait_after_claim_releases_before_later_completion() {
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
+
+    let (_dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    registry.bind_self(&registry);
+    let task_id = "agent-dropped-wait-live";
+    let mut agent = agent_row(task_id);
+    agent.agent_list_lifecycle =
+        lingxi_core::host::task_registry::AgentListLocalLifecycleFacts::initialized_local_agent();
+    let agent_id = agent.agent_id;
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(agent))
+        .await;
+
+    let waiting = {
+        let registry = registry.clone();
+        tokio::spawn(async move {
+            TaskRegistryHandle::wait_for_agent_terminal(
+                registry.as_ref(),
+                &agent_id.as_uuid().to_string(),
+                tokio_util::sync::CancellationToken::new(),
+                None,
+            )
+            .await
+        })
+    };
+    for _ in 0..20 {
+        if registry.get(task_id).await.unwrap().base().notified {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(registry.get(task_id).await.unwrap().base().notified);
+
+    waiting.abort();
+    assert!(waiting.await.unwrap_err().is_cancelled());
+    for _ in 0..20 {
+        if !registry.get(task_id).await.unwrap().base().notified {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !registry.get(task_id).await.unwrap().base().notified,
+        "dropping the last preterminal waiter releases its owned claim"
+    );
+
+    registry
+        .set_agent_status_with_finalizing(task_id, TaskStatus::Completed, true)
+        .await
+        .unwrap();
+    let notifications = registry.take_pending_task_notifications().await;
+    assert_eq!(notifications.len(), 1);
+    let TaskState::LocalAgent(agent) = registry.get(task_id).await.unwrap() else {
+        panic!("completed row remains a local Agent")
+    };
+    assert_eq!(
+        agent.agent_list_lifecycle.finalizing,
+        lingxi_core::host::task_registry::FieldPresence::Value(false)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropped_agent_wait_racing_completion_finishes_terminal_finalizing() {
+    use lingxi_core::host::mod_agent_list::{reduce_agent_list, AgentListSnapshot};
+    use lingxi_core::host::task_registry::{FieldPresence, TaskListFilter, TaskRegistryHandle};
+
+    let (_dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    registry.bind_self(&registry);
+    let task_id = "agent-dropped-wait-terminal-race";
+    let mut agent = agent_row(task_id);
+    agent.agent_list_lifecycle =
+        lingxi_core::host::task_registry::AgentListLocalLifecycleFacts::initialized_local_agent();
+    let agent_id = agent.agent_id;
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(agent))
+        .await;
+
+    let waiting = {
+        let registry = registry.clone();
+        tokio::spawn(async move {
+            TaskRegistryHandle::wait_for_agent_terminal(
+                registry.as_ref(),
+                &agent_id.as_uuid().to_string(),
+                tokio_util::sync::CancellationToken::new(),
+                None,
+            )
+            .await
+        })
+    };
+    for _ in 0..20 {
+        if registry.get(task_id).await.unwrap().base().notified {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(registry.get(task_id).await.unwrap().base().notified);
+
+    registry
+        .set_agent_status_with_finalizing(task_id, TaskStatus::Completed, true)
+        .await
+        .unwrap();
+    waiting.abort();
+    assert!(waiting.await.unwrap_err().is_cancelled());
+    for _ in 0..20 {
+        let state = registry.get(task_id).await.unwrap();
+        let TaskState::LocalAgent(agent) = state else {
+            panic!("completion row remains a local Agent")
+        };
+        if agent.agent_list_lifecycle.finalizing == FieldPresence::Value(false) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    let notifications = registry.take_pending_task_notifications().await;
+    assert!(
+        notifications.is_empty(),
+        "terminal cleanup retains K3's completed claim instead of fabricating a second notification"
+    );
+    let records = TaskRegistryHandle::list(registry.as_ref(), TaskListFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        records[0].agent_facts.as_ref().unwrap().finalizing,
+        FieldPresence::Value(false)
+    );
+    let reduced = reduce_agent_list(AgentListSnapshot {
+        task_rows: &records,
+        name_entries: &[],
+        inactive_teammate_addresses: Some(&std::collections::HashSet::new()),
+    });
+    assert_eq!(
+        reduced.entries[0].status,
+        FieldPresence::Value(serde_json::json!("completed"))
+    );
+}
+
+#[tokio::test]
+async fn cancelled_claim_release_while_rows_locked_keeps_drop_cleanup_armed() {
+    let (_dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    registry.bind_self(&registry);
+    let task_id = "agent-claim-release-locked";
+    let agent = agent_row(task_id);
+    let raw_agent_id = agent.agent_id.as_uuid().to_string();
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(agent))
+        .await;
+    let claim = registry
+        .claim_agent_wait_notification(task_id, &raw_agent_id)
+        .await
+        .unwrap()
+        .expect("the local Agent is claimable");
+
+    let rows = registry.tasks.write().await;
+    let mut releasing = Box::pin(claim.release());
+    assert!(
+        matches!(futures::poll!(releasing.as_mut()), std::task::Poll::Pending),
+        "release is suspended on the held row lock"
+    );
+    drop(releasing);
+    drop(rows);
+
+    for _ in 0..20 {
+        if !registry.get(task_id).await.unwrap().base().notified {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !registry.get(task_id).await.unwrap().base().notified,
+        "Drop retries the generation-owned release after the row lock is free"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_claim_finish_while_rows_locked_clears_terminal_finalizing() {
+    use lingxi_core::host::mod_agent_list::{reduce_agent_list, AgentListSnapshot};
+    use lingxi_core::host::task_registry::{FieldPresence, TaskListFilter, TaskRegistryHandle};
+
+    let (_dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    registry.bind_self(&registry);
+    let task_id = "agent-claim-finish-locked";
+    let mut agent = agent_row(task_id);
+    agent.agent_list_lifecycle =
+        lingxi_core::host::task_registry::AgentListLocalLifecycleFacts::initialized_local_agent();
+    let raw_agent_id = agent.agent_id.as_uuid().to_string();
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(agent))
+        .await;
+    let claim = registry
+        .claim_agent_wait_notification(task_id, &raw_agent_id)
+        .await
+        .unwrap()
+        .expect("the local Agent is claimable");
+    registry
+        .set_agent_status_with_finalizing(task_id, TaskStatus::Completed, true)
+        .await
+        .unwrap();
+
+    let rows = registry.tasks.write().await;
+    let mut finishing = Box::pin(claim.finish());
+    assert!(
+        matches!(futures::poll!(finishing.as_mut()), std::task::Poll::Pending),
+        "finish is suspended on the held row lock"
+    );
+    drop(finishing);
+    drop(rows);
+
+    for _ in 0..20 {
+        let state = registry.get(task_id).await.unwrap();
+        let TaskState::LocalAgent(agent) = state else {
+            panic!("completion remains a local Agent")
+        };
+        if agent.agent_list_lifecycle.finalizing == FieldPresence::Value(false) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(registry.get(task_id).await.unwrap().base().notified);
+    assert!(registry.take_pending_task_notifications().await.is_empty());
+    let records = TaskRegistryHandle::list(registry.as_ref(), TaskListFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        records[0].agent_facts.as_ref().unwrap().finalizing,
+        FieldPresence::Value(false)
+    );
+    let reduced = reduce_agent_list(AgentListSnapshot {
+        task_rows: &records,
+        name_entries: &[],
+        inactive_teammate_addresses: Some(&std::collections::HashSet::new()),
+    });
+    assert_eq!(
+        reduced.entries[0].status,
+        FieldPresence::Value(serde_json::json!("completed"))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn late_agent_registration_receives_a_fresh_settle_budget() {
+    use lingxi_core::host::task_registry::{
+        AgentTerminalWaitOutcome, AgentTerminalWaitReason, TaskRegistryHandle,
+    };
+
+    let (_dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    registry.bind_self(&registry);
+    let task_id = "agent-late-registration";
+    let agent_id = lingxi_core::types::AgentId::new();
+    let budget = std::time::Duration::from_secs(10);
+    let waiter = {
+        let registry = registry.clone();
+        let raw_id = agent_id.as_uuid().to_string();
+        tokio::spawn(async move {
+            TaskRegistryHandle::wait_for_agent_terminal(
+                registry.as_ref(),
+                &raw_id,
+                tokio_util::sync::CancellationToken::new(),
+                Some(budget),
+            )
+            .await
+        })
+    };
+
+    // Let the initial scan observe no row, then consume most of the startup
+    // budget before registering the local-agent task.
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(8)).await;
+    tokio::task::yield_now().await;
+    let mut state = agent_row(task_id);
+    state.agent_id = agent_id;
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(state))
+        .await;
+    tokio::time::advance(std::time::Duration::from_millis(150)).await;
+    tokio::task::yield_now().await;
+    for _ in 0..30 {
+        if registry.get(task_id).await.unwrap().base().notified {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(registry.get(task_id).await.unwrap().base().notified);
+
+    // Cross the original startup deadline. The fresh settle window is still
+    // active because it started when K3 first observed the row.
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "late discovery must reset the wait budget"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(9)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        waiter.is_finished(),
+        "the fresh settle budget eventually expires"
+    );
+    let outcome = waiter.await.unwrap().unwrap();
+    assert_eq!(
+        outcome,
+        AgentTerminalWaitOutcome::Interrupted {
+            reason: AgentTerminalWaitReason::SettleTimeout,
+            observed_task_id: Some(task_id.into()),
+        }
+    );
+    assert!(!registry.get(task_id).await.unwrap().base().notified);
+}
+
+#[tokio::test(start_paused = true)]
+async fn agent_terminal_wait_without_budget_waits_for_completion_or_cancellation() {
+    use lingxi_core::host::task_registry::{
+        AgentTerminalWaitOutcome, AgentTerminalWaitReason, TaskRegistryHandle,
+    };
+
+    let (_dir, registry) = make_registry();
+    let registry = Arc::new(registry);
+    registry.bind_self(&registry);
+    let completion_id = lingxi_core::types::AgentId::new();
+    let completion_task_id = "agent-infinite-completion";
+    let completion_output = registry
+        .output_manager
+        .allocate(completion_task_id)
+        .await
+        .unwrap();
+    let mut completion_state = agent_row(completion_task_id);
+    completion_state.agent_id = completion_id;
+    completion_state.base.output_file = completion_output;
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(completion_state))
+        .await;
+
+    let completing = {
+        let registry = registry.clone();
+        tokio::spawn(async move {
+            TaskRegistryHandle::wait_for_agent_terminal(
+                registry.as_ref(),
+                &completion_id.as_uuid().to_string(),
+                tokio_util::sync::CancellationToken::new(),
+                None,
+            )
+            .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(
+        registry
+            .get(completion_task_id)
+            .await
+            .unwrap()
+            .base()
+            .notified
+    );
+    tokio::time::advance(std::time::Duration::from_secs(24 * 60 * 60)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !completing.is_finished(),
+        "None is unbounded; it must not become a large finite timeout"
+    );
+    registry
+        .set_status(completion_task_id, TaskStatus::Completed)
+        .await
+        .unwrap();
+    tokio::time::advance(std::time::Duration::from_millis(150)).await;
+    tokio::task::yield_now().await;
+    assert!(matches!(
+        completing.await.unwrap().unwrap(),
+        AgentTerminalWaitOutcome::Completed(_)
+    ));
+
+    let cancel_id = lingxi_core::types::AgentId::new();
+    let cancel_task_id = "agent-infinite-cancel";
+    let cancel_output = registry
+        .output_manager
+        .allocate(cancel_task_id)
+        .await
+        .unwrap();
+    let mut cancel_state = agent_row(cancel_task_id);
+    cancel_state.agent_id = cancel_id;
+    cancel_state.base.output_file = cancel_output;
+    registry
+        .insert_state_for_test(TaskState::LocalAgent(cancel_state))
+        .await;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let waiting = {
+        let registry = registry.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            TaskRegistryHandle::wait_for_agent_terminal(
+                registry.as_ref(),
+                &cancel_id.as_uuid().to_string(),
+                cancel,
+                None,
+            )
+            .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(registry.get(cancel_task_id).await.unwrap().base().notified);
+    cancel.cancel();
+    tokio::time::advance(std::time::Duration::from_millis(150)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        waiting.await.unwrap().unwrap(),
+        AgentTerminalWaitOutcome::Interrupted {
+            reason: AgentTerminalWaitReason::Aborted,
+            observed_task_id: Some(cancel_task_id.into()),
+        }
+    );
+    assert!(!registry.get(cancel_task_id).await.unwrap().base().notified);
+}
+
+#[test]
+fn teammate_spawn_keeps_the_request_creator_as_its_parent() {
+    let parent_id = lingxi_core::types::AgentId::new();
+    let teammate_id = lingxi_core::types::AgentId::new();
+    let request = lingxi_core::host::subagent_spawn::SubagentSpawnRequest {
+        creator_agent_id: Some(parent_id),
+        agent_spawn_provenance: lingxi_core::host::subagent_spawn::AgentSpawnProvenance {
+            hook_caller: lingxi_core::host::task_registry::FieldPresence::Value(serde_json::json!(
+                "trusted-plugin"
+            )),
+            hook_origin: lingxi_core::host::task_registry::FieldPresence::Value(serde_json::json!(
+                ["trusted-plugin"]
+            )),
+        },
+        description: Some("inspect the issue".into()),
+        subagent_type: "researcher".into(),
+        ..Default::default()
+    };
+    let base = crate::state::TaskStateBase {
+        id: "teammate-parent-row".into(),
+        task_type: TaskType::InProcessTeammate,
+        status: TaskStatus::Running,
+        description: "inspect the issue".into(),
+        tool_use_id: None,
+        start_time: SystemTime::now(),
+        end_time: None,
+        total_paused_ms: 0,
+        output_file: std::path::PathBuf::from("/tmp/tasks/teammate-parent-row.output"),
+        evict_after: None,
+        output_offset: 0,
+        notified: false,
+        creator_teammate_name: None,
+        creator_team_name: None,
+        creator_agent_id: None,
+    };
+    let input = TaskSpawnInput::InProcessTeammate {
+        spawn_request: Some(request.clone()),
+        inheritance: None,
+        agent_id: teammate_id,
+        name: "scout".into(),
+        team_name: "session".into(),
+        description: "inspect the issue".into(),
+    };
+
+    let state = state_for_spawn(base, &input);
+    assert_eq!(state.base().creator_agent_id, Some(parent_id));
+    let TaskState::InProcessTeammate(teammate) = state else {
+        panic!("the request creates an in-process teammate state")
+    };
+    assert_eq!(teammate.agent_id, teammate_id);
+    assert_eq!(teammate.spawned_agent_type.as_deref(), Some("researcher"));
+    assert_eq!(
+        teammate.spawned_description.as_deref(),
+        Some("inspect the issue")
+    );
+    assert_eq!(
+        teammate.agent_spawn_provenance,
+        request.agent_spawn_provenance
     );
 }

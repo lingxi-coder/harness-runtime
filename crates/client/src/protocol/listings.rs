@@ -440,6 +440,23 @@ pub struct SessionAgentSummaryDto {
     pub updated_at_ms: Option<u64>,
 }
 
+/// One child transcript row with a stable UUID and its original stream index.
+/// Deleted rows leave index gaps; later messages must not be renumbered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct SessionAgentMessageRowDto {
+    /// Monotonic child-session message position assigned by the Host.
+    pub message_index: u64,
+    /// Actual row UUID used by fallback tombstones and snapshot reconciliation.
+    pub message_uuid: String,
+    /// Client projection of the raw query message.
+    pub message: crate::protocol::message::MessageDto,
+    /// Complete host-created API-error row, preserving its independent inner
+    /// ID, creation time, usage, request ID and refusal metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_error_json: Option<String>,
+}
+
 /// Connection-scoped live workflow/subagent progress row.
 ///
 /// This mirrors Claude Code's `workflow_agent` reducer shape closely enough for

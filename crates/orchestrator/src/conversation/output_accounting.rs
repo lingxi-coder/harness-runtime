@@ -2,6 +2,7 @@
 use super::*;
 use lingxi_core::host::{WorkflowOutputEventId, WorkflowOutputScope};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone)]
 pub(crate) struct OutputTurn {
@@ -19,6 +20,17 @@ pub(crate) struct MainOutputObservation {
 }
 
 impl MainOutputObservation {
+    pub(crate) fn fork(&self) -> Self {
+        Self {
+            turn: self.turn.clone(),
+            event: MessageId::new(),
+            visible: 0,
+            reasoning: 0,
+            observed: false,
+            finished: false,
+        }
+    }
+
     pub(crate) fn observe(&mut self, usage: &llm_runtime::ExecutionUsage) {
         // SDK partial reports are cumulative snapshots too: reclassification
         // of output into reasoning must not charge both old and new buckets.
@@ -142,6 +154,127 @@ impl futures::Stream for OutputStream {
 }
 
 impl ConversationOrchestrator {
+    /// Snapshot only usage facts this orchestrator has actually observed.
+    /// This is the host-side source for the main-loop `session.measure` event;
+    /// breakdown-only context estimates are deliberately not computed here.
+    pub(crate) async fn mod_session_measure_snapshot(&self) -> ModSessionMeasureSnapshot {
+        let model = self.session.lock().await.model.clone();
+        let window = llm_runtime::model::context_window::context_window_for_model(
+            &model,
+            &self.api.active_betas(),
+        );
+        let tokens = self
+            .compaction_runtime
+            .last_response_input_tokens
+            .load(Ordering::Relaxed);
+        let mut context = serde_json::json!({"window":window});
+        if tokens > 0 && window > 0 {
+            let percent = ((tokens as f64 / window as f64) * 100.0)
+                .round()
+                .clamp(0.0, 100.0);
+            context["tokens"] = serde_json::json!(tokens);
+            context["percent"] = serde_json::json!(percent);
+        }
+
+        let rate_limits = self
+            .api
+            .last_raw_utilization()
+            .map_or_else(Vec::new, |raw| {
+                let mut limits = Vec::with_capacity(2);
+                if let Some(window) = raw.five_hour {
+                    limits.push(session_measure_rate_limit("five_hour", window));
+                }
+                if let Some(window) = raw.seven_day {
+                    limits.push(session_measure_rate_limit("seven_day", window));
+                }
+                limits
+            });
+        let cost_usd = if self.model_runtime.cost_tracker.is_some() {
+            Some(self.snapshot_cost_real().await.total_usd)
+        } else {
+            None
+        };
+        let limit_status = self
+            .api
+            .last_rate_limit_full()
+            .and_then(|snapshot| snapshot.status);
+
+        let mut input = serde_json::json!({
+            "context":context,
+            "rateLimits":rate_limits,
+        });
+        if let Some(usd) = cost_usd {
+            input["cost"] = serde_json::json!({"usd":usd});
+        }
+        ModSessionMeasureSnapshot {
+            input,
+            cost_usd,
+            limit_status,
+        }
+    }
+
+    /// Build the live `$.session.usage()` result from facts owned by the
+    /// orchestrator. `startedAt` is reconstructed from the runtime's monotonic
+    /// session clock because this host does not persist a wall-clock session
+    /// start timestamp; it is therefore a best-effort ISO timestamp, not a
+    /// byte-exact restoration of Claude's cost-ledger date.
+    ///
+    /// The native optional breakdown is computed by `contextData({ detail,
+    /// terminalWidth })`. This host has no equivalent breakdown builder, so a
+    /// valid request is surfaced as unavailable instead of returning invented
+    /// data. `columns` is otherwise ignored when `breakdown` is absent, as in
+    /// the native path.
+    pub(crate) async fn mod_session_usage_snapshot(
+        &self,
+        breakdown: Option<&str>,
+        columns: Option<serde_json::Number>,
+    ) -> Result<serde_json::Value, hooks::mods::ModError> {
+        if breakdown.is_some() {
+            return Err(hooks::mods::ModError::Unavailable(
+                "session.usage context breakdown needs a contextData builder, which this host does not have".into(),
+            ));
+        }
+        let _ = columns;
+
+        let elapsed = self
+            .model_runtime
+            .session_started_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .elapsed();
+        let started_at = SystemTime::now().checked_sub(elapsed).unwrap_or(UNIX_EPOCH);
+        let started_at = chrono::DateTime::<chrono::Utc>::from(started_at)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+        let model = self.session.lock().await.model.clone();
+        let window = llm_runtime::model::context_window::context_window_for_model(
+            &model,
+            &self.api.active_betas(),
+        );
+        let tokens = self
+            .compaction_runtime
+            .last_response_input_tokens
+            .load(Ordering::Relaxed);
+        let mut context = serde_json::json!({"window":window});
+        if tokens > 0 && window > 0 {
+            #[allow(clippy::cast_precision_loss)]
+            let percent = ((tokens as f64 / window as f64) * 100.0)
+                .round()
+                .clamp(0.0, 100.0);
+            context["tokens"] = serde_json::json!(tokens);
+            context["percent"] = serde_json::json!(percent);
+        }
+
+        let rate_limits = session_usage_rate_limits(self.api.last_raw_utilization());
+        let cost_usd = self.snapshot_cost_real().await.total_usd;
+        Ok(serde_json::json!({
+            "startedAt":started_at,
+            "context":context,
+            "rateLimits":rate_limits,
+            "cost":{"usd":cost_usd},
+        }))
+    }
+
     pub(crate) async fn prepare_output_session(
         &self,
         session: SessionId,
@@ -282,6 +415,53 @@ restart, which rebuilds a damaged ledger."
             finished: false,
         }))
     }
+}
+
+fn session_measure_rate_limit(
+    kind: &str,
+    window: llm_runtime::model::rate_limit::RawWindow,
+) -> serde_json::Value {
+    let mut limit = serde_json::json!({
+        "kind":kind,
+        "percentUsed":(window.utilization * 1000.0).round() / 10.0,
+    });
+    if let Ok(seconds) = i64::try_from(window.resets_at) {
+        if let Some(reset) = chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, 0) {
+            limit["resetsAt"] =
+                serde_json::json!(reset.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        }
+    }
+    limit
+}
+
+fn session_usage_rate_limits(
+    raw: Option<llm_runtime::model::rate_limit::RawUtilization>,
+) -> Vec<serde_json::Value> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    let now_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let latest_reset = now_seconds.saturating_add(31_536_000);
+    let mut limits = Vec::with_capacity(2);
+    // Native `Pq()` drops raw windows whose reset is expired or more than a
+    // year away. `RawUtilization` only stores the five-hour and seven-day
+    // windows; this host has no raw gateway overage window for `spend_limit`.
+    if let Some(window) = raw
+        .five_hour
+        .filter(|w| w.resets_at > now_seconds && w.resets_at < latest_reset)
+    {
+        limits.push(session_measure_rate_limit("five_hour", window));
+    }
+    if let Some(window) = raw
+        .seven_day
+        .filter(|w| w.resets_at > now_seconds && w.resets_at < latest_reset)
+    {
+        limits.push(session_measure_rate_limit("seven_day", window));
+    }
+    limits
 }
 
 #[cfg(test)]
@@ -556,6 +736,7 @@ mod tests {
             vec![llm_runtime::ContentBlock::Text {
                 text: "done".into(),
                 cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         );
@@ -594,18 +775,20 @@ mod tests {
             },
             message_stop(),
         ]]));
-        let orch = ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(vec![])),
-            stream,
-            Arc::new(ToolRegistry::new()),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            std::env::temp_dir(),
-        )
-        .with_workflow_output_scopes(scopes.clone());
+        let orch = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                stream,
+                Arc::new(ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                std::env::temp_dir(),
+            )
+            .with_workflow_output_scopes(scopes.clone()),
+        );
         orch.run_turn_streaming("hello").await.unwrap();
         let session = orch.session.lock().await.session_id;
         assert_eq!(scopes.capture(session).unwrap().spent(), 100);
@@ -662,6 +845,27 @@ mod tests {
         drop(observation);
         assert_eq!(a.spent(), 10);
         assert_eq!(b.spent(), 0);
+    }
+
+    #[tokio::test]
+    async fn forked_main_observations_count_separate_mod_requests() {
+        let scopes = Arc::new(Scopes::default());
+        let orch = orch(vec![]).with_workflow_output_scopes(scopes.clone());
+        orch.begin_output_turn(MessageId::new()).await.unwrap();
+        let template = orch.capture_main_output().await.unwrap().unwrap();
+        let mut first = template.fork();
+        let mut second = template.fork();
+        first.observe(&usage(3, 0));
+        second.observe(&usage(5, 2));
+        first.finish().unwrap();
+        second.finish().unwrap();
+        assert_eq!(
+            scopes
+                .capture(orch.session.lock().await.session_id)
+                .unwrap()
+                .spent(),
+            10
+        );
     }
 
     #[tokio::test]

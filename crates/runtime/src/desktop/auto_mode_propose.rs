@@ -16,7 +16,7 @@
 //! without a network, and the part that needs credentials stays at the edge.
 
 use llm_runtime::{HistoryContentDelta, HistoryEvent, LlmError};
-use permission::auto_mode_pregather::{build_recon_block, GatherOptions};
+use permission::auto_mode_pregather::{GatherOptions, build_recon_block};
 use permission::auto_mode_propose::{ProposeAnswers, ProposeGather, QueryOutcome};
 
 /// Stop reasons that mean "the model ran out of room", across providers.
@@ -44,6 +44,10 @@ pub fn collect_propose_reply(events: Vec<Result<HistoryEvent, LlmError>>) -> Que
             Err(_) => return QueryOutcome::Failed("stream error".to_string()),
             Ok(HistoryEvent::ContentBlockDelta {
                 delta: HistoryContentDelta::TextDelta { text: chunk },
+                ..
+            }) => text.push_str(&chunk),
+            Ok(HistoryEvent::ContentBlockDelta {
+                delta: HistoryContentDelta::TextJsUtf16Delta { text: chunk, .. },
                 ..
             }) => text.push_str(&chunk),
             Ok(HistoryEvent::MessageDelta { delta, .. }) => {
@@ -133,6 +137,7 @@ pub fn propose_messages_to_conversation(
                 id: MessageId::new(),
                 content: vec![ContentBlock::Text {
                     text: m.content.clone(),
+                    citations: None,
                 }],
                 stop_reason: None,
             }),
@@ -307,6 +312,27 @@ mod tests {
     }
 
     #[test]
+    fn utf16_text_delta_uses_its_display_text_for_proposal_content() {
+        let text = "{\"environment\":[\"�\"]}";
+        let code_units = "{\"environment\":[\""
+            .encode_utf16()
+            .chain([0xd800])
+            .chain("\"]}".encode_utf16())
+            .collect();
+        let outcome = collect_propose_reply(vec![
+            Ok(HistoryEvent::ContentBlockDelta {
+                index: 0,
+                delta: HistoryContentDelta::TextJsUtf16Delta {
+                    text: text.to_string(),
+                    utf16_code_units: code_units,
+                },
+            }),
+            stop("end_turn"),
+        ]);
+        assert_eq!(outcome, QueryOutcome::Text(text.to_string()));
+    }
+
+    #[test]
     fn a_truncated_reply_is_not_handed_over_as_a_short_one() {
         // Its prefix would parse as malformed JSON and surface as a confusing
         // parse error instead of the clear "cut off" message.
@@ -455,7 +481,8 @@ mod tests {
                 assert_eq!(
                     content.as_slice(),
                     [ContentBlock::Text {
-                        text: "hello recon".to_string()
+                        text: "hello recon".to_string(),
+                        citations: None
                     }]
                 );
             }
@@ -470,8 +497,8 @@ mod tests {
         };
         use permission::auto_mode_propose::ProposeQuery;
         use std::sync::{
-            atomic::{AtomicBool, Ordering},
             Arc,
+            atomic::{AtomicBool, Ordering},
         };
         struct Establishing {
             entered: tokio::sync::Notify,
@@ -686,7 +713,7 @@ impl command_api::builtins::ProposeRunner for DesktopProposeRunner {
         {
             Ok(id) => id,
             Err(error) => {
-                return serde_json::json!({"ok": false, "code": "recon_failed", "reason": error.to_string()})
+                return serde_json::json!({"ok": false, "code": "recon_failed", "reason": error.to_string()});
             }
         };
         let mut scan_guard = ScanGuard {

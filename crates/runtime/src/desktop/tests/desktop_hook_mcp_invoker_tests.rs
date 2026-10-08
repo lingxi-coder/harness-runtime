@@ -1,5 +1,5 @@
 use super::{
-    hook_mcp_full_name, map_hook_mcp_tool_error, map_hook_mcp_tool_result, DesktopHookMcpInvoker,
+    DesktopHookMcpInvoker, hook_mcp_full_name, map_hook_mcp_tool_error, map_hook_mcp_tool_result,
 };
 use hooks::HookMcpInvoker;
 use lingxi_core::host::{
@@ -10,8 +10,8 @@ use lingxi_core::host::{
 };
 use lingxi_core::types::McpConnectionId;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 #[derive(Default)]
@@ -288,6 +288,7 @@ async fn invoker_uses_get_client_and_does_not_lazy_connect_cached_servers() {
     registry.connections.write().await.insert(
         "srv".into(),
         mcp::connection::McpConnectionState::Cached {
+            server_info: None,
             config: http_cfg("srv"),
             connection_id: McpConnectionId::new(),
             capabilities: ServerCapabilitiesDto {

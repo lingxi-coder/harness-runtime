@@ -112,7 +112,7 @@ impl ToolVerb {
             Self::Output => Some("Output"),
             Self::Kill => Some("Kill"),
             Self::Fetch => Some("Fetch"),
-            Self::Task => Some("Task"),
+            Self::Task => Some("Agent"),
             Self::Todo => Some("Update Todos"),
             Self::Skill => Some("Skill"),
             Self::Generic => None,
@@ -245,7 +245,7 @@ pub fn tool_icon(tool: &str, input: &Value) -> ToolIcon {
             "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => ToolIcon::Edit,
             "Shell" | "PowerShell" | "REPL" => ToolIcon::Terminal,
             "WebFetch" | "WebSearch" | "Fetch" => ToolIcon::Globe,
-            "Task" | "Agent" | "Workflow" => ToolIcon::Workflow,
+            "Agent" | "Workflow" => ToolIcon::Workflow,
             "TodoWrite" | "ListChecks" => ToolIcon::ListChecks,
             "Skill" | "Sparkles" => ToolIcon::Sparkles,
             "TaskOutput" | "AgentOutput" | "AgentOutputTool" | "BashOutput" | "BashOutputTool"
@@ -406,10 +406,10 @@ pub fn tool_header(tool: &str, input: &Value) -> ToolHeader {
             header.qualifier = str_field(input, "path").map(|path| format!(" in {path}"));
         }
         "TodoWrite" => header.verb = ToolVerb::Todo,
-        "Task" | "Agent" => {
+        "Agent" => {
             header.verb = ToolVerb::Task;
             // Mirrors `tools/agent/src/agent.rs:1312`: the subagent type is the
-            // label, except the two generic types which read as plain "Task".
+            // label, except the two generic types which read as plain "Agent".
             label_override = str_field(input, "subagent_type")
                 .filter(|kind| !matches!(*kind, "general-purpose" | "worker"))
                 .map(str::to_string);
@@ -477,7 +477,7 @@ pub fn activity_label(tool: &str) -> String {
         "Edit" | "MultiEdit" => "Editing".to_string(),
         "Grep" | "Glob" => "Searching".to_string(),
         "WebFetch" | "WebSearch" => "Browsing".to_string(),
-        "Task" => "Delegating".to_string(),
+        "Agent" => "Delegating".to_string(),
         other => format!("Running {other}"),
     }
 }
@@ -657,18 +657,18 @@ mod tests {
     fn agent_labels_by_subagent_type_except_the_generic_ones() {
         assert_eq!(
             title(
-                "Task",
+                "Agent",
                 &json!({"subagent_type": "code-reviewer", "description": "review the diff"})
             ),
             "code-reviewer(review the diff)"
         );
-        // `general-purpose` / `worker` read as plain "Task" (agent.rs:1312).
+        // `general-purpose` / `worker` read as plain "Agent" (agent.rs:1312).
         assert_eq!(
             title(
-                "Task",
+                "Agent",
                 &json!({"subagent_type": "general-purpose", "description": "look around"})
             ),
-            "Task(look around)"
+            "Agent(look around)"
         );
     }
 
@@ -738,7 +738,8 @@ mod tests {
         assert_eq!(activity_label("Bash"), "Running Bash");
         assert_eq!(activity_label("Read"), "Reading");
         assert_eq!(activity_label("Edit"), "Editing");
-        assert_eq!(activity_label("Task"), "Delegating");
+        assert_eq!(activity_label("Agent"), "Delegating");
+        assert_eq!(activity_label("Task"), "Running Task");
         assert_eq!(activity_label("Whatever"), "Running Whatever");
     }
 
@@ -800,7 +801,8 @@ mod tests {
             ("Edit", ToolIcon::Edit),
             ("Shell", ToolIcon::Terminal),
             ("WebFetch", ToolIcon::Globe),
-            ("Task", ToolIcon::Workflow),
+            ("Agent", ToolIcon::Workflow),
+            ("Task", ToolIcon::Wrench),
             ("TodoWrite", ToolIcon::ListChecks),
             ("Skill", ToolIcon::Sparkles),
             ("TaskOutput", ToolIcon::Output),

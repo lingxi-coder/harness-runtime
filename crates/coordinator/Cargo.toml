@@ -19,6 +19,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
+unicode-normalization = "=0.1.25"
 tokio = { version = "1", features = ["sync"] }
 tracing.workspace = true
 

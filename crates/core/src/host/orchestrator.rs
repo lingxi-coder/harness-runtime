@@ -14,6 +14,35 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use thiserror::Error;
 
+/// A native UI control response and host-only renderer correlation metadata.
+/// The render revision is carried outside the native response payload.
+#[derive(Debug, Clone)]
+pub struct ModUiControlOutcome {
+    /// The canonical Native control response.
+    pub response: crate::types::utf16_json::Utf16JsonProjection,
+    /// Revision used only to correlate a parent render with its drawn Clients.
+    pub render_revision: Option<u64>,
+    /// Host-owned Client environment epochs, kept outside the Native response.
+    /// A successful environment install or reload advances its plugin's epoch;
+    /// ordinary renders and invalidations leave it unchanged.
+    pub client_runtime_epochs: std::collections::BTreeMap<String, u64>,
+    /// Opaque per-site token for committed render dependencies and matching
+    /// UI invalidations. It stays outside the canonical Native response.
+    pub client_state_token: Option<String>,
+}
+
+/// Host turn scheduling for an admitted peer report. The body stays in the
+/// recipient inbox; a wake-up carries only trusted target and message identity.
+#[async_trait]
+pub trait MainReportWaker: Send + Sync {
+    /// Schedule the target main session through the host's ordinary turn owner.
+    async fn wake(
+        &self,
+        scope: crate::host::handback::HandbackSessionScope,
+        message_id: crate::types::MessageId,
+    );
+}
+
 /// Snapshot of the latest provider rate-limit headers seen on the live path.
 ///
 /// Returned by [`OrchestratorHandle::last_rate_limit_info`] so callers (e.g.
@@ -565,10 +594,8 @@ pub struct DeferredToolReplay {
     pub traceparent: Option<String>,
 }
 
-/// The static prompt and inline tool descriptions captured by the optional
-/// carved-slate prompt-cache path.  The field names intentionally follow the
-/// transcript attachment schema (`systemPrompt` / `tools`); the aliases keep
-/// resume tolerant of older host snapshots that used Rust-style names.
+/// The static prompt and inline tool descriptions captured by the Native
+/// prompt-snapshot attachment schema.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptToolDescription {
     /// Tool name as advertised to the model.
@@ -582,18 +609,40 @@ pub struct PromptToolDescription {
 /// the orchestrator and is deliberately not stored here.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptSnapshot {
-    /// Static system prompt members, joined by the provider adapter.
-    #[serde(rename = "systemPrompt", alias = "system_prompt", default)]
-    pub system_prompt: Vec<String>,
-    /// Non-deferred inline tool descriptions in first-seen order.
+    /// Native prompt-snapshot routing hint; `inline` preserves the captured
+    /// outgoing context lane.
     #[serde(
-        rename = "tools",
-        alias = "recordedToolDescriptions",
-        alias = "toolDescriptions",
+        rename = "contextRendering",
         default,
-        skip_serializing_if = "Vec::is_empty"
+        deserialize_with = "deserialize_context_rendering",
+        skip_serializing_if = "Option::is_none"
     )]
+    pub context_rendering: Option<super::instructions::InstructionRendering>,
+    /// Static system prompt members, joined by the provider adapter.
+    #[serde(rename = "systemPrompt")]
+    pub system_prompt: Vec<String>,
+    /// Exact JavaScript units for current-process prompt elements whose visible
+    /// `system_prompt` strings are lossy replacements. This is in-memory
+    /// integrity metadata only: Native cold transcript loading normalizes the
+    /// prompt snapshot before query reuse, and JSONL serialization consumes the
+    /// sidecar without exposing it in the attachment schema.
+    #[serde(skip)]
+    pub system_prompt_utf16: Vec<Option<Vec<u16>>>,
+    /// Non-deferred inline tool descriptions in first-seen order.
+    #[serde(rename = "tools", default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<PromptToolDescription>,
+}
+
+// Native fmn catches an invalid routing hint independently of the snapshot's
+// system prompt and tools. A malformed hint must not restore an older prefix.
+fn deserialize_context_rendering<'de, D>(
+    deserializer: D,
+) -> Result<Option<super::instructions::InstructionRendering>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 /// Transcript-adjacent runtime state needed by an in-place session resume.
@@ -633,6 +682,11 @@ pub struct ResumeRuntimeSnapshot {
     pub transcript_only_message_ids: Vec<crate::types::MessageId>,
     /// Message ids that are compact summaries.
     pub compact_summary_message_ids: Vec<crate::types::MessageId>,
+    /// User rows with the independent JSONL `isVirtual` flag.
+    pub virtual_user_message_ids: Vec<crate::types::MessageId>,
+    /// Real user turns removed from a compacted in-memory history. A resume
+    /// reconstructed from full JSONL history leaves this at zero.
+    pub compacted_user_turns: u64,
     /// Persisted UI/meta messages that must never be replayed into a model
     /// request. Fusion completion envelopes use this lane.
     pub model_context_excluded_message_ids: Vec<crate::types::MessageId>,
@@ -642,6 +696,9 @@ pub struct ResumeRuntimeSnapshot {
     /// messages. The message id keeps dedup structural across hot resume;
     /// bodies remain opaque Markdown and are never delimiter-parsed.
     pub post_compact_skill_attachments: Vec<(crate::types::MessageId, Vec<String>)>,
+    /// Durable model reminders and their original attachment payloads. Keeping
+    /// the payload separate prevents parsing rendered Markdown during replay.
+    pub model_reminder_attachments: Vec<(crate::types::MessageId, serde_json::Value)>,
     /// Persisted cumulative token count discarded by compaction.
     pub cumulative_dropped_tokens: u64,
     /// Whether this session has compacted at least once.
@@ -660,6 +717,10 @@ pub struct ResumeRuntimeSnapshot {
     /// Resume consumers must adopt it as-is and never create one while
     /// replaying a session.
     pub prompt_snapshot: Option<PromptSnapshot>,
+    /// Routing hint from the latest raw prompt-snapshot attachment. This is
+    /// independent of the last valid static-prefix snapshot: an invalid latest
+    /// attachment cannot resurrect an older inline context hint.
+    pub context_rendering_hint: Option<super::instructions::InstructionRendering>,
 }
 
 /// One model's cumulative usage for the `/usage` "Usage by model" block
@@ -2219,6 +2280,15 @@ impl SummarizeDirection {
     }
 }
 
+/// Fullscreen terminal selection exposed to a Mod.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModUiSelection {
+    /// Selected terminal text.
+    pub text: String,
+    /// Identity of the one transcript row containing the whole selection.
+    pub request_id: Option<String>,
+}
+
 /// Wired in M5-09 (slash-command surface). M5-02 only defines the trait —
 /// `ConversationOrchestrator` does NOT yet implement it.
 #[async_trait]
@@ -2372,6 +2442,70 @@ pub trait OrchestratorHandle: Send + Sync {
         Ok(())
     }
 
+    /// The latest selection on this session's fullscreen transcript.
+    /// Inline and headless hosts leave it unset.
+    fn set_mod_ui_selection(&self, _selection: Option<ModUiSelection>) {}
+
+    /// Screen one slash catalog entry before a host shows it in typeahead or
+    /// help. The command and provider facts remain pinned by the live engine.
+    async fn mod_describe_command(&self, input: serde_json::Value) -> serde_json::Value {
+        input
+    }
+
+    /// Render a supported Mod UI site for the live terminal viewport. The TUI
+    /// invokes this when its site props or viewport change, or after a Mod
+    /// `ui.render` invalidation; `ui.resolve` constructors are prepared at load.
+    async fn mod_ui_render(
+        &self,
+        _input: serde_json::Value,
+        _ui_revision: u64,
+    ) -> Result<serde_json::Value, HandleError> {
+        Ok(serde_json::Value::Null)
+    }
+
+    /// Execute a current native UI control request for this session.
+    async fn mod_ui_control(
+        &self,
+        _request: crate::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<ModUiControlOutcome, HandleError> {
+        Err(HandleError::ActionFailed(
+            "Mod UI controls need a Mod-aware session".into(),
+        ))
+    }
+
+    /// Execute the local Client VM adapter without exposing plugin source to
+    /// the renderer. This is separate from native UI control payloads.
+    async fn mod_ui_client_operation(
+        &self,
+        _operation: crate::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<crate::types::utf16_json::Utf16JsonProjection, HandleError> {
+        Err(HandleError::ActionFailed(
+            "Mod Client operations need a Mod-aware session".into(),
+        ))
+    }
+
+    /// Dispatch a Button press from the current terminal render tree. The
+    /// revision is scoped by the owning session and render site.
+    async fn mod_ui_press(
+        &self,
+        _input: serde_json::Value,
+        _ui_revision: u64,
+    ) -> Result<serde_json::Value, HandleError> {
+        Ok(serde_json::json!({"handled":false}))
+    }
+
+    /// Revoke displayed Button actions at clear/redraw boundaries. The host
+    /// ignores clears older than its current site revision.
+    async fn mod_ui_clear_press_actions(&self, _ui_revision: u64) -> Result<(), HandleError> {
+        Ok(())
+    }
+
+    /// Return the session-local invalidation generation for the live Mod UI
+    /// render site. TUI hosts poll this cheaply while waiting for redraws.
+    async fn mod_ui_render_generation(&self) -> u64 {
+        0
+    }
+
     /// Read the session's plan-mode flag (`/plan`). When set, the turn loop
     /// routes tool-permission checks through `check_in_plan_mode` and sends
     /// `permission_mode: "plan"` in the request body. DEFAULT is `false` so
@@ -2403,6 +2537,23 @@ pub trait OrchestratorHandle: Send + Sync {
     /// Live effort sent on the next model request (`None` = automatic).
     async fn current_effort(&self) -> Option<String> {
         None
+    }
+
+    /// Authoritative native effort command context. A missing implementation
+    /// is an error rather than permission to rediscover ambient settings.
+    async fn effort_command_snapshot(
+        &self,
+    ) -> Result<Option<super::effort::EffortCommandSnapshot>, HandleError> {
+        Err(HandleError::Unimplemented("effort_command_snapshot".into()))
+    }
+
+    /// Independent session switch; changing it never rewrites effort.
+    async fn ultracode_enabled(&self) -> bool {
+        false
+    }
+    /// Replace the independent Ultracode session switch.
+    async fn set_ultracode_enabled(&self, _enabled: bool) -> Result<(), HandleError> {
+        Err(HandleError::Unimplemented("set_ultracode_enabled".into()))
     }
 
     /// Whether dynamic workflows are enabled for THIS session.
@@ -2462,10 +2613,16 @@ pub trait OrchestratorHandle: Send + Sync {
         Ok(())
     }
 
-    /// Change the live effort for this session as well as future transcript
-    /// rows. Persistence of the default remains the slash command's concern.
-    async fn set_effort_level(&self, _effort: Option<String>) -> Result<(), HandleError> {
-        Ok(())
+    /// Replace the native session selection, preserving inheritance and explicit automatic.
+    async fn set_session_effort(
+        &self,
+        _effort: super::effort_table::SessionEffort,
+    ) -> Result<(), HandleError> {
+        Err(HandleError::Unimplemented("set_session_effort".into()))
+    }
+    /// Admitted path for the provider-neutral reasoning default.
+    async fn reasoning_default_settings_path(&self) -> Option<std::path::PathBuf> {
+        None
     }
 
     /// The output styles this session can switch to, and which one is in force
@@ -2824,6 +2981,19 @@ pub trait OrchestratorHandle: Send + Sync {
         self.run_turn_streaming_with_cancel(prompt, cancel).await
     }
 
+    /// Preserve the TUI row correlation token through a queued user prompt.
+    async fn run_queued_turn_streaming_with_row_token(
+        &self,
+        prompt: &str,
+        cancel: tokio_util::sync::CancellationToken,
+        in_human_turn: bool,
+        row_token: String,
+    ) -> Result<TurnOutcome, HandleError> {
+        let _ = row_token;
+        self.run_queued_turn_streaming(prompt, cancel, in_human_turn)
+            .await
+    }
+
     /// Streaming turn carrying pasted image file paths (TUI paste→image). Each
     /// path is read + base64-encoded into a `ContentBlock::Image` on the
     /// outgoing user message.
@@ -2840,9 +3010,27 @@ pub trait OrchestratorHandle: Send + Sync {
         self.run_turn_streaming_with_cancel(prompt, cancel).await
     }
 
+    /// Streaming TUI turn carrying an opaque row token that is resolved to the
+    /// actual persisted JSONL UUID after the user message is appended.
+    async fn run_turn_streaming_with_images_and_row_token(
+        &self,
+        prompt: &str,
+        image_paths: &[std::path::PathBuf],
+        cancel: tokio_util::sync::CancellationToken,
+        row_token: String,
+    ) -> Result<TurnOutcome, HandleError> {
+        let _ = row_token;
+        self.run_turn_streaming_with_images(prompt, image_paths, cancel)
+            .await
+    }
+
     /// Start a turn that contains only pending asynchronous-hook meta
     /// responses. Implementations without an async-hook provider may no-op.
-    async fn run_async_hook_rewake(&self) -> Result<TurnOutcome, HandleError> {
+    async fn run_async_hook_rewake(
+        &self,
+        generation_cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<TurnOutcome, HandleError> {
+        let _ = generation_cancel;
         Ok(TurnOutcome::EndTurn)
     }
 
@@ -3127,6 +3315,24 @@ pub enum OutputEvent {
         /// Whether consumers should render the notice as an error.
         is_error: bool,
     },
+    /// One Mod `$.ui.log` line, separate from assistant and system messages.
+    ModLog {
+        /// The plugin that raised the log operation.
+        plugin: String,
+        /// Plain text after Mod event rewriting.
+        text: String,
+    },
+    /// A transient Mod notification, separate from transcript and model text.
+    ModToast {
+        plugin: String,
+        text: String,
+        timeout_ms: u64,
+    },
+    /// A pinned Mod status line; `None` clears its plugin's line.
+    ModStatus {
+        plugin: String,
+        text: Option<String>,
+    },
     /// An allowlisted terminal escape sequence to write to the terminal
     /// (#6 main-loop parity, [`OutputStream::emit_terminal_sequence`]).
     TerminalSequence {
@@ -3270,6 +3476,120 @@ pub enum OutputEvent {
         /// `anthropic-ratelimit-unified-7d-reset` (unix epoch seconds).
         seven_day_resets_at: Option<u64>,
     },
+    /// Native accepted server-fallback output event. Emitted for every visible
+    /// accepted hop, including a hop whose session route does not change.
+    QueryModelChange {
+        /// Model name selected by the accepted server response.
+        to_model: String,
+    },
+    /// Host/client-only transient key for text deltas from one assistant block.
+    /// This is not a native SDK event; the native row UUID is assigned only at
+    /// the corresponding block-identity callback.
+    AssistantBlockStart {
+        /// Opaque host-local key used to bind deltas until stop-time identity.
+        block_key: u64,
+    },
+    /// Host/client-only mapping from a transient assistant block key to the
+    /// UUID assigned when the native row completed. This is not a native SDK
+    /// event.
+    AssistantBlockIdentity {
+        /// Transient key previously announced by `AssistantBlockStart`.
+        block_key: u64,
+        /// UUID assigned at the completed row boundary.
+        row_id: crate::types::MessageId,
+    },
+    /// A native tombstone projected from the complete row facts available to
+    /// the host. `display_only` is preserved as a native flag; native
+    /// consumers still remove the row from transcript and JSONL storage.
+    Tombstone {
+        /// Complete row envelope available at the host boundary.
+        message: ServerFallbackTombstoneMessage,
+        /// Native `displayOnly` value.
+        display_only: bool,
+    },
+    /// Begin a native refusal-continuation stitch. No row identity is assigned
+    /// here; the accepted incoming assistant row keeps its own stop-time UUID.
+    RefusalContinuation {
+        /// Phase. Native accepted fallback emits only `Begin` here.
+        phase: RefusalContinuationPhase,
+        /// Retained text, passed through byte-for-byte.
+        salvage_text: String,
+        /// Native stitch rule. Accepted fallback emits `Exact`.
+        join: RefusalContinuationJoin,
+        /// Original row UUIDs, in native source order.
+        replaces_uuids: Vec<crate::types::MessageId>,
+        /// Host/client display-hook policy extension; not part of the native
+        /// event payload. `false` means a later completed display pass supplies
+        /// the visible text instead of seeding this buffer.
+        display_salvage_text: bool,
+    },
+    /// A TUI user row token resolved to the UUID from a successful JSONL append.
+    UserTranscriptRowIdentity { row_token: String, uuid: String },
+    /// Persisted top-level JSONL UUIDs for text blocks in one assistant response.
+    AssistantTranscriptRowUuids {
+        /// Internal response key used only to locate its rendered cells.
+        message_id: crate::types::MessageId,
+        /// One slot per persisted text block; failed appends are `None`.
+        uuids: Vec<Option<String>>,
+    },
+}
+
+/// Row fields forwarded by an accepted server-fallback tombstone. The source
+/// producer supplies timestamp/request/usage facts on the completed row but
+/// does not assign `parentUuid`; this projection therefore carries no parent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerFallbackTombstoneMessage {
+    /// Native outer row UUID.
+    pub uuid: crate::types::MessageId,
+    /// Native outer row kind (normally `assistant`).
+    pub message_type: String,
+    /// Native outer-row timestamp captured at content-block completion.
+    pub timestamp: String,
+    /// Request identifier, when one was captured on the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Request reference, when one was captured on the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_ref: Option<serde_json::Value>,
+    /// Provider-assigned inner message identifier, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_message_id: Option<String>,
+    /// Model recorded on the provider message, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Provider stop reason, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    /// Provider refusal stop details, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_details: Option<serde_json::Value>,
+    /// Usage facts attached to the completed provider message, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<serde_json::Value>,
+    /// Complete ordered provider content available at the host boundary.
+    pub content: Vec<crate::types::ContentBlock>,
+    /// Whether the row represents an API error, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_api_error_message: Option<bool>,
+    /// Native supersession metadata, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes_uuids: Option<Vec<crate::types::MessageId>>,
+}
+
+/// Refusal-continuation phase. The native accepted-fallback path emits `Begin`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalContinuationPhase {
+    /// Seed a pending stitch from retained refusal text.
+    Begin,
+}
+
+/// Refusal-continuation join mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalContinuationJoin {
+    /// Concatenate retained and accepted text with no inserted delimiter.
+    Exact,
 }
 
 /// Severity / color of a context-pressure banner — mirrors the `<Text>` color
@@ -3313,8 +3633,58 @@ pub trait OutputStream: Send + Sync {
     /// Identify the assistant response immediately before its completion boundary.
     async fn emit_assistant_message_identity(&self, _message_id: &crate::types::MessageId) {}
 
+    /// Return the actual persisted JSONL UUID for a TUI-owned user-row token.
+    /// Called only after the JSONL append succeeds.
+    async fn emit_user_transcript_row_identity(&self, _row_token: &str, _uuid: &str) {}
+
+    /// Return the successful top-level JSONL UUIDs for assistant text rows.
+    /// `message_id` is a grouping key only and must not be used as a UUID.
+    async fn emit_assistant_transcript_row_uuids(
+        &self,
+        _message_id: &crate::types::MessageId,
+        _uuids: &[Option<String>],
+    ) {
+    }
+
     /// Retract an assistant attempt that is being retried.
     async fn emit_message_retracted(&self, _message_id: &crate::types::MessageId) {}
+
+    /// Emit native `query_model_change` at an accepted visible fallback hop.
+    async fn emit_server_fallback_query_model_change(&self, _to_model: &str) {}
+
+    /// Start tracking deltas for one assistant content block. This host/client
+    /// seam is not a native SDK event; it exists because the native outer row
+    /// UUID is minted only when the block completes.
+    async fn emit_assistant_block_start(&self, _block_key: u64) {}
+
+    /// Bind a transient block key to its native stop-time row UUID. This is a
+    /// host/client seam, not a native SDK event.
+    async fn emit_assistant_block_identity(
+        &self,
+        _block_key: u64,
+        _row_id: &crate::types::MessageId,
+    ) {
+    }
+
+    /// Emit a native tombstone for a complete row. `display_only` is a native
+    /// flag and does not promise presentation-only deletion; native consumers
+    /// may also remove the row from durable transcript storage.
+    async fn emit_server_fallback_tombstone(
+        &self,
+        _message: &ServerFallbackTombstoneMessage,
+        _display_only: bool,
+    ) {
+    }
+
+    /// Begin the native refusal-continuation stitch. The display flag is a
+    /// host/client extension that controls local buffering under display hooks.
+    async fn emit_refusal_continuation_begin(
+        &self,
+        _salvage_text: &str,
+        _replaces_uuids: &[crate::types::MessageId],
+        _display_salvage_text: bool,
+    ) {
+    }
 
     /// Signal a model turn that did not originate from a direct UI submit,
     /// such as an `asyncRewake` hook completion.
@@ -3331,6 +3701,38 @@ pub trait OutputStream: Send + Sync {
     /// transcript/status surface remain source-compatible.
     async fn emit_system_notice(&self, _body: &str, _is_error: bool) {}
 
+    /// Display the model-fallback notice. SDK sinks override this callback and
+    /// serialize its identity with `ModelFallbackMetadata::sdk_frame`.
+    async fn emit_model_fallback(
+        &self,
+        _id: &crate::types::MessageId,
+        _session_id: &crate::types::SessionId,
+        content: &str,
+        _metadata: &crate::types::ModelFallbackMetadata,
+    ) {
+        self.emit_system_notice(content, false).await;
+    }
+
+    /// Emit a Mod log row without adding model-facing conversation content.
+    async fn emit_mod_log(&self, _plugin: &str, _text: &str) {}
+
+    /// Show a transient Mod notification without persisting transcript content.
+    async fn emit_mod_toast(&self, _plugin: &str, _text: &str, _timeout_ms: u64) {}
+
+    /// Set or clear this plugin's pinned status below the prompt.
+    async fn emit_mod_status(&self, _plugin: &str, _text: Option<&str>) {}
+
+    /// Deliver a current Client VM frame to the attached session renderer.
+    async fn emit_mod_ui_client_frame(&self, _runtime_id: &str, _frame_json: &str) {}
+
+    /// Native `ui.render` invalidation, scoped to supplied parent instances.
+    async fn emit_mod_ui_invalidate(
+        &self,
+        _instances_json: Option<&str>,
+        _uuid: &str,
+        _session_id: &str,
+    ) {
+    }
     /// Emit a tool-call notification immediately before dispatch.
     ///
     /// `id` is the `tool_use_id` echoed in the matching ToolResult. Added

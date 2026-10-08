@@ -7,16 +7,28 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Port of the reference bundled-skill `getPromptForCommand(args)` seam
-/// (`claude-code/src/skills/bundledSkills.ts` → `loop.ts:84`). Builds the
-/// model-facing prompt dynamically from the raw (untrimmed) args, enabling the
-/// empty→usage vs non-empty→buildPrompt two-branch behavior that static
-/// `$ARGUMENTS` templating cannot express (the two texts share no template).
-///
-/// Carried on [`SlashCommandKind::Bundled`] and projected onto the Skill tool's
-/// descriptor; [`SkillTool::call`] invokes `build(args)` INSTEAD of the static
-/// argument substitution when it is present.
+/// Owning session context for a dynamic bundled skill prompt. Every production
+/// expansion supplies its model and directories; preloading keeps activation off.
+#[derive(Clone, Copy)]
+pub struct BundledPromptContext<'a> {
+    /// Owning session's project root.
+    pub project_root: &'a std::path::Path,
+    /// Current execution directory, including isolated child worktrees.
+    pub cwd: &'a std::path::Path,
+    /// Loading instructions must not activate the skill.
+    pub is_preload: bool,
+    /// Dispatching session or child's selected model, rather than its parent.
+    pub main_loop_model: Option<&'a str>,
+}
+
+/// A context-aware dynamic bundled skill prompt.
 pub trait BundledPromptFn: Send + Sync {
+    /// Whether expansion consumes the selected model. Stateless templates do
+    /// not need route lookup merely to produce their fixed instructions.
+    fn needs_model_context(&self) -> bool {
+        false
+    }
+
     /// Produce the model-facing prompt for the given raw args string. The
     /// implementation does its own trimming/branching (mirrors the reference's
     /// `args.trim()` inside `getPromptForCommand`, `loop.ts:85`).
@@ -34,11 +46,9 @@ pub trait BundledPromptFn: Send + Sync {
     fn try_build_at(
         &self,
         args: &str,
-        _project_root: &std::path::Path,
-        _cwd: &std::path::Path,
-        is_preload: bool,
+        context: BundledPromptContext<'_>,
     ) -> std::io::Result<String> {
-        Ok(if is_preload {
+        Ok(if context.is_preload {
             self.build_for_preload(args)
         } else {
             self.build(args)

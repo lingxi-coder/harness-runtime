@@ -32,6 +32,16 @@ pub(crate) struct RouteEntry {
     websocket_connect_timeout_ms: Option<u64>,
 }
 
+fn credential_scope(entry: &RouteEntry, profile_name: &str) -> CredentialScope {
+    let scope = CredentialScope::new(entry.provider_id.clone(), profile_name);
+    match &entry.credential {
+        CredentialConfig::HostManaged { id } | CredentialConfig::Static { id } => {
+            scope.with_credential_id(id.clone())
+        }
+        CredentialConfig::None | CredentialConfig::Env { .. } => scope,
+    }
+}
+
 struct ServiceAuthenticator(ModelRuntime);
 
 #[async_trait::async_trait]
@@ -54,6 +64,7 @@ impl lingxi_llm_client::Authenticator for ServiceAuthenticator {
                 }
                 WireAuth::CopilotBearer
                 | WireAuth::ChatGptOAuth
+                | WireAuth::ChatGptPlan
                 | WireAuth::AwsSigV4
                 | WireAuth::AzureToken
                 | WireAuth::None => {
@@ -74,7 +85,12 @@ impl lingxi_llm_client::Authenticator for ServiceAuthenticator {
             return Ok(());
         }
         self.0
-            .authenticate_wire(&profile.profile_name, request, std::time::SystemTime::now())
+            .authenticate_wire(
+                &profile.profile_name,
+                request,
+                std::time::SystemTime::now(),
+                None,
+            )
             .await
             .map_err(crate::execution::wire_error)
     }
@@ -124,6 +140,142 @@ impl ModelRuntime {
             )
             .unwrap_or(entry.protocol),
         )
+    }
+
+    pub(crate) fn fast_account_identity(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<crate::model::fast_admission::Account, LlmError> {
+        let route = self.registry.resolve_in(model, profile)?;
+        let entry = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        let first_party = route.provider_id == ProviderId::AnthropicFirstParty
+            && entry.protocol == ProtocolFamily::AnthropicMessages
+            && entry.base_url.trim_end_matches('/') == "https://api.anthropic.com";
+        let default_model = self
+            .registry
+            .resolve_in("opus", Some(&route.profile_name))
+            .map(|value| value.request_model)
+            .unwrap_or_else(|_| "opus".into());
+        Ok(crate::model::fast_admission::Account {
+            profile: route.profile_name,
+            base_url: entry.base_url.clone(),
+            model: route.request_model,
+            default_model,
+            first_party,
+            credential: None,
+            alternate_api_key: None,
+            oauth_scope: None,
+        })
+    }
+
+    /// Whether the resolved route uses the native first-party provider, wire
+    /// and endpoint. Profile names and model-family guesses are not authority.
+    pub fn is_first_party_route(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<bool, LlmError> {
+        self.fast_account_identity(model, profile)
+            .map(|account| account.first_party)
+    }
+
+    pub(crate) async fn load_fast_account(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<crate::model::fast_admission::Account, LlmError> {
+        let mut account = self.fast_account_identity(model, profile)?;
+        if account.first_party {
+            let entry = self
+                .routes
+                .get(&account.profile)
+                .ok_or(LlmError::ModelUnavailable)?;
+            let mut scope = CredentialScope::new(entry.provider_id.clone(), &account.profile);
+            if let CredentialConfig::HostManaged { id } | CredentialConfig::Static { id } =
+                &entry.credential
+            {
+                scope = scope.with_credential_id(id);
+            }
+            let mut snapshot = match &self.credentials {
+                Some(provider) => provider.anthropic_auth_snapshot(&scope).await,
+                None => Ok(crate::AnthropicAuthSnapshot::default()),
+            }
+            .unwrap_or_default();
+            if let CredentialConfig::Env { var } = &entry.credential {
+                // An environment key selects model auth without suppressing
+                // the host's independent status OAuth snapshot.
+                snapshot.api_key = EnvCredentialProvider::new(var)
+                    .anthropic_auth_snapshot(&scope)
+                    .await
+                    .unwrap_or_default()
+                    .api_key;
+            }
+            account.alternate_api_key = snapshot.api_key.and_then(|credential| match credential {
+                Credential::ApiKey(key) => Some(key),
+                _ => None,
+            });
+            if let Some((oauth_scope, credential @ Credential::AnthropicOAuth { .. })) =
+                snapshot.oauth
+            {
+                account.credential = Some(credential);
+                account.oauth_scope = Some(oauth_scope);
+            } else {
+                account.credential = account.alternate_api_key.clone().map(Credential::ApiKey);
+            }
+        }
+        Ok(account)
+    }
+
+    pub(crate) async fn refresh_fast_account(
+        &self,
+        account: &crate::model::fast_admission::Account,
+    ) -> Result<Option<Credential>, LlmError> {
+        let (Some(provider), Some(rejected), Some(scope)) =
+            (&self.credentials, &account.credential, &account.oauth_scope)
+        else {
+            return Ok(None);
+        };
+        provider.refresh(scope, rejected).await
+    }
+
+    /// Resolve current Fast admission without authentication or transport.
+    pub(crate) fn fast_model_allowed(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<bool, LlmError> {
+        let route = self.registry.resolve_in(model, profile)?;
+        let entry = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        Ok(route_allows_first_party_fast_mode(&route, entry))
+    }
+
+    /// Resolve native effort inputs without encoding, credentials or transport.
+    pub(crate) fn effort_command_snapshot(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<Option<lingxi_core::host::effort::EffortCommandSnapshot>, LlmError> {
+        let route = self
+            .registry
+            .resolve_in(&request.input.model, request.profile.as_deref())?;
+        let entry = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        let protocol = self.protocol_for_model(&request.input.model, request.profile.as_deref())?;
+        Ok(crate::model::effort::command_snapshot(
+            request,
+            protocol,
+            &route.provider_id,
+            &entry.profile,
+            &route.request_model,
+        ))
     }
 
     pub(crate) fn search_profile(
@@ -244,6 +396,34 @@ impl ModelRuntime {
         self.registry.available_models()
     }
 
+    /// Inspect the credential source for the exact selected model/profile.
+    /// Route resolution is shared with requests; authentication is not executed.
+    pub async fn credential_source(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<crate::CredentialSource, LlmError> {
+        let route = self.registry.resolve_in(model, profile)?;
+        let entry = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        if entry.auth == AuthStrategy::None {
+            return Ok(crate::CredentialSource::None);
+        }
+        let scope = credential_scope(entry, &route.profile_name);
+        match &entry.credential {
+            CredentialConfig::None => Ok(crate::CredentialSource::None),
+            CredentialConfig::Env { var } => EnvCredentialProvider::new(var).source(&scope).await,
+            CredentialConfig::Static { .. } | CredentialConfig::HostManaged { .. } => {
+                match &self.credentials {
+                    Some(provider) => provider.source(&scope).await,
+                    None => Ok(crate::CredentialSource::None),
+                }
+            }
+        }
+    }
+
     /// Resolve the selected main route plus an optional same-profile vision delegate.
     pub fn resolve_media_route(
         &self,
@@ -251,6 +431,19 @@ impl ModelRuntime {
         profile: Option<&str>,
     ) -> Result<MediaRoute, LlmError> {
         self.registry.resolve_media_route_in(model, profile)
+    }
+
+    /// Resolve the exact SDK profile used to project a persisted prompt source
+    /// vector and its transient provider cache layout. This is a synchronous
+    /// route lookup only; it does not prepare a request or touch credentials.
+    pub fn prompt_cache_profile(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Option<lingxi_llm_client::protocol::ProviderProfile> {
+        let route = self.registry.resolve_in(model, profile).ok()?;
+        let entry = self.routes.get(&route.profile_name)?;
+        Some(entry.profile.clone())
     }
 
     /// Resolve, validate, encode, and authenticate a request.
@@ -334,7 +527,8 @@ impl ModelRuntime {
         // `validate_capabilities` rejects those blocks independently, so a
         // mid-conversation downgrade (not just a first turn) must strip them from
         // the request that gets validated AND encoded. (streaming / tools /
-        // structured_output stay hard errors — they cannot be dropped safely.)
+        // structured_output stay hard errors unless the explicit experimental
+        // beta policy suppresses an automatic Anthropic JSON schema.)
         let is_reasoning_block = |b: &lingxi_llm_client::protocol::ContentBlock| {
             matches!(
                 b,
@@ -354,11 +548,20 @@ impl ModelRuntime {
             .routes
             .get(&resolved_route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
+        let host_failure = Arc::new(Mutex::new(None));
+        let authenticator = Arc::new(crate::execution::HostAuthenticator::for_request(
+            self.clone(),
+            resolved_route.profile_name.clone(),
+            None,
+            host_failure.clone(),
+        ));
+        let prompt_cache_scope = credential_scope(entry, &resolved_route.profile_name);
         // Fast mode is a first-party Anthropic request property, not a generic
         // Anthropic-wire feature. Resolve the route before encoding and strip
         // it for custom compatible endpoints, cloud transports, and models
         // without the canonical capability. Doing this before authentication
         // is essential for signed Bedrock/Vertex requests.
+        let fast_mode_allowed = route_allows_first_party_fast_mode(&resolved_route, entry);
         let needs_speed_degrade = matches!(
             entry.protocol,
             ProtocolFamily::AnthropicMessages
@@ -367,10 +570,42 @@ impl ModelRuntime {
                 | ProtocolFamily::FoundryClaude
         ) && request.input.service_tier
             == Some(lingxi_llm_client::protocol::ServiceTier::Fast)
-            && !route_allows_first_party_fast_mode(&resolved_route, entry);
+            && !fast_mode_allowed;
 
+        // Evaluate the native structured-output kill switch per selected route,
+        // before capability validation and SDK encoding. Keep the caller's
+        // schema intact so a fallback to another provider can still use it.
+        let extra_body = if matches!(
+            effective_protocol,
+            ProtocolFamily::AnthropicMessages
+                | ProtocolFamily::BedrockClaude
+                | ProtocolFamily::VertexClaude
+                | ProtocolFamily::FoundryClaude
+        ) {
+            crate::service::extra_body_object()?
+        } else {
+            None
+        };
+        let suppress_schema = crate::structured_output::disabled_for(
+            request,
+            effective_protocol,
+            &resolved_route.request_model,
+            resolved_route.capabilities.structured_output,
+            extra_body.as_ref(),
+        );
+        let effort_policy = crate::model::effort::prepare(
+            request,
+            effective_protocol,
+            &resolved_route.provider_id,
+            &entry.profile,
+            &resolved_route.request_model,
+        );
         let mut owned: Option<LlmRequest> = None;
-        if needs_reasoning_degrade || needs_speed_degrade {
+        if needs_reasoning_degrade
+            || needs_speed_degrade
+            || suppress_schema
+            || effort_policy.is_some()
+        {
             let mut r = request.clone();
             if needs_reasoning_degrade {
                 r.input.thinking = None;
@@ -382,6 +617,17 @@ impl ModelRuntime {
             }
             if needs_speed_degrade {
                 r.input.service_tier = None;
+            }
+            if suppress_schema {
+                r.input.output_format = lingxi_llm_client::protocol::OutputFormat::Text;
+            }
+            if effort_policy.is_some() {
+                if let Some(thinking) = r.input.thinking.as_mut() {
+                    thinking.effort = None;
+                    if *thinking == Default::default() {
+                        r.input.thinking = None;
+                    }
+                }
             }
             owned = Some(r);
         }
@@ -509,6 +755,16 @@ impl ModelRuntime {
 
             let request_for_encoding = owned.get_or_insert_with(|| request.clone());
             request_for_encoding.input.system.clear();
+            request_for_encoding
+                .input
+                .prompt_cache
+                .breakpoints
+                .retain(|point| {
+                    !matches!(
+                        point.position,
+                        lingxi_llm_client::protocol::CachePosition::System { .. }
+                    )
+                });
             if let Some(system) = context.system.as_ref() {
                 let projection = project_system_prompt(
                     system,
@@ -559,23 +815,23 @@ impl ModelRuntime {
         };
         let mut profile = entry.profile.clone();
         profile.protocol = crate::upstream::family(&effective_protocol);
-        let host_failure = Arc::new(Mutex::new(None));
         let (wire_draft, mut provider_request) = crate::execution::prepare(
             &self.cache,
             profile,
+            entry.auth,
             &resolved_route,
             encoding_request,
             transport,
-            Arc::new(crate::execution::HostAuthenticator {
-                client: self.clone(),
-                now: authenticate.then_some(now),
-                failure: host_failure.clone(),
-            }),
-            if request.stream {
-                lingxi_llm_client::RequestMode::Stream
-            } else {
-                lingxi_llm_client::RequestMode::Complete
-            },
+            authenticator.clone(),
+            (
+                if request.stream {
+                    lingxi_llm_client::RequestMode::Stream
+                } else {
+                    lingxi_llm_client::RequestMode::Complete
+                },
+                fast_mode_allowed
+                    .then_some(lingxi_llm_client::protocol::CapabilitySupport::Supported),
+            ),
         )
         .await
         .map_err(|error| {
@@ -585,10 +841,30 @@ impl ModelRuntime {
                 .take()
                 .unwrap_or(error)
         })?;
+        provider_request.json_encoding =
+            lingxi_llm_client::exact_json::JsonEncoding::for_protocol(effective_protocol);
+        // Native Anthropic requests omit the default tool choice. Apply this
+        // before authentication so the final body is also the signed body.
+        if matches!(effective_protocol, ProtocolFamily::AnthropicMessages)
+            && encoding_request.input.tool_choice == lingxi_llm_client::protocol::ToolChoice::Auto
+        {
+            if let Some(body) = provider_request.body_json.as_object_mut() {
+                if body.get("tool_choice") == Some(&serde_json::json!({"type": "auto"})) {
+                    body.shift_remove("tool_choice");
+                }
+            }
+        }
         if authenticate {
-            provider_request = self
-                .authenticate_at(entry, &resolved_route.profile_name, provider_request, now)
-                .await?;
+            // Inspection and every later handshake/seal share this draft's
+            // material. Only the initial inspection uses the caller's time;
+            // SDK callbacks sign their final body at the current time.
+            provider_request = Self::authenticate_at(
+                &authenticator,
+                &resolved_route.profile_name,
+                provider_request,
+                now,
+            )
+            .await?;
         }
         if request.stream
             && entry.supports_websockets
@@ -631,6 +907,11 @@ impl ModelRuntime {
             wire_draft: Some(wire_draft),
             wire_call: None,
             registered_attempt: request.execution.model_attempt.is_some(),
+            anthropic_request_kind: request.execution.anthropic_request_kind,
+            stream_fallback: request.execution.stream_fallback,
+            extra_body,
+            effort_policy,
+            fast_mode_allowed,
             route: Route {
                 resolved_route,
                 protocol: effective_protocol,
@@ -837,6 +1118,10 @@ impl ModelRuntime {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         draft
+            .request_mut()
+            .url
+            .clone_from(&prepared.provider_request.url);
+        draft
             .set_json_body(
                 prepared.provider_request.body_json.clone(),
                 &prepared.provider_request.json_string_overrides,
@@ -871,7 +1156,7 @@ impl ModelRuntime {
         request: &LlmRequest,
     ) -> Result<ProviderRequest, LlmError> {
         let (draft, mut host, failure) = self.count_draft(request, None).await?;
-        let call = crate::execution::seal(draft, &host)
+        let call = crate::execution::seal(draft, &host, None)
             .await
             .map_err(|error| {
                 failure
@@ -899,38 +1184,68 @@ impl ModelRuntime {
         let route = self
             .registry
             .resolve_in(&request.input.model, request.profile.as_deref())?;
-        validate_capabilities(request, route.capabilities)?;
         let entry = self
             .routes
             .get(&route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
+        let mut owned;
+        let request = if crate::structured_output::disabled_for(
+            request,
+            entry.protocol,
+            &route.request_model,
+            route.capabilities.structured_output,
+            None,
+        ) {
+            owned = request.clone();
+            owned.input.output_format = lingxi_llm_client::protocol::OutputFormat::Text;
+            &owned
+        } else {
+            request
+        };
+        validate_capabilities(request, route.capabilities)?;
         if !matches!(entry.protocol, ProtocolFamily::AnthropicMessages) {
             return Err(LlmError::InvalidRequest {
                 message: "count_tokens is only available on AnthropicMessages routes".into(),
             });
         }
         let failure = Arc::new(Mutex::new(None));
-        let auth = Arc::new(crate::execution::HostAuthenticator {
-            client: self.clone(),
-            now: None,
-            failure: failure.clone(),
-        });
+        let auth = Arc::new(crate::execution::HostAuthenticator::for_request(
+            self.clone(),
+            route.profile_name.clone(),
+            None,
+            failure.clone(),
+        ));
         let (draft, mut host) = crate::execution::prepare(
             &self.cache,
             entry.profile.clone(),
+            entry.auth,
             &route,
             request,
             transport,
             auth,
-            lingxi_llm_client::RequestMode::CountTokens,
+            (lingxi_llm_client::RequestMode::CountTokens, None),
         )
         .await?;
-        crate::model::betas::apply_beta_header(
-            &mut host,
+        let betas = crate::model::betas::assemble_beta_header(
             crate::model::betas::Provider::Anthropic,
             crate::model::betas::Endpoint::CountTokens,
             &crate::model::betas::BetaContext::for_model(route.request_model),
         );
+        host.body_json["betas"] = serde_json::Value::Array(
+            betas
+                .split(',')
+                .filter(|beta| !beta.is_empty())
+                .map(|beta| serde_json::Value::String(beta.into()))
+                .collect(),
+        );
+        lingxi_llm_client::providers::anthropic::request_policy::normalize_message_parameters(
+            &mut host.body_json,
+            &mut host.headers,
+            &mut host.json_string_overrides,
+            &mut host.url,
+            lingxi_llm_client::RequestMode::CountTokens,
+        )
+        .map_err(crate::upstream::error)?;
         Ok((draft, host, failure))
     }
     pub(crate) async fn count_tokens_exact(
@@ -954,7 +1269,7 @@ impl ModelRuntime {
         // Bound preparation/authentication, dispatch and response collection together.
         tokio::time::timeout(std::time::Duration::from_secs(120), async {
             let (draft, host, failure) = self.count_draft(request, Some(transport.clone())).await?;
-            let call = crate::execution::seal(draft, &host)
+            let call = crate::execution::seal(draft, &host, None)
                 .await
                 .map_err(|error| {
                     failure
@@ -1023,11 +1338,7 @@ impl ModelRuntime {
             .get(&route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
         let failure = Arc::new(Mutex::new(None));
-        let auth = crate::execution::HostAuthenticator {
-            client: self.clone(),
-            now: None,
-            failure: failure.clone(),
-        };
+        let auth = crate::execution::HostAuthenticator::live(self.clone(), None, failure.clone());
         let http = transport.clone();
         let mut profile = entry.profile.clone();
         profile.auth = lingxi_llm_client::protocol::AuthStrategy::Bearer;
@@ -1057,11 +1368,7 @@ impl ModelRuntime {
             .get(&route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
         let failure = Arc::new(Mutex::new(None));
-        let auth = crate::execution::HostAuthenticator {
-            client: self.clone(),
-            now: None,
-            failure: failure.clone(),
-        };
+        let auth = crate::execution::HostAuthenticator::live(self.clone(), None, failure.clone());
         let http = transport.clone();
         let mut profile = entry.profile.clone();
         profile.auth = lingxi_llm_client::protocol::AuthStrategy::Bearer;
@@ -1075,8 +1382,7 @@ impl ModelRuntime {
 
     /// Preparation inspection uses the same SDK authenticator as live sends.
     async fn authenticate_at(
-        &self,
-        _entry: &RouteEntry,
+        authenticator: &crate::execution::HostAuthenticator,
         profile_name: &str,
         mut request: ProviderRequest,
         now: std::time::SystemTime,
@@ -1092,7 +1398,9 @@ impl ModelRuntime {
             body: request.wire_body_bytes()?.into(),
             timeout: None,
         };
-        self.authenticate_wire(profile_name, &mut wire, now).await?;
+        authenticator
+            .authenticate_at(profile_name, &mut wire, now)
+            .await?;
         request.headers = wire.headers.into_iter().collect();
         if let Ok(body) = serde_json::from_slice(&wire.body) {
             request.body_json = body;
@@ -1109,30 +1417,41 @@ impl ModelRuntime {
         entry: &RouteEntry,
         profile_name: &str,
     ) -> Result<Option<Credential>, LlmError> {
+        let scope = credential_scope(entry, profile_name);
         let credential = match &entry.credential {
             CredentialConfig::None => return Ok(None),
             CredentialConfig::Env { var } => {
-                EnvCredentialProvider::new(var.clone())
-                    .load(&CredentialScope::new(
-                        entry.provider_id.clone(),
-                        profile_name,
-                    ))
-                    .await?
+                EnvCredentialProvider::new(var.clone()).load(&scope).await?
             }
-            CredentialConfig::Static { id } | CredentialConfig::HostManaged { id } => {
+            CredentialConfig::Static { .. } | CredentialConfig::HostManaged { .. } => {
                 self.credentials
                     .as_ref()
                     .ok_or(LlmError::Authentication {
                         message: String::new(),
                     })?
-                    .load(
-                        &CredentialScope::new(entry.provider_id.clone(), profile_name)
-                            .with_credential_id(id.clone()),
-                    )
+                    .load(&scope)
                     .await?
             }
         };
         Ok(Some(credential))
+    }
+
+    pub(crate) async fn capture_request_credential(
+        &self,
+        snapshot: &crate::execution::RequestCredentialSnapshot,
+    ) -> Result<Option<Credential>, LlmError> {
+        let entry = self
+            .routes
+            .get(&snapshot.profile)
+            .ok_or(LlmError::ModelUnavailable)?;
+        if entry.auth == AuthStrategy::None {
+            return Ok(None);
+        }
+        snapshot
+            .credential
+            .get_or_try_init(|| self.load_credential(entry, &snapshot.profile))
+            .await
+            .cloned()
     }
 }
 
@@ -1140,10 +1459,7 @@ fn route_allows_first_party_fast_mode(route: &crate::ResolvedRoute, entry: &Rout
     route.provider_id == ProviderId::AnthropicFirstParty
         && entry.protocol == ProtocolFamily::AnthropicMessages
         && entry.base_url.trim_end_matches('/') == "https://api.anthropic.com"
-        && lingxi_core::host::model_capabilities::has_capability(
-            &route.request_model,
-            lingxi_core::host::model_capabilities::ModelCapability::FastMode,
-        )
+        && crate::model::fast::model_allowed(&route.request_model)
 }
 
 fn validate_provider_profile(provider: &crate::ProviderProfile) -> Result<(), LlmError> {
@@ -1219,6 +1535,17 @@ pub struct PreparedLlmCall {
     registered_attempt: bool,
     pub route: Route,
     pub provider_request: ProviderRequest,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedPromptCacheContext {
+    pub scope: CredentialScope,
+    /// Generation bound around the selected credential await. When stale is
+    /// true, this remains the pre-await epoch so late observations are dropped.
+    pub account_epoch: u64,
+    pub account_epoch_stale: bool,
+    pub is_subscriber: bool,
+    pub pending_overage: Arc<Mutex<Option<crate::PendingPromptCacheObservation>>>,
 }
 
 /// Keep provider execution canonical. History projection is the service edge.
@@ -1383,16 +1710,20 @@ impl ModelRuntime {
             .ok_or_else(|| LlmError::InvalidRequest {
                 message: "request already sealed".into(),
             })?;
-        let call = crate::execution::seal(draft, &prepared.provider_request)
-            .await
-            .map_err(|error| {
-                prepared
-                    .host_failure
-                    .lock()
-                    .expect("host failure")
-                    .take()
-                    .unwrap_or(error)
-            })?;
+        let call = crate::execution::seal(
+            draft,
+            &prepared.provider_request,
+            Some(&prepared.route.resolved_route.provider_id),
+        )
+        .await
+        .map_err(|error| {
+            prepared
+                .host_failure
+                .lock()
+                .expect("host failure")
+                .take()
+                .unwrap_or(error)
+        })?;
         prepared.provider_request.headers = call.request().headers.iter().cloned().collect();
         if let Ok(body) = serde_json::from_slice(&call.request().body) {
             prepared.provider_request.body_json = body;
@@ -1419,6 +1750,7 @@ impl ModelRuntime {
                 message: "request already sealed".into(),
             })?;
         let http = draft.request_mut();
+        http.url.clone_from(&prepared.provider_request.url);
         http.headers = prepared
             .provider_request
             .headers
@@ -1490,19 +1822,36 @@ impl ModelRuntime {
         profile: &str,
         request: &mut lingxi_llm_client::HttpRequest,
         now: std::time::SystemTime,
+        snapshot: Option<&crate::execution::RequestCredentialSnapshot>,
     ) -> Result<(), LlmError> {
         use lingxi_llm_client::auth::{apply_credential, ClientIdentity, CredentialRef};
+        if snapshot.is_some_and(|snapshot| snapshot.profile != profile) {
+            return Err(LlmError::Authentication {
+                message: "credential snapshot belongs to another provider profile".into(),
+            });
+        }
         let entry = self.routes.get(profile).ok_or(LlmError::ModelUnavailable)?;
         if entry.auth == AuthStrategy::None {
             return Ok(());
         }
-        let Some(credential) = self.load_credential(entry, profile).await? else {
+        let live;
+        let credential = if let Some(snapshot) = snapshot {
+            snapshot
+                .credential
+                .get_or_try_init(|| self.load_credential(entry, profile))
+                .await?
+        } else {
+            live = self.load_credential(entry, profile).await?;
+            &live
+        };
+        let Some(credential) = credential else {
             return Ok(());
         };
-        let material = match &credential {
+        let material = match credential {
             Credential::ApiKey(secret) | Credential::BearerToken(secret) => {
                 CredentialRef::Token(secret)
             }
+            Credential::AnthropicOAuth { access_token, .. } => CredentialRef::Token(access_token),
             Credential::AwsSigV4 {
                 access_key_id,
                 secret_access_key,
@@ -1540,6 +1889,12 @@ impl ModelRuntime {
 }
 
 impl PreparedLlmCall {
+    pub(crate) async fn before_computer_submit(&self) -> Result<(), LlmError> {
+        if let Some(submission) = self.computer_submission.as_ref() {
+            submission.before_submit().await?;
+        }
+        Ok(())
+    }
     /// Exact model prices retained before the physical generation dispatch.
     pub fn pricing_snapshot(&self) -> Option<lingxi_llm_client::FrozenPricing> {
         self.wire_call
@@ -1555,19 +1910,107 @@ impl PreparedLlmCall {
                 .ok()
             })
     }
-    pub(crate) async fn before_computer_submit(&self) -> Result<(), LlmError> {
-        if let Some(submission) = self.computer_submission.as_ref() {
-            submission.before_submit().await?;
-        }
-        Ok(())
-    }
 }
+
+#[cfg(test)]
+#[path = "client_auth_snapshot_tests.rs"]
+mod auth_snapshot_tests;
 
 #[cfg(test)]
 mod shared_client_regression {
     use super::*;
+
+    #[derive(Debug)]
+    struct MetadataOnlyProvider;
+
+    impl CredentialProvider for MetadataOnlyProvider {
+        fn source<'a>(
+            &'a self,
+            scope: &'a CredentialScope,
+        ) -> crate::BoxFuture<'a, Result<crate::CredentialSource, LlmError>> {
+            Box::pin(async move {
+                assert_eq!(
+                    scope.credential_id.as_deref(),
+                    Some(scope.profile_name.as_str())
+                );
+                Ok(crate::CredentialSource::Environment {
+                    variable: format!("{}_KEY", scope.profile_name),
+                })
+            })
+        }
+
+        fn load<'a>(
+            &'a self,
+            _scope: &'a CredentialScope,
+        ) -> crate::BoxFuture<'a, Result<Credential, LlmError>> {
+            panic!("credential source inspection must not load or refresh credentials");
+        }
+    }
+
     #[tokio::test]
-    async fn canonical_openai_service_tier_survives_host_anthropic_fast_policy() {
+    async fn credential_source_uses_exact_profile_and_never_executes_authentication() {
+        let profiles = ["alpha", "beta"].into_iter().map(|profile| {
+            serde_json::json!({
+                "provider_id":"open_ai", "profile_name":profile,
+                "base_url":"https://api.openai.com/v1", "protocol":"open_ai_responses",
+                "auth":"api_key", "credential":{"type":"host_managed","id":profile},
+                "models":[{"display_model":"shared-model","request_model":"shared-model","billing_model":"shared-model",
+                    "capabilities":{"streaming":true,"tools":false,"vision":false,"documents":false,"reasoning":false,"structured_output":false}}]
+            })
+        }).collect::<Vec<_>>();
+        let config = serde_json::from_value(serde_json::json!({"providers":profiles})).unwrap();
+        let client = ModelRuntime::from_config(config)
+            .unwrap()
+            .with_credential_provider(Arc::new(MetadataOnlyProvider));
+        for profile in ["alpha", "beta"] {
+            assert_eq!(
+                client
+                    .credential_source("shared-model", Some(profile))
+                    .await
+                    .unwrap(),
+                crate::CredentialSource::Environment {
+                    variable: format!("{profile}_KEY")
+                }
+            );
+        }
+        assert!(client
+            .credential_source("shared-model", Some("missing"))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn credential_source_without_provider_metadata_is_unknown_not_absent() {
+        let config: ClientConfig = serde_json::from_value(serde_json::json!({"providers":[{
+            "provider_id":"open_ai", "profile_name":"snapshot", "base_url":"https://api.openai.com/v1",
+            "protocol":"open_ai_responses", "auth":"api_key", "credential":{"type":"host_managed","id":"snapshot-key"},
+            "models":[{"display_model":"shared-model","request_model":"shared-model","billing_model":"shared-model",
+                "capabilities":{"streaming":true,"tools":false,"vision":false,"documents":false,"reasoning":false,"structured_output":false}}]
+        }]})).unwrap();
+        #[derive(Debug)]
+        struct UnsupportedMetadata;
+        impl CredentialProvider for UnsupportedMetadata {
+            fn load<'a>(
+                &'a self,
+                _: &'a CredentialScope,
+            ) -> crate::BoxFuture<'a, Result<Credential, LlmError>> {
+                panic!("metadata must not execute the provider");
+            }
+        }
+        let client = ModelRuntime::from_config(config)
+            .unwrap()
+            .with_credential_provider(Arc::new(UnsupportedMetadata));
+        assert_eq!(
+            client
+                .credential_source("shared-model", Some("snapshot"))
+                .await
+                .unwrap(),
+            crate::CredentialSource::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn canonical_openai_controls_survive_host_anthropic_wire_policy() {
         let config: ClientConfig = serde_json::from_value(serde_json::json!({"providers":[{
             "provider_id":"open_ai", "profile_name":"openai", "base_url":"https://api.openai.com/v1", "protocol":"open_ai_responses", "auth":"none", "credential":{"type":"none"},
             "models":[{"display_model":"gpt-5","request_model":"gpt-5","billing_model":"gpt-5","capabilities":{"streaming":true,"tools":true,"vision":false,"documents":false,"reasoning":true,"structured_output":true}}]
@@ -1575,10 +2018,23 @@ mod shared_client_regression {
         let client = ModelRuntime::from_config(config).unwrap();
         let mut request = LlmRequest::new("gpt-5").with_user_text("test");
         request.input.service_tier = Some(lingxi_llm_client::protocol::ServiceTier::Fast);
+        request.input.tools.push(
+            serde_json::from_value(serde_json::json!({
+                "name": "Read",
+                "description": "Read a file",
+                "input_schema": {"type": "object", "properties": {}}
+            }))
+            .unwrap(),
+        );
         let prepared = client.prepare(&request).await.unwrap();
         // This configured SDK catalog row uses FastWire::Fast. The host must
         // preserve the SDK choice instead of removing the selected tier.
         assert_eq!(prepared.provider_request.body_json["service_tier"], "fast");
+        assert_eq!(prepared.provider_request.body_json["tool_choice"], "auto");
+        assert_eq!(
+            prepared.provider_request.body_json["tools"][0]["name"],
+            "Read"
+        );
     }
 
     #[tokio::test]

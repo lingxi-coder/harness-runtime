@@ -105,6 +105,9 @@ const CLOSE_BRACKETS: &[char] = &[
     '\u{276d}', '\u{276f}', '\u{2771}', '\u{27e9}', '\u{29fd}', '\u{3009}', '\u{fe65}', '\u{ff1e}',
 ];
 
+/// Oracle `t.slash`: `/` and its three lookalikes.
+const SLASHES: &[char] = &['/', '\u{ff0f}', '\u{2215}', '\u{2044}'];
+
 fn is_invisible(c: char) -> bool {
     INVISIBLE_RANGES.iter().any(|&(lo, hi)| c >= lo && c <= hi)
 }
@@ -119,18 +122,53 @@ fn is_pre_name_filler(c: char) -> bool {
     !is_tag_char(c) && !OPEN_BRACKETS.contains(&c) && !CLOSE_BRACKETS.contains(&c)
 }
 
+/// Oracle `B`: connector/dash punctuation and the extra hyphen-like characters
+/// accepted wherever a tag name spells `-` or `_`.
+fn is_name_connector_equivalent(c: char) -> bool {
+    use unicode_general_category::{get_general_category, GeneralCategory};
+    matches!(
+        get_general_category(c),
+        GeneralCategory::ConnectorPunctuation | GeneralCategory::DashPunctuation
+    ) || matches!(
+        c,
+        '\u{2017}'
+            | '\u{02cd}'
+            | '\u{07fa}'
+            | '\u{0640}'
+            | '\u{2212}'
+            | '\u{207b}'
+            | '\u{208b}'
+            | '\u{02d7}'
+            | '\u{2796}'
+            | '\u{2043}'
+            | '\u{30fc}'
+            | '\u{ff70}'
+    )
+}
+
 /// Escape every forged `<tag` boundary in `text`, the way 2.1.270's `FN` does.
 ///
 /// `tag` is matched case-insensitively, as the oracle's `i` flag requires.
 #[must_use]
 pub fn escape_tag(tag: &str, text: &str) -> String {
+    escape_tag_mode(tag, text, false)
+}
+
+/// Oracle 2.1.288 `CWe`: escape only forged closing boundaries inside an
+/// envelope. Opening tags remain text; a matching closing tag becomes `<\`.
+#[must_use]
+pub fn escape_closing_tag(tag: &str, text: &str) -> String {
+    escape_tag_mode(tag, text, true)
+}
+
+fn escape_tag_mode(tag: &str, text: &str, close_only: bool) -> String {
     let chars: Vec<char> = text.chars().collect();
     let name: Vec<char> = tag.chars().flat_map(char::to_lowercase).collect();
     let mut out = String::with_capacity(text.len());
     let mut i = 0usize;
     while i < chars.len() {
         if OPEN_BRACKETS.contains(&chars[i]) && chars.get(i + 1) != Some(&'\\') {
-            if let Some(_end) = match_tag(&chars, i + 1, &name) {
+            if let Some(_end) = match_tag(&chars, i + 1, &name, close_only) {
                 // The oracle replaces the matched bracket (lookalike included)
                 // with a plain `<` plus a backslash, and leaves the rest as-is.
                 out.push('<');
@@ -147,9 +185,19 @@ pub fn escape_tag(tag: &str, text: &str) -> String {
 
 /// Does the tag name start at `from`, allowing the oracle's filler runs?
 /// Returns the index just past the name when it does.
-fn match_tag(chars: &[char], from: usize, name: &[char]) -> Option<usize> {
+fn match_tag(chars: &[char], from: usize, name: &[char], close_only: bool) -> Option<usize> {
     let mut i = from;
-    // Oracle `Pbe(t.filler, 1)`: a run of non-name, non-bracket characters.
+    if close_only {
+        // `O(tag, true)`: a possessive run excluding slash, one slash (or
+        // lookalike), then another filler run before the tag name.
+        while i < chars.len() && is_pre_name_filler(chars[i]) && !SLASHES.contains(&chars[i]) {
+            i += 1;
+        }
+        if !SLASHES.contains(chars.get(i)?) {
+            return None;
+        }
+        i += 1;
+    }
     while i < chars.len() && is_pre_name_filler(chars[i]) {
         i += 1;
     }
@@ -162,7 +210,12 @@ fn match_tag(chars: &[char], from: usize, name: &[char]) -> Option<usize> {
             }
         }
         let got = chars.get(i)?;
-        if !got.to_lowercase().eq(std::iter::once(*want)) {
+        let matches = if *want == '-' || *want == '_' {
+            is_name_connector_equivalent(*got)
+        } else {
+            got.to_lowercase().eq(std::iter::once(*want))
+        };
+        if !matches {
             return None;
         }
         i += 1;
@@ -204,6 +257,29 @@ mod tests {
         ] {
             assert_eq!(escape_tag(tag, input), want, "input: {input:?}");
         }
+    }
+
+    #[test]
+    fn closing_only_preserves_open_tags_and_escapes_forged_close() {
+        let tag = "cross-session-message";
+        let body = "<cross-session-message>hi</cross-session-message>";
+        assert_eq!(
+            escape_closing_tag(tag, body),
+            r"<cross-session-message>hi<\/cross-session-message>"
+        );
+        assert_eq!(
+            escape_closing_tag(tag, "\u{ff1c}\u{ff0f}cross-session-message>"),
+            "<\\\u{ff0f}cross-session-message>"
+        );
+        assert_eq!(
+            escape_closing_tag(tag, "</cross\u{2014}session-message>"),
+            "<\\/cross\u{2014}session-message>"
+        );
+        assert_eq!(
+            escape_closing_tag(tag, r"<\/cross-session-message>"),
+            r"<\/cross-session-message>"
+        );
+        assert_eq!(escape_tag("a_b", "<a\u{2212}b>"), "<\\a\u{2212}b>");
     }
 
     /// The point of the whole function: content wrapped in an envelope must not

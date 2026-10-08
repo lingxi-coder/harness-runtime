@@ -68,12 +68,14 @@ pub fn with_scripted_compactor(
 /// upstream failure so the orchestrator's max-turns guard is exercised.
 pub struct MockApiClient {
     queue: Arc<Mutex<VecDeque<HistoryResponse>>>,
+    captured_requests: Arc<Mutex<Vec<crate::OrchestratorApiRequest>>>,
+    captured_models: Arc<Mutex<Vec<String>>>,
     captured_msgs: Arc<Mutex<Vec<Vec<ConversationMessage>>>>,
     captured_systems: Arc<Mutex<Vec<Option<String>>>>,
     captured_tools: Arc<Mutex<Vec<Vec<serde_json::Value>>>>,
     captured_prewarm: Arc<Mutex<Vec<MockPrewarmCall>>>,
     close_responses_ws_count: Arc<Mutex<u32>>,
-    /// Task 7: seeds passed to `messages_create_seeded`; one entry per call.
+    /// Explicit stream-fallback seeds; one entry per seeded request.
     captured_seeds: Arc<Mutex<Vec<u8>>>,
     /// Task 8 (llm-runtime future-work batch 3): the FULL internal rate-limit
     /// snapshot returned by `last_rate_limit_full()`. A `std::sync::Mutex`
@@ -96,6 +98,7 @@ pub struct MockApiClient {
     /// trait default); tests that exercise provider-qualified model-ref parsing
     /// seed it with the rows they need.
     model_listings: std::sync::Mutex<Vec<lingxi_core::host::ModelListing>>,
+    effort_snapshot: std::sync::Mutex<Option<lingxi_core::host::effort::EffortCommandSnapshot>>,
 }
 
 /// Captured startup Responses WebSocket prewarm call.
@@ -111,14 +114,27 @@ pub struct MockPrewarmCall {
     pub messages: Vec<ConversationMessage>,
     /// Wire tool schemas included in the prewarm request.
     pub tools: Vec<serde_json::Value>,
+    /// Native per-request policy flag for global system-prompt caching.
+    pub skip_global_cache_for_system_prompt: bool,
 }
 
 impl MockApiClient {
+    /// Supply authoritative native selected-route state. Synthetic mock routes
+    /// otherwise use the caller's explicit model identity, without native settings.
+    pub fn set_effort_command_snapshot(
+        &self,
+        snapshot: Option<lingxi_core::host::effort::EffortCommandSnapshot>,
+    ) {
+        *self.effort_snapshot.lock().unwrap() = snapshot;
+    }
+
     /// Construct a mock with a script of `responses` returned in order.
     #[must_use]
     pub fn new(responses: Vec<HistoryResponse>) -> Self {
         Self {
             queue: Arc::new(Mutex::new(VecDeque::from(responses))),
+            captured_requests: Arc::new(Mutex::new(Vec::new())),
+            captured_models: Arc::new(Mutex::new(Vec::new())),
             captured_msgs: Arc::new(Mutex::new(Vec::new())),
             captured_systems: Arc::new(Mutex::new(Vec::new())),
             captured_tools: Arc::new(Mutex::new(Vec::new())),
@@ -130,6 +146,7 @@ impl MockApiClient {
             fail_with: std::sync::Mutex::new(None),
             rate_limit_error_message: std::sync::Mutex::new(None),
             model_listings: std::sync::Mutex::new(Vec::new()),
+            effort_snapshot: std::sync::Mutex::new(None),
         }
     }
 
@@ -188,9 +205,18 @@ impl MockApiClient {
         *self.close_responses_ws_count.lock().await
     }
 
+    /// Snapshot complete owned requests, including call policy and options.
+    pub async fn captured_requests(&self) -> Vec<crate::OrchestratorApiRequest> {
+        self.captured_requests.lock().await.clone()
+    }
+
     /// Snapshot the captured `msgs` arguments (one entry per `messages_create` call).
     pub async fn captured_msgs(&self) -> Vec<Vec<ConversationMessage>> {
         self.captured_msgs.lock().await.clone()
+    }
+
+    pub async fn captured_models(&self) -> Vec<String> {
+        self.captured_models.lock().await.clone()
     }
 
     /// Snapshot the captured `system` arguments (one entry per call;
@@ -200,8 +226,8 @@ impl MockApiClient {
         self.captured_systems.lock().await.clone()
     }
 
-    /// Task 7: seeds from `messages_create_seeded` calls (one per call).
-    /// Empty when only `messages_create` was called.
+    /// Explicit stream-fallback seeds, including zero.
+    /// Ordinary main requests do not add an entry.
     pub async fn captured_seeds(&self) -> Vec<u8> {
         self.captured_seeds.lock().await.clone()
     }
@@ -214,14 +240,49 @@ impl MockApiClient {
 
 #[async_trait]
 impl OrchestratorApiClient for MockApiClient {
-    async fn messages_create(
+    fn effort_command_snapshot(
         &self,
         _model: &str,
         _profile: Option<&str>,
-        system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+    ) -> Result<Option<lingxi_core::host::effort::EffortCommandSnapshot>, LlmError> {
+        Ok(self.effort_snapshot.lock().unwrap().clone())
+    }
+
+    async fn messages_create(
+        &self,
+        request: crate::OrchestratorApiRequest,
     ) -> Result<HistoryResponse, LlmError> {
+        self.captured_requests.lock().await.push(request.clone());
+        if let crate::OrchestratorApiRequest::Main(request) = &request {
+            if let Some(seed) = request.opts.initial_consecutive_overloaded {
+                self.captured_seeds.lock().await.push(seed);
+            }
+        }
+
+        let (request_model, request_profile, request_system, msgs, tools) = match request {
+            crate::OrchestratorApiRequest::Main(request) => (
+                request.model,
+                request.profile,
+                request.system.map(|system| system.display_text()),
+                request.messages,
+                request.tools,
+            ),
+            crate::OrchestratorApiRequest::HookPrompt(request) => (
+                request.model,
+                request.profile,
+                Some(request.system),
+                request.messages,
+                Vec::new(),
+            ),
+        };
+        let _model = request_model.as_str();
+        let _profile = request_profile.as_deref();
+        let system = request_system.as_deref();
+
+        self.captured_models
+            .lock()
+            .await
+            .push(request_model.clone());
         self.captured_msgs.lock().await.push(msgs);
         self.captured_systems
             .lock()
@@ -236,25 +297,6 @@ impl OrchestratorApiClient for MockApiClient {
         q.pop_front().ok_or_else(|| LlmError::Transport {
             message: "mock script exhausted".into(),
         })
-    }
-
-    /// Task 7: captures the seed for assertion in streaming-fallback tests.
-    async fn messages_create_seeded(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        initial_consecutive_overloaded: u8,
-    ) -> Result<HistoryResponse, LlmError> {
-        self.captured_seeds
-            .lock()
-            .await
-            .push(initial_consecutive_overloaded);
-        // Delegate to the plain seam so the queue logic is reused.
-        self.messages_create(model, profile, system, msgs, tools)
-            .await
     }
 
     /// Task 8: return the snapshot pre-loaded via [`Self::set_rate_limit_full`].
@@ -278,16 +320,18 @@ impl OrchestratorApiClient for MockApiClient {
         &self,
         model: &str,
         profile: Option<&str>,
-        system: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
+        skip_global_cache_for_system_prompt: bool,
     ) -> Result<(), LlmError> {
         self.captured_prewarm.lock().await.push(MockPrewarmCall {
             model: model.to_string(),
             profile: profile.map(str::to_string),
-            system: system.map(str::to_string),
+            system: system.map(|system| system.display_text()),
             messages,
             tools,
+            skip_global_cache_for_system_prompt,
         });
         Ok(())
     }
@@ -334,20 +378,21 @@ pub fn mock_message_response(
 /// the orchestrator's emitted output after wrapping the stream in an `Arc`.
 #[derive(Clone)]
 pub struct MockOutputStream {
+    partial_stream_events: Arc<Mutex<Vec<String>>>,
+    include_partial_stream_events: bool,
     lifecycle_events: Arc<Mutex<Vec<serde_json::Value>>>,
+    model_fallback_frames: Arc<Mutex<Vec<serde_json::Value>>>,
     events: Arc<Mutex<Vec<OutputEvent>>>,
     /// Denial provenance observed via `emit_tool_result_denied`, as
     /// `(tool_use_id, denial_kind)` in emission order.
     ///
-    /// Kept OUT of [`OutputEvent`]: that enum is shared across crates and
-    /// matched exhaustively in several of them, so a new variant would be a
-    /// wide breaking change for a test-only signal. It lives here because the
-    /// trait method is DEFAULTED — without an explicit override the mock would
-    /// silently inherit the default, drop `denial_kind`, and let every
-    /// deny-path test pass no matter what the turn loop computed.
+    /// Kept OUT of [`OutputEvent`] because denial details are a test-only
+    /// diagnostic, not a user-facing output event. The trait method is
+    /// DEFAULTED, so without an explicit override the mock would silently drop
+    /// `denial_kind` and let every deny-path test pass regardless of the value.
     denials: Arc<Mutex<Vec<(lingxi_core::types::ToolUseId, String)>>>,
-    /// Attachments observed via `emit_attachment`, same rationale as `denials`:
-    /// the trait method is DEFAULTED, so without this override the mock would
+    /// Attachments observed via `emit_attachment`. The trait method is
+    /// DEFAULTED, so without this override the mock would
     /// inherit the no-op and every attachment test would pass whether or not
     /// the orchestrator emitted anything.
     attachments: Arc<Mutex<Vec<lingxi_core::host::AttachmentKind>>>,
@@ -368,17 +413,34 @@ impl MockOutputStream {
         self.lifecycle_events.lock().await.clone()
     }
 
+    pub async fn model_fallback_frame_snapshot(&self) -> Vec<serde_json::Value> {
+        self.model_fallback_frames.lock().await.clone()
+    }
+
     /// Construct an empty mock.
     #[must_use]
     pub fn new() -> Self {
         Self {
+            partial_stream_events: Arc::new(Mutex::new(Vec::new())),
+            include_partial_stream_events: false,
             events: Arc::new(Mutex::new(Vec::new())),
             lifecycle_events: Arc::new(Mutex::new(Vec::new())),
+            model_fallback_frames: Arc::new(Mutex::new(Vec::new())),
             denials: Arc::new(Mutex::new(Vec::new())),
             attachments: Arc::new(Mutex::new(Vec::new())),
             compaction_phases: Arc::new(Mutex::new(Vec::new())),
             turn_starts: Arc::new(Mutex::new(0)),
         }
+    }
+
+    #[must_use]
+    pub fn with_partial_stream_events(mut self) -> Self {
+        self.include_partial_stream_events = true;
+        self
+    }
+
+    pub async fn partial_stream_event_snapshot(&self) -> Vec<String> {
+        self.partial_stream_events.lock().await.clone()
     }
 
     /// How many times the orchestrator announced a turn the client did not
@@ -455,6 +517,30 @@ impl Default for MockOutputStream {
 
 #[async_trait]
 impl OutputStream for MockOutputStream {
+    fn wants_partial_stream_events(&self) -> bool {
+        self.include_partial_stream_events
+    }
+
+    async fn emit_stream_event(&self, event_json: &str, _is_message_start: bool) {
+        self.partial_stream_events
+            .lock()
+            .await
+            .push(event_json.to_string());
+    }
+    async fn emit_model_fallback(
+        &self,
+        id: &lingxi_core::types::MessageId,
+        session_id: &lingxi_core::types::SessionId,
+        content: &str,
+        metadata: &lingxi_core::types::ModelFallbackMetadata,
+    ) {
+        self.emit_system_notice(content, false).await;
+        self.model_fallback_frames
+            .lock()
+            .await
+            .push(metadata.sdk_frame(*id, *session_id, content));
+    }
+
     async fn emit_task_lifecycle(&self, event: &serde_json::Value) {
         self.lifecycle_events.lock().await.push(event.clone());
     }
@@ -467,6 +553,30 @@ impl OutputStream for MockOutputStream {
         self.events.lock().await.push(OutputEvent::MessageIdentity {
             message_id: *message_id,
         });
+    }
+
+    async fn emit_user_transcript_row_identity(&self, row_token: &str, uuid: &str) {
+        self.events
+            .lock()
+            .await
+            .push(OutputEvent::UserTranscriptRowIdentity {
+                row_token: row_token.to_string(),
+                uuid: uuid.to_string(),
+            });
+    }
+
+    async fn emit_assistant_transcript_row_uuids(
+        &self,
+        message_id: &lingxi_core::types::MessageId,
+        uuids: &[Option<String>],
+    ) {
+        self.events
+            .lock()
+            .await
+            .push(OutputEvent::AssistantTranscriptRowUuids {
+                message_id: *message_id,
+                uuids: uuids.to_vec(),
+            });
     }
     async fn emit_message_retracted(&self, message_id: &lingxi_core::types::MessageId) {
         self.events
@@ -485,6 +595,27 @@ impl OutputStream for MockOutputStream {
         self.events.lock().await.push(OutputEvent::SystemNotice {
             body: body.to_string(),
             is_error,
+        });
+    }
+    async fn emit_mod_log(&self, plugin: &str, text: &str) {
+        self.events.lock().await.push(OutputEvent::ModLog {
+            plugin: plugin.to_string(),
+            text: text.to_string(),
+        });
+    }
+
+    async fn emit_mod_toast(&self, plugin: &str, text: &str, timeout_ms: u64) {
+        self.events.lock().await.push(OutputEvent::ModToast {
+            plugin: plugin.to_string(),
+            text: text.to_string(),
+            timeout_ms,
+        });
+    }
+
+    async fn emit_mod_status(&self, plugin: &str, text: Option<&str>) {
+        self.events.lock().await.push(OutputEvent::ModStatus {
+            plugin: plugin.to_string(),
+            text: text.map(str::to_string),
         });
     }
     async fn emit_terminal_sequence(&self, seq: &str) {
@@ -807,6 +938,25 @@ impl crate::prompt::MemoryHierarchyProvider for StaticMemoryProvider {
     async fn load(&self, _cwd: &std::path::Path) -> Vec<crate::prompt::MemoryFile> {
         self.files.clone()
     }
+    async fn load_conditional_rules(
+        &self,
+        cwd: &std::path::Path,
+        trigger: &std::path::Path,
+        mode: crate::prompt::memory_block::InstructionFilesMode,
+    ) -> Vec<crate::prompt::MemoryFile> {
+        self.files
+            .iter()
+            .filter(|file| {
+                file.globs.is_some()
+                    && (mode != crate::prompt::memory_block::InstructionFilesMode::ManagedOnly
+                        || file.tier == memory::lingxi_md::LingxiMdTier::Managed)
+                    && crate::prompt::conditional_rules::rule_matches_touched_file(
+                        file, trigger, cwd,
+                    )
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 // ============================================================================
@@ -844,6 +994,15 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 
+type EffortCommandSource = std::sync::Arc<
+    dyn Fn(
+            &str,
+            lingxi_core::host::effort_table::SessionEffort,
+        ) -> Result<Option<lingxi_core::host::effort::EffortCommandSnapshot>, HandleError>
+        + Send
+        + Sync,
+>;
+
 /// Test double for `OrchestratorHandle`.
 ///
 /// Defaults: `current_session_id` returns a stable v4 UUID; all mutators
@@ -879,6 +1038,9 @@ pub struct MockOrchestratorHandle {
     permission_mode: StdMutex<Option<String>>,
     /// Live effort value used by `/effort` command tests.
     effort: StdMutex<Option<String>>,
+    effort_session: StdMutex<lingxi_core::host::effort_table::SessionEffort>,
+    effort_command_source: StdMutex<Option<EffortCommandSource>>,
+    reasoning_default_path: StdMutex<Option<PathBuf>>,
     /// Output-style listing returned by `output_styles`; `None` means this
     /// engine has no prompt-assembly layer (the trait default).
     output_style_listing: StdMutex<Option<lingxi_core::host::OutputStyleListing>>,
@@ -888,6 +1050,7 @@ pub struct MockOrchestratorHandle {
     conversation_controls: StdMutex<Option<lingxi_core::host::ConversationControls>>,
     /// Session-scoped fast-mode flag used by bridge routing tests.
     fast_mode: AtomicBool,
+    ultracode_enabled: AtomicBool,
     /// Session-owned dynamic-workflow gate exposed through the handle.
     dynamic_workflows_gate: lingxi_core::host::session_flags::DynamicWorkflowsGate,
     /// Session-owned workflow-size state exposed through the handle.
@@ -939,12 +1102,33 @@ pub struct MockOrchestratorHandle {
     model_listings: StdMutex<Vec<lingxi_core::host::ModelListing>>,
     /// Local slash-command transcript pairs requested by a host.
     slash_command_transcript: StdMutex<Vec<(String, String)>>,
+    mod_describe_inputs: StdMutex<Vec<serde_json::Value>>,
+    mod_describe_rewrite: StdMutex<Option<(String, String, Option<String>, bool)>>,
     /// Every `body` passed to `emit_background_system_notice`, in call order
     /// (WP6/F006: the Fusion completion sink's best-effort UI notice).
     background_notices: StdMutex<Vec<String>>,
 }
 
 impl MockOrchestratorHandle {
+    /// Supply the explicit session input source used by command tests.
+    pub fn set_effort_command_source<F>(&self, source: F)
+    where
+        F: Fn(
+                &str,
+                lingxi_core::host::effort_table::SessionEffort,
+            )
+                -> Result<Option<lingxi_core::host::effort::EffortCommandSnapshot>, HandleError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        *self.effort_command_source.lock().unwrap() = Some(std::sync::Arc::new(source));
+    }
+    /// Supply an admitted default path without ambient lookup.
+    pub fn set_reasoning_default_settings_path(&self, path: Option<PathBuf>) {
+        *self.reasoning_default_path.lock().unwrap() = path;
+    }
+
     /// Construct a fresh mock with sane defaults.
     #[must_use]
     pub fn new() -> Self {
@@ -961,10 +1145,14 @@ impl MockOrchestratorHandle {
             switch_model_error: StdMutex::new(None),
             permission_mode: StdMutex::new(Some("default".to_string())),
             effort: StdMutex::new(None),
+            effort_session: StdMutex::new(Default::default()),
+            effort_command_source: StdMutex::new(None),
+            reasoning_default_path: StdMutex::new(None),
             output_style_listing: StdMutex::new(None),
             output_style_switches: StdMutex::new(Vec::new()),
             conversation_controls: StdMutex::new(None),
             fast_mode: AtomicBool::new(false),
+            ultracode_enabled: AtomicBool::new(false),
             dynamic_workflows_gate: lingxi_core::host::session_flags::DynamicWorkflowsGate::new(
                 false, false,
             ),
@@ -993,8 +1181,31 @@ impl MockOrchestratorHandle {
             files_in_context: StdMutex::new(Vec::new()),
             model_listings: StdMutex::new(Vec::new()),
             slash_command_transcript: StdMutex::new(Vec::new()),
+            mod_describe_inputs: StdMutex::new(Vec::new()),
+            mod_describe_rewrite: StdMutex::new(None),
             background_notices: StdMutex::new(Vec::new()),
         }
+    }
+
+    /// Replace one command's menu fields when the catalog asks the engine to describe it.
+    pub fn set_mod_describe_rewrite(
+        &self,
+        name: &str,
+        description: &str,
+        argument_hint: Option<&str>,
+        hidden: bool,
+    ) {
+        *self.mod_describe_rewrite.lock().unwrap() = Some((
+            name.to_owned(),
+            description.to_owned(),
+            argument_hint.map(str::to_owned),
+            hidden,
+        ));
+    }
+
+    /// Inputs received from a slash catalog projection.
+    pub fn mod_describe_inputs(&self) -> Vec<serde_json::Value> {
+        self.mod_describe_inputs.lock().unwrap().clone()
     }
 
     /// Make the next `clear_session` call return `ActionFailed(reason)`.
@@ -1184,6 +1395,23 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         self.session_id
     }
 
+    async fn mod_describe_command(&self, mut input: serde_json::Value) -> serde_json::Value {
+        self.mod_describe_inputs.lock().unwrap().push(input.clone());
+        if let Some((name, description, hint, hidden)) = &*self.mod_describe_rewrite.lock().unwrap()
+        {
+            if input.get("command").and_then(serde_json::Value::as_str) == Some(name.as_str()) {
+                input["description"] = serde_json::Value::String(description.clone());
+                input["isHidden"] = serde_json::Value::Bool(*hidden);
+                if let Some(hint) = hint {
+                    input["argumentHint"] = serde_json::Value::String(hint.clone());
+                } else if let Some(object) = input.as_object_mut() {
+                    object.remove("argumentHint");
+                }
+            }
+        }
+        input
+    }
+
     async fn append_slash_command_transcript(
         &self,
         raw: &str,
@@ -1322,6 +1550,14 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         Ok(())
     }
 
+    async fn ultracode_enabled(&self) -> bool {
+        self.ultracode_enabled.load(Ordering::Acquire)
+    }
+    async fn set_ultracode_enabled(&self, enabled: bool) -> Result<(), HandleError> {
+        self.ultracode_enabled.store(enabled, Ordering::Release);
+        Ok(())
+    }
+
     async fn dynamic_workflows_enabled(&self) -> bool {
         self.dynamic_workflows_gate.enabled()
     }
@@ -1387,9 +1623,33 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         Ok(())
     }
 
-    async fn set_effort_level(&self, effort: Option<String>) -> Result<(), HandleError> {
-        *self.effort.lock().unwrap() = effort;
+    async fn set_session_effort(
+        &self,
+        effort: lingxi_core::host::effort_table::SessionEffort,
+    ) -> Result<(), HandleError> {
+        *self.effort.lock().unwrap() = match &effort {
+            lingxi_core::host::effort_table::SessionEffort::Level(serde_json::Value::String(
+                value,
+            )) => Some(value.clone()),
+            _ => None,
+        };
+        *self.effort_session.lock().unwrap() = effort;
         Ok(())
+    }
+    async fn effort_command_snapshot(
+        &self,
+    ) -> Result<Option<lingxi_core::host::effort::EffortCommandSnapshot>, HandleError> {
+        let source = self
+            .effort_command_source
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| HandleError::Unimplemented("effort_command_snapshot".into()))?;
+        let model = self.status_snapshot.lock().unwrap().model.clone();
+        source(&model, self.effort_session.lock().unwrap().clone())
+    }
+    async fn reasoning_default_settings_path(&self) -> Option<PathBuf> {
+        self.reasoning_default_path.lock().unwrap().clone()
     }
 
     async fn set_permission_mode(&self, mode: &str) -> Result<(), HandleError> {
@@ -1545,24 +1805,28 @@ mod tests {
         let r1 = mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "one".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         );
         let r2 = mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "two".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         );
         let mock = MockApiClient::new(vec![r1, r2]);
         let resp1 = mock
-            .messages_create("m", None, None, vec![], vec![])
+            .messages_create(crate::OrchestratorApiRequest::Main(
+                llm_runtime::MessagesCreateRequest::new("m", None, None, vec![], vec![]),
+            ))
             .await
             .expect("first");
         let resp2 = mock
-            .messages_create("m", None, None, vec![], vec![])
+            .messages_create(crate::OrchestratorApiRequest::Main(
+                llm_runtime::MessagesCreateRequest::new("m", None, None, vec![], vec![]),
+            ))
             .await
             .expect("second");
         let LlmContentBlock::Text {
@@ -1587,9 +1851,11 @@ mod tests {
         let r = mock_message_response(vec![], Some("end_turn"));
         let mock = MockApiClient::new(vec![r]);
         let msgs = vec![];
-        mock.messages_create("m", None, None, msgs, vec![])
-            .await
-            .expect("call");
+        mock.messages_create(crate::OrchestratorApiRequest::Main(
+            llm_runtime::MessagesCreateRequest::new("m", None, None, msgs, vec![]),
+        ))
+        .await
+        .expect("call");
         assert_eq!(mock.captured_msgs().await.len(), 1);
     }
 
@@ -1597,7 +1863,9 @@ mod tests {
     async fn mock_exhaustion_returns_server_error() {
         let mock = MockApiClient::new(vec![]);
         let err = mock
-            .messages_create("m", None, None, vec![], vec![])
+            .messages_create(crate::OrchestratorApiRequest::Main(
+                llm_runtime::MessagesCreateRequest::new("m", None, None, vec![], vec![]),
+            ))
             .await
             .expect_err("exhausted");
         assert!(format!("{err}").contains("mock script exhausted"));

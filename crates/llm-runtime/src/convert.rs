@@ -32,6 +32,47 @@ use lingxi_core::types::{
     ContentBlock as ProtoBlock, ConversationMessage, DocumentSource, ImageSource, MediaAnalysis,
 };
 use serde_json::Value;
+use std::collections::HashSet;
+
+/// API-bound conversation blocks retain the identities of the Host messages
+/// that contributed them. The sidecar is removed before provider conversion.
+#[derive(Debug, Clone)]
+pub(crate) struct ConversationMessagesWithSources {
+    pub(crate) messages: Vec<ConversationMessage>,
+    pub(crate) block_sources: Vec<Vec<HashSet<lingxi_core::types::MessageId>>>,
+}
+
+impl ConversationMessagesWithSources {
+    pub(crate) fn new(messages: Vec<ConversationMessage>) -> Self {
+        let block_sources = messages
+            .iter()
+            .map(|message| {
+                let (id, len) = match message {
+                    ConversationMessage::User { id, content, .. }
+                    | ConversationMessage::Assistant { id, content, .. } => {
+                        (Some(*id), content.len())
+                    }
+                    ConversationMessage::System { .. } => (None, 0),
+                };
+                (0..len)
+                    .map(|_| id.into_iter().collect::<HashSet<_>>())
+                    .collect()
+            })
+            .collect();
+        Self {
+            messages,
+            block_sources,
+        }
+    }
+
+    pub(crate) fn contributing_message_ids(&self) -> HashSet<lingxi_core::types::MessageId> {
+        self.block_sources
+            .iter()
+            .flatten()
+            .flat_map(|sources| sources.iter().copied())
+            .collect()
+    }
+}
 
 /// Convert a `Vec<ConversationMessage>` into `Vec<llm_runtime::Message>`.
 ///
@@ -114,30 +155,44 @@ pub fn normalize_messages_for_api_with_tool_search(
     tool_search_enabled: bool,
     available_tool_names: Option<&std::collections::HashSet<String>>,
 ) -> Vec<ConversationMessage> {
+    normalize_messages_for_api_with_tool_search_and_sources(
+        ConversationMessagesWithSources::new(messages),
+        tool_search_enabled,
+        available_tool_names,
+    )
+    .messages
+}
+
+pub(crate) fn normalize_messages_for_api_with_tool_search_and_sources(
+    messages: ConversationMessagesWithSources,
+    tool_search_enabled: bool,
+    available_tool_names: Option<&std::collections::HashSet<String>>,
+) -> ConversationMessagesWithSources {
     // Claude's query path first projects from the most recent compact boundary
     // (including the marker), then drops the transcript-only marker below.
     // Local compaction already replaces the active history, but SDK history
     // replay can deliver pre-boundary messages followed by the boundary, so the
     // slice is required here as a final model-facing invariant.
-    let boundary_index = messages.iter().rposition(|message| {
+    let boundary_index = messages.messages.iter().rposition(|message| {
         matches!(
             message,
             ConversationMessage::System {
                 subtype: Some(subtype),
                 ..
             } if subtype == "compact_boundary"
-        ) || matches!(
-            message,
-            ConversationMessage::System {
-                subtype: None,
-                content,
-                ..
-            } if content == "Conversation compacted"
         )
     });
     let start = boundary_index.unwrap_or(0);
-    let mut out: Vec<ConversationMessage> = Vec::with_capacity(messages.len() - start);
-    for mut msg in messages.into_iter().skip(start) {
+    let mut out = ConversationMessagesWithSources {
+        messages: Vec::with_capacity(messages.messages.len() - start),
+        block_sources: Vec::with_capacity(messages.messages.len() - start),
+    };
+    for (mut msg, mut block_sources) in messages
+        .messages
+        .into_iter()
+        .zip(messages.block_sources)
+        .skip(start)
+    {
         // `stripAdvisorBlocks` (claude-code `claude.ts:1305`): drop
         // `advisor_tool_result` (no advisor beta) and `connector_text` (no
         // encode path — the Anthropic encoder rejects them) before the wire.
@@ -147,12 +202,19 @@ pub fn normalize_messages_for_api_with_tool_search(
         match &mut msg {
             ConversationMessage::User { content, .. }
             | ConversationMessage::Assistant { content, .. } => {
-                content.retain(|b| {
-                    !matches!(
-                        b,
+                let mut retained_content = Vec::with_capacity(content.len());
+                let mut retained_sources = Vec::with_capacity(block_sources.len());
+                for (block, sources) in content.drain(..).zip(block_sources.drain(..)) {
+                    if !matches!(
+                        &block,
                         ProtoBlock::ConnectorText { .. } | ProtoBlock::AdvisorToolResult { .. }
-                    )
-                });
+                    ) {
+                        retained_content.push(block);
+                        retained_sources.push(sources);
+                    }
+                }
+                *content = retained_content;
+                block_sources = retained_sources;
             }
             // Transcript-only markers (the `Conversation compacted` boundary,
             // `compaction/src/boundary.rs`) stay in `session.history` for JSONL
@@ -163,21 +225,37 @@ pub fn normalize_messages_for_api_with_tool_search(
             ConversationMessage::System { .. } => continue,
         }
         if let ConversationMessage::User { content, .. } = &mut msg {
+            let previous_len = content.len();
             normalize_tool_references(content, tool_search_enabled, available_tool_names);
+            if content.len() > previous_len {
+                let sources = block_sources
+                    .iter()
+                    .flat_map(|ids| ids.iter().copied())
+                    .collect();
+                block_sources.resize_with(content.len(), HashSet::new);
+                block_sources[previous_len] = sources;
+            }
         }
-        match (out.last_mut(), msg) {
+        match (
+            out.messages.last_mut(),
+            out.block_sources.last_mut(),
+            msg,
+            block_sources,
+        ) {
             (
                 Some(ConversationMessage::User {
                     content: prev_content,
                     ..
                 }),
+                Some(prev_sources),
                 ConversationMessage::User {
                     content: new_content,
                     ..
                 },
+                new_sources,
             ) => {
-                join_text_at_seam(prev_content, new_content);
-                hoist_tool_results(prev_content);
+                join_text_at_seam(prev_content, prev_sources, new_content, new_sources);
+                hoist_tool_results(prev_content, prev_sources);
             }
             // `mergeAssistantMessages` (claude-code `messages.ts`): the
             // per-content-block assistant lines emitted by the streaming writer
@@ -195,14 +273,19 @@ pub fn normalize_messages_for_api_with_tool_search(
                     content: prev_content,
                     ..
                 }),
+                Some(prev_sources),
                 ConversationMessage::Assistant {
                     content: new_content,
                     ..
                 },
+                new_sources,
             ) => {
-                join_text_at_seam(prev_content, new_content);
+                join_text_at_seam(prev_content, prev_sources, new_content, new_sources);
             }
-            (_, msg) => out.push(msg),
+            (_, _, msg, block_sources) => {
+                out.messages.push(msg);
+                out.block_sources.push(block_sources);
+            }
         }
     }
     out
@@ -248,7 +331,7 @@ fn normalize_tool_references(
                 return true;
             };
             available_tool_names
-                .is_none_or(|available| available.contains(normalize_legacy_tool_name(name)))
+                .is_none_or(|available| available.contains(normalize_tool_name(name)))
         });
         has_surviving_reference |= blocks.iter().any(is_tool_reference);
         if blocks.is_empty() {
@@ -266,26 +349,25 @@ fn normalize_tool_references(
     if tool_search_enabled
         && has_surviving_reference
         && !content.iter().any(
-            |block| matches!(block, ProtoBlock::Text { text } if text.starts_with(TURN_BOUNDARY)),
+            |block| matches!(block, ProtoBlock::Text { text, .. } if text.starts_with(TURN_BOUNDARY)),
         )
     {
         content.push(ProtoBlock::Text {
             text: TURN_BOUNDARY.to_string(),
+            citations: None,
         });
     }
 }
 
 /// Claude's persisted-tool alias normalization used when validating historical
 /// tool_reference blocks against the current catalog.
-/// The full 2.1.218 `W4`/`TOi` legacy tool-name alias map (12 entries). A
+/// Current alias map excludes the removed Agent tool alias. A
 /// tool_reference whose (normalized) name is absent from the available set is
 /// dropped, so every historical alias must be present or valid references get
 /// silently stripped from the API-bound message.
-fn normalize_legacy_tool_name(name: &str) -> &str {
+fn normalize_tool_name(name: &str) -> &str {
     match name {
-        "Task" => "Agent",
         "KillShell" | "KillBash" => "TaskStop",
-        "AgentOutputTool" | "BashOutputTool" | "AgentOutput" | "BashOutput" => "TaskOutput",
         "ListPeers" => "ListAgents",
         "Brief" => "SendUserMessage",
         "ListMcpResources" => "ListMcpResourcesTool",
@@ -304,13 +386,19 @@ fn is_tool_reference(value: &Value) -> bool {
 /// Faithful port of claude-code `joinTextAtSeam` (`utils/messages.ts:2505`):
 /// when `a`'s last block and `b`'s first block are both `Text`, the `'\n'` is
 /// appended to `a`'s last text so no block's leading bytes change.
-fn join_text_at_seam(a: &mut Vec<ProtoBlock>, mut b: Vec<ProtoBlock>) {
-    if let (Some(ProtoBlock::Text { text: last }), Some(ProtoBlock::Text { .. })) =
+fn join_text_at_seam(
+    a: &mut Vec<ProtoBlock>,
+    a_sources: &mut Vec<HashSet<lingxi_core::types::MessageId>>,
+    mut b: Vec<ProtoBlock>,
+    mut b_sources: Vec<HashSet<lingxi_core::types::MessageId>>,
+) {
+    if let (Some(ProtoBlock::Text { text: last, .. }), Some(ProtoBlock::Text { .. })) =
         (a.last_mut(), b.first())
     {
         last.push('\n');
     }
     a.append(&mut b);
+    a_sources.append(&mut b_sources);
 }
 
 /// Stable-partition `ToolResult` blocks to the front, preserving relative order
@@ -319,11 +407,16 @@ fn join_text_at_seam(a: &mut Vec<ProtoBlock>, mut b: Vec<ProtoBlock>) {
 /// Faithful port of claude-code `hoistToolResults` (`utils/messages.ts:2470`):
 /// tool_result blocks must lead the user turn to avoid "tool result must follow
 /// tool use" API errors.
-fn hoist_tool_results(content: &mut [ProtoBlock]) {
-    // Stable sort on a boolean key = stable partition: `false` (tool_result)
-    // sorts before `true` (everything else), and `sort_by_key` preserves the
-    // relative order of equal-keyed elements within each group.
-    content.sort_by_key(|b| !matches!(b, ProtoBlock::ToolResult { .. }));
+fn hoist_tool_results(
+    content: &mut Vec<ProtoBlock>,
+    sources: &mut Vec<HashSet<lingxi_core::types::MessageId>>,
+) {
+    let mut paired = content.drain(..).zip(sources.drain(..)).collect::<Vec<_>>();
+    paired.sort_by_key(|(block, _)| !matches!(block, ProtoBlock::ToolResult { .. }));
+    for (block, block_sources) in paired {
+        content.push(block);
+        sources.push(block_sources);
+    }
 }
 
 /// `ensureToolResultPairing` (claude-code `messages.ts:5133`): repair the
@@ -350,16 +443,26 @@ fn hoist_tool_results(content: &mut [ProtoBlock]) {
 ///   `tool_result` is stripped.
 #[must_use]
 pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
+    ensure_tool_result_pairing_with_sources(ConversationMessagesWithSources::new(messages)).messages
+}
+
+pub(crate) fn ensure_tool_result_pairing_with_sources(
+    messages: ConversationMessagesWithSources,
+) -> ConversationMessagesWithSources {
     use lingxi_core::types::ContentBlock as B;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     const SYNTH: &str = "[Tool result missing due to internal error]";
     const NO_CONTENT: &str = "(no content)";
 
-    let mut result: Vec<ConversationMessage> = Vec::with_capacity(messages.len());
+    let mut result = ConversationMessagesWithSources {
+        messages: Vec::with_capacity(messages.messages.len()),
+        block_sources: Vec::with_capacity(messages.messages.len()),
+    };
     let mut all_seen_tool_use_ids: HashSet<String> = HashSet::new();
     let mut i = 0usize;
-    while i < messages.len() {
-        let msg = &messages[i];
+    while i < messages.messages.len() {
+        let msg = &messages.messages[i];
+        let block_sources = &messages.block_sources[i];
         let ConversationMessage::Assistant {
             id: asst_id,
             content,
@@ -374,33 +477,47 @@ pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<Con
                 is_visible_in_transcript_only,
             } = msg
             {
-                let prev_is_assistant =
-                    matches!(result.last(), Some(ConversationMessage::Assistant { .. }));
+                let prev_is_assistant = matches!(
+                    result.messages.last(),
+                    Some(ConversationMessage::Assistant { .. })
+                );
                 if !prev_is_assistant && content.iter().any(|b| matches!(b, B::ToolResult { .. })) {
-                    let stripped: Vec<B> = content
-                        .iter()
-                        .filter(|b| !matches!(b, B::ToolResult { .. }))
-                        .cloned()
-                        .collect();
+                    let mut stripped = Vec::new();
+                    let mut stripped_sources = Vec::new();
+                    for (block, sources) in
+                        content.iter().cloned().zip(block_sources.iter().cloned())
+                    {
+                        if !matches!(&block, B::ToolResult { .. }) {
+                            stripped.push(block);
+                            stripped_sources.push(sources);
+                        }
+                    }
                     if !stripped.is_empty() {
-                        result.push(ConversationMessage::User {
+                        result.messages.push(ConversationMessage::User {
                             id: *id,
                             content: stripped,
                             is_meta: *is_meta,
                             is_compact_summary: *is_compact_summary,
                             is_visible_in_transcript_only: *is_visible_in_transcript_only,
                         });
-                    } else if result.is_empty() {
-                        result.push(ConversationMessage::user(
+                        result.block_sources.push(stripped_sources);
+                    } else if result.messages.is_empty() {
+                        let sources = block_sources
+                            .iter()
+                            .flat_map(|ids| ids.iter().copied())
+                            .collect();
+                        result.messages.push(ConversationMessage::user(
                             *id,
                             "[Orphaned tool result removed due to conversation resume]".into(),
                         ));
+                        result.block_sources.push(vec![sources]);
                     }
                     i += 1;
                     continue;
                 }
             }
-            result.push(msg.clone());
+            result.messages.push(msg.clone());
+            result.block_sources.push(block_sources.clone());
             i += 1;
             continue;
         };
@@ -415,7 +532,9 @@ pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<Con
 
         let mut seen_tool_use_ids: HashSet<String> = HashSet::new();
         let mut final_content: Vec<B> = Vec::with_capacity(content.len());
-        for block in content {
+        let mut final_sources = Vec::with_capacity(block_sources.len());
+        let mut tool_use_sources = HashMap::new();
+        for (block, sources) in content.iter().zip(block_sources) {
             match block {
                 B::ToolUse { id, .. } => {
                     let s = id.as_str().to_string();
@@ -423,27 +542,40 @@ pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<Con
                         continue;
                     }
                     all_seen_tool_use_ids.insert(s.clone());
-                    seen_tool_use_ids.insert(s);
+                    seen_tool_use_ids.insert(s.clone());
+                    tool_use_sources.insert(s, sources.clone());
                     final_content.push(block.clone());
+                    final_sources.push(sources.clone());
                 }
                 B::ServerToolUse { id, .. } if !server_result_ids.contains(id) => {
                     continue;
                 }
-                _ => final_content.push(block.clone()),
+                _ => {
+                    final_content.push(block.clone());
+                    final_sources.push(sources.clone());
+                }
             }
         }
         if final_content.is_empty() {
+            let sources = block_sources
+                .iter()
+                .flat_map(|ids| ids.iter().copied())
+                .collect();
             final_content.push(B::Text {
                 text: "[Tool use interrupted]".into(),
+                citations: Some(Some(serde_json::json!([]))),
             });
+            final_sources.push(sources);
         }
-        result.push(ConversationMessage::Assistant {
+        result.messages.push(ConversationMessage::Assistant {
             id: *asst_id,
             content: final_content,
             stop_reason: stop_reason.clone(),
         });
+        result.block_sources.push(final_sources);
 
-        let next = messages.get(i + 1);
+        let next = messages.messages.get(i + 1);
+        let next_sources = messages.block_sources.get(i + 1);
         let mut existing_tr_ids: HashSet<String> = HashSet::new();
         let mut has_dup_tr = false;
         if let Some(ConversationMessage::User { content, .. }) = next {
@@ -472,14 +604,18 @@ pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<Con
             continue;
         }
 
-        let synth: Vec<B> = missing
+        let synth: Vec<(B, HashSet<lingxi_core::types::MessageId>)> = missing
             .iter()
-            .map(|mid| B::ToolResult {
-                tool_use_id: lingxi_core::types::ToolUseId::from(mid.clone()),
-                content: SYNTH.to_string(),
-                is_error: true,
-                provider_tool_use_id: None,
-                content_blocks: None,
+            .map(|id| {
+                let sources = tool_use_sources.get(id).cloned().unwrap_or_default();
+                let block = B::ToolResult {
+                    tool_use_id: lingxi_core::types::ToolUseId::from(id.clone()),
+                    content: SYNTH.to_string(),
+                    is_error: Some(true),
+                    provider_tool_use_id: None,
+                    content_blocks: None,
+                };
+                (block, sources)
             })
             .collect();
 
@@ -491,10 +627,14 @@ pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<Con
             is_visible_in_transcript_only,
         }) = next
         {
-            let mut c = content.clone();
+            let mut c = content
+                .iter()
+                .cloned()
+                .zip(next_sources.into_iter().flatten().cloned())
+                .collect::<Vec<_>>();
             if !orphaned.is_empty() || has_dup_tr {
                 let mut seen: HashSet<String> = HashSet::new();
-                c.retain(|b| match b {
+                c.retain(|(b, _)| match b {
                     B::ToolResult { tool_use_id, .. } => {
                         let t = tool_use_id.as_str().to_string();
                         if orphaned.contains(&t) {
@@ -508,38 +648,46 @@ pub fn ensure_tool_result_pairing(messages: Vec<ConversationMessage>) -> Vec<Con
             let mut patched = synth;
             patched.extend(c);
             if !patched.is_empty() {
-                result.push(ConversationMessage::User {
+                result.messages.push(ConversationMessage::User {
                     id: *uid,
-                    content: patched,
+                    content: patched.iter().map(|(block, _)| block.clone()).collect(),
                     is_meta: *is_meta,
                     is_compact_summary: *is_compact_summary,
                     is_visible_in_transcript_only: *is_visible_in_transcript_only,
                 });
+                result
+                    .block_sources
+                    .push(patched.into_iter().map(|(_, sources)| sources).collect());
             } else {
                 // Role-alternation placeholder (claude-code `NO_CONTENT_MESSAGE`,
                 // isMeta: true).
-                result.push(ConversationMessage::User {
+                result.messages.push(ConversationMessage::User {
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![B::Text {
                         text: NO_CONTENT.to_string(),
+                        citations: None,
                     }],
                     is_meta: true,
                     is_compact_summary: false,
                     is_visible_in_transcript_only: false,
                 });
+                result.block_sources.push(vec![HashSet::new()]);
             }
             i += 2;
         } else {
             // Synthetic missing-result message (claude-code createUserMessage,
             // isMeta: true).
             if !synth.is_empty() {
-                result.push(ConversationMessage::User {
+                result.messages.push(ConversationMessage::User {
                     id: lingxi_core::types::MessageId::new(),
-                    content: synth,
+                    content: synth.iter().map(|(block, _)| block.clone()).collect(),
                     is_meta: true,
                     is_compact_summary: false,
                     is_visible_in_transcript_only: false,
                 });
+                result
+                    .block_sources
+                    .push(synth.into_iter().map(|(_, sources)| sources).collect());
             }
             i += 1;
         }
@@ -586,16 +734,19 @@ fn convert_block(block: ProtoBlock) -> Result<LlmBlock, LlmError> {
         ProtoBlock::ProviderContent { protocol, value } => {
             Ok(LlmBlock::ProviderContent { protocol, value })
         }
-        ProtoBlock::Text { text } => Ok(LlmBlock::Text {
+        ProtoBlock::Text { text, citations } => Ok(LlmBlock::Text {
             text,
+            citations,
             cache_control: None,
         }),
         ProtoBlock::TextJsUtf16 {
             text,
             utf16_code_units,
+            citations,
         } => Ok(LlmBlock::TextJsUtf16 {
             text,
             utf16_code_units,
+            citations,
             cache_control: None,
         }),
         ProtoBlock::ToolUse {
@@ -663,6 +814,7 @@ fn convert_block(block: ProtoBlock) -> Result<LlmBlock, LlmError> {
         }),
         ProtoBlock::MediaAnalysis { analysis } => Ok(LlmBlock::Text {
             text: render_media_analysis(&analysis),
+            citations: None,
             cache_control: None,
         }),
     }

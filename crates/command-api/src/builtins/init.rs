@@ -1,11 +1,11 @@
-//! `/init` — returns the locked `OLD_INIT_PROMPT` template as an injected
+//! `/init` — returns the locked `INIT_PROMPT` template as an injected
 //! user message so the next turn analyses the codebase and writes LINGXI.md.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-10-commands-batch-1.md`
 //! Task 8.
 
 use crate::builtin_support::names::core_description;
-use crate::builtins::templates::OLD_INIT_PROMPT;
+use crate::builtins::templates::INIT_PROMPT;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
@@ -31,10 +31,10 @@ impl InitHandler {
 impl BuiltinCommandHandler for InitHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
         telemetry::emit_command_started(cmd_evt::INIT_STARTED);
-        let details = format!("{{\"template_bytes\":{}}}", OLD_INIT_PROMPT.len());
+        let details = format!("{{\"template_bytes\":{}}}", INIT_PROMPT.len());
         telemetry::emit_command_completed(cmd_evt::INIT_COMPLETED, &details);
         CommandResult::InjectMessage {
-            content: OLD_INIT_PROMPT.to_string(),
+            content: INIT_PROMPT.to_string(),
         }
     }
 
@@ -61,7 +61,8 @@ mod tests {
         };
         match h.handle(&args).await {
             CommandResult::InjectMessage { content } => {
-                assert_eq!(content, OLD_INIT_PROMPT);
+                assert_eq!(content, INIT_PROMPT.as_str());
+                assert!(!content.contains("claude.ai/code"));
             }
             other => panic!("expected InjectMessage, got {other:?}"),
         }

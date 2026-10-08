@@ -119,6 +119,12 @@ impl OrchestratorTaskLifecycleHookFirer {
 
 #[async_trait]
 impl TaskLifecycleHookFirer for OrchestratorTaskLifecycleHookFirer {
+    fn subagent_stop_firer(
+        &self,
+        session_id: lingxi_core::types::SessionId,
+    ) -> Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>> {
+        self.hooks.subagent_stop_firer(session_id)
+    }
     async fn fire_task_created(
         &self,
         task_id: &str,

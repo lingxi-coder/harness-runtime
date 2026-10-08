@@ -42,6 +42,11 @@ pub trait SkillListingProvider: Send + Sync {
     /// Return the eligible skill entries (already filtered to model-invocable
     /// prompt skills). May be empty.
     async fn skill_entries(&self) -> Vec<SkillListingEntry>;
+
+    /// Snapshot precommit suggestions using the same eligible skill catalog.
+    async fn bash_precommit_skills(&self) -> tool_api::tool_trait::BashPrecommitSkills {
+        tool_api::tool_trait::BashPrecommitSkills::default()
+    }
 }
 
 /// A provider whose entries are loaded on demand from a host-owned source.
@@ -53,7 +58,17 @@ pub trait SkillListingProvider: Send + Sync {
 pub struct LazySkillListingProvider {
     loader:
         Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Vec<SkillListingEntry>> + Send>> + Send + Sync>,
+    precommit_loader: Option<PrecommitSkillsLoader>,
 }
+
+type PrecommitSkillsLoader = Arc<
+    dyn Fn(
+            Vec<SkillListingEntry>,
+        )
+            -> Pin<Box<dyn Future<Output = tool_api::tool_trait::BashPrecommitSkills> + Send>>
+        + Send
+        + Sync,
+>;
 
 impl LazySkillListingProvider {
     /// Wrap an async loader as a [`SkillListingProvider`].
@@ -67,7 +82,20 @@ impl LazySkillListingProvider {
                 Box::pin(loader())
             },
         );
-        Self { loader }
+        Self {
+            loader,
+            precommit_loader: None,
+        }
+    }
+
+    /// Attach host provenance/settings resolution without changing listing rows.
+    pub fn with_bash_precommit_skills<F, Fut>(mut self, loader: F) -> Self
+    where
+        F: Fn(Vec<SkillListingEntry>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = tool_api::tool_trait::BashPrecommitSkills> + Send + 'static,
+    {
+        self.precommit_loader = Some(Arc::new(move |entries| Box::pin(loader(entries))));
+        self
     }
 }
 
@@ -75,6 +103,13 @@ impl LazySkillListingProvider {
 impl SkillListingProvider for LazySkillListingProvider {
     async fn skill_entries(&self) -> Vec<SkillListingEntry> {
         (self.loader)().await
+    }
+
+    async fn bash_precommit_skills(&self) -> tool_api::tool_trait::BashPrecommitSkills {
+        let Some(loader) = self.precommit_loader.as_ref() else {
+            return tool_api::tool_trait::BashPrecommitSkills::default();
+        };
+        loader(self.skill_entries().await).await
     }
 }
 

@@ -41,6 +41,11 @@ impl Dispatcher {
         self.inner.write().await.insert(name.into(), handler);
     }
 
+    /// Clone the registered local handler without retaining the registry lock.
+    pub async fn get_registered(&self, method: &str) -> Option<BoxedHandler> {
+        self.inner.read().await.get(method).cloned()
+    }
+
     /// Dispatch one peer request. If no handler is registered, returns a
     /// `MethodNotFound` response so the writer side can ship it.
     pub async fn dispatch(&self, req: Request) -> Response {

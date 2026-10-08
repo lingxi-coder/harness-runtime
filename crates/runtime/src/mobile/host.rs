@@ -329,6 +329,10 @@ pub struct MobileRuntime {
     /// synthesize boundary events (`TurnStarted` / `MessageComplete`) and emit
     /// listing replies, so everything rides one outbound channel.
     pub event_sink: Arc<dyn client::adapter::ClientEventSink>,
+    /// In-memory child transcript rows for agents without a durable JSONL
+    /// writer. This shares the live observer's UUID/index allocator and keeps
+    /// full server-fallback API-error envelopes available to snapshots.
+    pub(super) session_agent_transcript_cache: SessionAgentTranscriptCache,
     /// Cloneable handle to the response accumulator behind `output`, retained
     /// so hard turn failures cannot leak partial message blocks into a later
     /// prompt on this long-lived mobile connection.
@@ -437,10 +441,16 @@ pub struct MobileRuntime {
     /// App-owned Agent factory. Each app session receives a separate
     /// ConversationOrchestrator and app-scoped MCP registry.
     pub(crate) app_agent_executor: Arc<dyn LocalAppsAgentExecutor>,
+    pub(crate) parked_agent_restore_inheritance: lingxi_core::host::SubagentInheritance,
+    pub(crate) agent_resume_gate: Arc<dyn lingxi_core::host::fork_resume_gate::ForkResumeGate>,
+    pub(crate) main_report_waker: Arc<crate::main_report_waker::MainReportWakeRouter>,
 }
 
 struct MobileAppAgentExecutor {
     config: OrchestratorConfig,
+    model_profile: Option<String>,
+    model_resolution_context_provider:
+        Arc<dyn agent::model_resolution::ModelResolutionContextProvider>,
     api: Arc<dyn OrchestratorApiClient>,
     streaming_api: Arc<dyn StreamingApiClient>,
     hooks: Arc<hooks::HookExecutorImpl>,
@@ -448,6 +458,7 @@ struct MobileAppAgentExecutor {
     config_home: std::path::PathBuf,
     apps_data_root: std::path::PathBuf,
     local_apps_mcp: Arc<LocalAppsMcpTransport>,
+    projects_session_host: Arc<mcp::projects_session::ProjectsSessionHostContext>,
     mcp_tool_context: BuiltinToolContext,
     agents: Mutex<
         HashMap<
@@ -469,6 +480,10 @@ impl MobileAppAgentExecutor {
     #[allow(clippy::too_many_arguments)]
     fn new(
         config: OrchestratorConfig,
+        model_profile: Option<String>,
+        model_resolution_context_provider: Arc<
+            dyn agent::model_resolution::ModelResolutionContextProvider,
+        >,
         api: Arc<dyn OrchestratorApiClient>,
         streaming_api: Arc<dyn StreamingApiClient>,
         hooks: Arc<hooks::HookExecutorImpl>,
@@ -476,10 +491,13 @@ impl MobileAppAgentExecutor {
         config_home: std::path::PathBuf,
         apps_data_root: std::path::PathBuf,
         local_apps_mcp: Arc<LocalAppsMcpTransport>,
+        projects_session_host: Arc<mcp::projects_session::ProjectsSessionHostContext>,
         mcp_tool_context: BuiltinToolContext,
     ) -> Self {
         Self {
             config,
+            model_profile,
+            model_resolution_context_provider,
             api,
             streaming_api,
             hooks,
@@ -487,6 +505,7 @@ impl MobileAppAgentExecutor {
             config_home,
             apps_data_root,
             local_apps_mcp,
+            projects_session_host,
             mcp_tool_context,
             agents: Mutex::new(HashMap::new()),
         }
@@ -515,7 +534,8 @@ impl MobileAppAgentExecutor {
             .call_budget()
             .ok_or_else(|| "app Agent MCP budget was not attached".to_string())?;
         let registry =
-            McpRegistry::new(Arc::new(scoped) as Arc<dyn lingxi_core::host::McpTransport>);
+            McpRegistry::new(Arc::new(scoped) as Arc<dyn lingxi_core::host::McpTransport>)
+                .with_projects_session_host(self.projects_session_host.clone());
         registry
             .connect(McpServerConfig {
                 name: LOCAL_APPS_REGISTRY_KEY.into(),
@@ -573,7 +593,7 @@ impl MobileAppAgentExecutor {
         config.enable_token_budget = false;
         config.token_budget = None;
         let output = Arc::new(AgentOutputRouter::new());
-        let agent = Arc::new(
+        let agent = ConversationOrchestrator::into_shared(
             ConversationOrchestrator::new_with_streaming(
                 config,
                 self.api.clone(),
@@ -585,10 +605,16 @@ impl MobileAppAgentExecutor {
                 Arc::new(StaticMemoryProvider::empty()),
                 layout.root().join(layout.workspace_rel()),
             )
+            .with_model_resolution_context_provider(self.model_resolution_context_provider.clone())
             .with_session_id(lingxi_core::types::SessionId::new())
             .with_config_home(self.config_home.clone())
             .with_hooks_restricted(true),
         );
+        if let Some(profile) = self.model_profile.as_deref() {
+            agent
+                .seed_initial_model_profile(&self.config.model, profile)
+                .await;
+        }
         let history = local_apps::load_agent_history(&layout, session_id)
             .map_err(|error| error.to_string())?
             .into_iter()
@@ -702,16 +728,34 @@ mod mobile_tool_gate_tests;
 // still reach them via fully-qualified paths). Provider networking uses the
 // shared SDK transport.
 
+#[cfg(test)]
 fn mobile_skill_listing_provider(
     registry: Arc<RwLock<command_api::CommandRegistry>>,
     session_mode: session::jsonl::SessionMode,
     local_app_scope: bool,
     read_file_state: Option<tool_api::read_file_state::ReadFileStateMap>,
 ) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
+    mobile_skill_listing_provider_with_settings(
+        registry,
+        session_mode,
+        local_app_scope,
+        read_file_state,
+        Arc::new(|| false),
+    )
+}
+
+fn mobile_skill_listing_provider_with_settings(
+    registry: Arc<RwLock<command_api::CommandRegistry>>,
+    session_mode: session::jsonl::SessionMode,
+    local_app_scope: bool,
+    read_file_state: Option<tool_api::read_file_state::ReadFileStateMap>,
+    include_code_review_suggestion: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
     // Session state: once a touched file has revealed a conditional skill, a
     // later turn must not hide it again (the read-state map is an LRU, so the
     // matching path can age out).
     let conditional = Arc::new(std::sync::Mutex::new(skill_api::ConditionalSkills::new()));
+    let precommit_registry = registry.clone();
     Arc::new(
         orchestrator::prompt::skill_listing::LazySkillListingProvider::new(move || {
             let registry = registry.clone();
@@ -739,8 +783,6 @@ fn mobile_skill_listing_provider(
                                 | SlashCommandKind::Bundled { .. }
                         )
                     })
-                    // TS `cmd.source !== 'builtin'`.
-                    .filter(|c| c.source != CommandSource::Builtin)
                     // A CONDITIONAL skill (`paths:`) stays out of the listing
                     // until the session has touched a matching file
                     // (claude-code `lhr`).
@@ -767,13 +809,14 @@ fn mobile_skill_listing_provider(
                             )
                     })
                     .filter(|c| command_visible_in_session_mode(c, session_mode))
-                    // TS loadedFrom ∈ {bundled,skills,commands_DEPRECATED} ||
-                    //    hasUserSpecifiedDescription || whenToUse.
+                    // Native Gee eligibility after mobile mode/workspace filtering.
                     .filter(|c| {
-                        matches!(
-                            c.loaded_from.as_deref(),
-                            Some("bundled" | "skills" | "commands_DEPRECATED")
-                        ) || c.has_user_specified_description
+                        c.source == CommandSource::Builtin
+                            || matches!(
+                                c.loaded_from.as_deref(),
+                                Some("bundled" | "skills" | "syncedSkills" | "commands_DEPRECATED")
+                            )
+                            || c.has_user_specified_description
                             || c.when_to_use.is_some()
                     })
                     .map(|c| orchestrator::prompt::skill_listing::SkillListingEntry {
@@ -786,8 +829,30 @@ fn mobile_skill_listing_provider(
                     })
                     .collect()
             }
+        })
+        .with_bash_precommit_skills(move |entries| {
+            let registry = precommit_registry.clone();
+            let include_code_review_suggestion = include_code_review_suggestion();
+            async move {
+                let registry_guard = registry.read().await;
+                crate::skill_prompt::bash_precommit_skills(
+                    &registry_guard,
+                    &entries,
+                    include_code_review_suggestion,
+                )
+            }
         }),
     )
+}
+
+fn mobile_code_review_suggestion_provider(
+    cfg: MobileConfig,
+) -> Arc<dyn Fn() -> bool + Send + Sync> {
+    Arc::new(move || {
+        // cfg.cwd owns the HOST settings root; SessionCwd may name a guest mount.
+        mobile_provider_settings(&cfg)
+            .is_ok_and(|settings| settings.include_code_review_suggestion == Some(true))
+    })
 }
 
 /// Return the exact Host-resolved app id when the session cwd is a Local App
@@ -1178,14 +1243,12 @@ pub enum MobileEngineError {
 /// - the registered foreign [`ClientEventListener`] (re-surfaced via
 ///   [`MobileRuntime::listener`]) that the adapter feeds every translated
 ///   [`client::protocol::events::ClientEvent`].
-
 ///
 /// Both FFI packager crates (`ios-framework` / `android-aar`) RE-EXPORT this
 /// shared host rather than each re-deriving it — that is what keeps iOS and
 /// Android from drifting (plan F3-04). Under the `uniffi` feature this becomes
 /// `#[derive(uniffi::Object)]`.
 ///
-
 /// The connection-scoped adapter sinks (output stream / permission gate /
 /// listener) survive an in-place orchestrator swap on New / Resume (§0.5); F3-05
 /// adds the async `submit` that resolves the parked permission gate from inbound
@@ -1353,7 +1416,16 @@ impl MobileRuntime {
             cwd,
             &session_id.as_uuid().to_string(),
         );
-        self.session_writer.retarget(path).await;
+        // The owned orchestrator switch has already prepared and installed this
+        // session's durable lock. Publish the same target to host consumers;
+        // retargeting only the display path would leave durable appends behind.
+        if let Err(error) = self.session_writer.activate_session_target(
+            session_id,
+            path,
+            std::path::PathBuf::from(cwd),
+        ) {
+            tracing::error!(%error, %session_id, "mobile session transcript authority was not prepared");
+        }
         // Keep the local-apps MCP origin-conversation source in lockstep with
         // the session every retarget (New/Resume/Clear).
         let session_uuid = next_session_id;
@@ -1451,7 +1523,9 @@ impl Drop for MobileEngineHandle {
 fn session_agent_transcript_revision(raw: &[u8]) -> u64 {
     raw.split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
-        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+        .filter_map(|line| std::str::from_utf8(line).ok())
+        .filter_map(|line| lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line).ok())
+        .map(|projection| projection.value)
         .filter_map(|value| value.get("message").cloned())
         .filter_map(|message| {
             serde_json::from_value::<lingxi_core::types::ConversationMessage>(message).ok()
@@ -1463,13 +1537,13 @@ fn session_agent_transcript_event(
     requested_session_id: lingxi_core::types::SessionId,
     current_session_id: lingxi_core::types::SessionId,
     agent_id: String,
-    messages: Vec<client::protocol::message::MessageDto>,
+    messages: Vec<client::protocol::listings::SessionAgentMessageRowDto>,
+    next_message_index: u64,
     revision: u64,
 ) -> Option<ClientEvent> {
     if requested_session_id != current_session_id {
         return None;
     }
-    let next_message_index = messages.len() as u64;
     Some(ClientEvent::SessionAgentTranscript {
         session_id: requested_session_id.as_uuid().to_string(),
         agent_id,
@@ -1477,6 +1551,335 @@ fn session_agent_transcript_event(
         next_message_index,
         revision,
     })
+}
+
+fn parse_session_agent_message_rows(
+    raw: &[u8],
+) -> Result<Vec<client::protocol::listings::SessionAgentMessageRowDto>, String> {
+    parse_session_agent_message_rows_with_identity(raw, |value, message| {
+        Some((
+            value.get("message_index")?.as_u64()?,
+            value
+                .get("uuid")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| message.id().as_uuid().to_string()),
+        ))
+    })
+}
+
+fn parse_main_session_agent_message_rows(
+    raw: &[u8],
+    identities: &session::jsonl::SessionMessageIdentitySnapshot,
+) -> Result<Vec<client::protocol::listings::SessionAgentMessageRowDto>, String> {
+    parse_session_agent_message_rows_with_identity(raw, |value, _message| {
+        let message_uuid = value
+            .get("uuid")
+            .and_then(serde_json::Value::as_str)?
+            .to_owned();
+        let message_index = *identities.by_uuid.get(&message_uuid)?;
+        Some((message_index, message_uuid))
+    })
+}
+
+fn session_agent_message_from_projection(
+    row: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Result<lingxi_core::types::ConversationMessage, String> {
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
+
+    let value = row
+        .value
+        .get("message")
+        .cloned()
+        .ok_or_else(|| "session-agent transcript row omitted its message".to_string())?;
+    let mut message: ConversationMessage = serde_json::from_value(value)
+        .map_err(|error| format!("invalid session-agent message: {error}"))?;
+    let content = match &mut message {
+        ConversationMessage::User { content, .. }
+        | ConversationMessage::Assistant { content, .. } => content,
+        ConversationMessage::System { .. } => return Ok(message),
+    };
+    for (index, block) in content.iter_mut().enumerate() {
+        let pointer = format!("/message/content/{index}/text");
+        let Some(code_units) = row.string_units(&pointer) else {
+            continue;
+        };
+        let ContentBlock::Text { text, citations } = block else {
+            return Err(format!(
+                "session-agent exact text points to a non-text block at {pointer}"
+            ));
+        };
+        if String::from_utf16_lossy(&code_units) != *text {
+            return Err(format!(
+                "session-agent exact text display does not match {pointer}"
+            ));
+        }
+        *block = ContentBlock::TextJsUtf16 {
+            text: text.clone(),
+            utf16_code_units: code_units,
+            citations: citations.clone(),
+        };
+    }
+    Ok(message)
+}
+
+async fn session_identity_snapshot_for_path(
+    writer: &session::jsonl::JsonlWriter,
+    transcript_path: &std::path::Path,
+) -> Result<session::jsonl::SessionMessageIdentitySnapshot, String> {
+    match tokio::fs::symlink_metadata(transcript_path).await {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Err(format!(
+                "transcript is not a regular file: {}",
+                transcript_path.display()
+            ));
+        }
+        Ok(metadata) if metadata.len() > 0 => writer
+            .bootstrap_session_message_identity_snapshot(transcript_path)
+            .await
+            .map_err(|error| error.to_string()),
+        Ok(_) => writer
+            .read_session_message_identity_snapshot(transcript_path)
+            .await
+            .map_err(|error| error.to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => writer
+            .read_session_message_identity_snapshot(transcript_path)
+            .await
+            .map_err(|error| error.to_string()),
+        Err(error) => Err(format!(
+            "could not inspect transcript {}: {error}",
+            transcript_path.display()
+        )),
+    }
+}
+
+#[cfg(test)]
+mod session_identity_import_tests {
+    use super::session_identity_snapshot_for_path;
+    use session::jsonl::{JsonlWriter, SessionMessageIdentitySnapshot};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn metadata_only_new_session_bootstraps_before_first_message_without_rewriting_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let transcript_path = directory.path().join("session.jsonl");
+        let filesystem: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+            platform_posix::fs::PosixFileSystem::new(directory.path().to_path_buf()),
+        );
+        let writer = JsonlWriter::new(transcript_path.clone(), filesystem);
+        let anchor = concat!(
+            "{\"type\":\"custom-title\",\"customTitle\":\"New\",\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"mobileEmptySession\":1}\n",
+            "{\"type\":\"session-mode\",\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"sessionMode\":\"code\"}\n"
+        );
+        std::fs::write(&transcript_path, anchor).unwrap();
+
+        let imported = session_identity_snapshot_for_path(&writer, &transcript_path)
+            .await
+            .unwrap();
+        assert_eq!(imported, SessionMessageIdentitySnapshot::default());
+        assert_eq!(std::fs::read_to_string(&transcript_path).unwrap(), anchor);
+
+        let row = session::jsonl::reader::route_lines(
+            r#"{"type":"user","uuid":"first-message","parentUuid":null,"sessionId":"11111111-2222-3333-4444-555555555555","timestamp":"2026-10-04T12:00:00.000Z","cwd":"/workspace","version":"test","isSidechain":false,"userType":"external","message":{"role":"user","content":"hello"}}"#,
+        )
+        .messages_in_order
+        .into_iter()
+        .next()
+        .unwrap();
+        writer.append(&row).await.unwrap();
+        let after_first_message = session_identity_snapshot_for_path(&writer, &transcript_path)
+            .await
+            .unwrap();
+        assert_eq!(after_first_message.by_uuid["first-message"], 0);
+        assert_eq!(after_first_message.next_message_index, 1);
+    }
+
+    #[tokio::test]
+    async fn resumed_native_transcript_keeps_bytes_and_exposes_original_indices() {
+        let directory = tempfile::tempdir().unwrap();
+        let transcript_path = directory.path().join("session.jsonl");
+        let filesystem: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+            platform_posix::fs::PosixFileSystem::new(directory.path().to_path_buf()),
+        );
+        let writer = JsonlWriter::new(transcript_path.clone(), filesystem);
+        let native = concat!(
+            "{\"type\":\"user\",\"uuid\":\"resume-user\",\"parentUuid\":null,\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"timestamp\":\"2026-10-04T12:00:00.000Z\",\"cwd\":\"/workspace\",\"version\":\"test\",\"isSidechain\":false,\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
+            "{\"type\":\"assistant\",\"uuid\":\"resume-assistant\",\"parentUuid\":\"resume-user\",\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"timestamp\":\"2026-10-04T12:00:01.000Z\",\"cwd\":\"/workspace\",\"version\":\"test\",\"isSidechain\":false,\"message\":{\"role\":\"assistant\",\"content\":\"world\"}}\n"
+        );
+        std::fs::write(&transcript_path, native).unwrap();
+
+        let imported = session_identity_snapshot_for_path(&writer, &transcript_path)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&transcript_path).unwrap(), native);
+        assert_eq!(imported.by_uuid["resume-user"], 0);
+        assert_eq!(imported.by_uuid["resume-assistant"], 1);
+        assert_eq!(imported.next_message_index, 2);
+    }
+
+    #[tokio::test]
+    async fn missing_and_empty_paths_do_not_create_identity_sidecars() {
+        let directory = tempfile::tempdir().unwrap();
+        let transcript_path = directory.path().join("session.jsonl");
+        let filesystem: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+            platform_posix::fs::PosixFileSystem::new(directory.path().to_path_buf()),
+        );
+        let writer = JsonlWriter::new(transcript_path.clone(), filesystem);
+        let empty = session_identity_snapshot_for_path(&writer, &transcript_path)
+            .await
+            .unwrap();
+        assert_eq!(empty, SessionMessageIdentitySnapshot::default());
+
+        std::fs::write(&transcript_path, "").unwrap();
+        let empty = session_identity_snapshot_for_path(&writer, &transcript_path)
+            .await
+            .unwrap();
+        assert_eq!(empty, SessionMessageIdentitySnapshot::default());
+        let sidecar = transcript_path.with_file_name(format!("session.jsonl{}-message-identities", branding::DOT_DIR));
+        assert!(!sidecar.exists());
+    }
+}
+
+fn parse_session_agent_message_rows_with_identity(
+    raw: &[u8],
+    mut identity_for: impl FnMut(
+        &serde_json::Value,
+        &lingxi_core::types::ConversationMessage,
+    ) -> Option<(u64, String)>,
+) -> Result<Vec<client::protocol::listings::SessionAgentMessageRowDto>, String> {
+    let mut rows = Vec::new();
+    let mut tool_index = client::adapter::turn::ToolUseIndex::default();
+    for line in raw
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let line = std::str::from_utf8(line)
+            .map_err(|error| format!("invalid session-agent transcript UTF-8: {error}"))?;
+        let projection = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line)
+            .map_err(|error| format!("invalid session-agent transcript row: {error}"))?;
+        let value = &projection.value;
+        // Source-attachment sidecars retain a duplicate `message` projection
+        // beside their payload; they are not another conversation row.
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("attachment") {
+            continue;
+        }
+        let Some(message_value) = value.get("message") else {
+            continue;
+        };
+        if message_value.is_null() {
+            continue;
+        }
+        let message = session_agent_message_from_projection(&projection)?;
+        if matches!(
+            &message,
+            lingxi_core::types::ConversationMessage::System {
+                subtype: Some(subtype),
+                ..
+            } if subtype.starts_with("agent_")
+        ) || !session_agent_conversation_is_visible(&message)
+        {
+            continue;
+        }
+        let (message_index, message_uuid) = identity_for(value, &message).ok_or_else(|| {
+            "session-agent message row lacks its stable identity index".to_string()
+        })?;
+        let message =
+            client::adapter::lowering::lower_conversation_message_with(&message, &mut tool_index);
+        rows.push(client::protocol::listings::SessionAgentMessageRowDto {
+            message_index,
+            message_uuid,
+            message,
+            api_error_json: value
+                .get("server_fallback_api_error_json")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| {
+                    (value.get("isApiErrorMessage") == Some(&serde_json::Value::Bool(true)))
+                        .then(|| serde_json::to_string(value).ok())
+                        .flatten()
+                }),
+        });
+    }
+    Ok(rows)
+}
+
+#[cfg(test)]
+mod session_agent_exact_utf16_tests {
+    use super::*;
+
+    #[test]
+    fn hidden_exact_tool_context_rows_are_valid_transcript_entries() {
+        let message_id = lingxi_core::types::MessageId::new();
+        let mut row =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!({
+                "message_index":0,
+                "uuid":message_id.as_uuid().to_string(),
+                "message":{
+                    "role":"user",
+                    "id":message_id,
+                    "content":[{"type":"text","text":"ctx�"}],
+                    "is_meta":true,
+                    "is_compact_summary":false,
+                    "is_visible_in_transcript_only":false,
+                },
+                "source_attachment":{"content":["ctx�"]},
+            }));
+        row.strings.extend([
+            lingxi_core::types::utf16_json::Utf16JsonString {
+                pointer: "/message/content/0/text".into(),
+                code_units: vec![0x0063, 0x0074, 0x0078, 0xd800],
+            },
+            lingxi_core::types::utf16_json::Utf16JsonString {
+                pointer: "/source_attachment/content/0".into(),
+                code_units: vec![0x0063, 0x0074, 0x0078, 0xd800],
+            },
+        ]);
+        let raw = format!("{}\n", row.to_json_string().unwrap());
+
+        assert!(
+            parse_session_agent_message_rows(raw.as_bytes())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(session_agent_transcript_revision(raw.as_bytes()), 1);
+    }
+}
+
+async fn read_session_agent_next_message_index(
+    fs: &dyn lingxi_core::host::FileSystem,
+    path: &std::path::Path,
+) -> Result<u64, ClientError> {
+    let root = path.parent().ok_or_else(|| ClientError::Rejected {
+        message: "session-agent transcript has no parent directory".into(),
+    })?;
+    let filename = path.file_name().ok_or_else(|| ClientError::Rejected {
+        message: "session-agent transcript has no filename".into(),
+    })?;
+    let mut metadata_path = filename.to_os_string();
+    metadata_path.push(".meta");
+    let metadata_path = std::path::PathBuf::from(metadata_path);
+    let file = fs
+        .read_file_rooted_no_follow_window(root, &metadata_path, None, None)
+        .await
+        .map_err(|error| ClientError::Rejected {
+            message: format!("read session-agent message index failed: {error}"),
+        })?;
+    if file.truncated {
+        return Err(ClientError::Rejected {
+            message: "session-agent message index is truncated".into(),
+        });
+    }
+    let metadata: serde_json::Value =
+        serde_json::from_str(&file.content).map_err(|error| ClientError::Rejected {
+            message: format!("parse session-agent message index failed: {error}"),
+        })?;
+    metadata
+        .get("next_message_index")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| ClientError::Rejected {
+            message: "session-agent index metadata omitted next_message_index".into(),
+        })
 }
 
 fn session_agent_id_from_path(path: &std::path::Path) -> Option<String> {
@@ -1784,7 +2187,7 @@ fn live_session_agent_activity(
         lingxi_core::types::ConversationMessage::Assistant { content, .. }
         | lingxi_core::types::ConversationMessage::User { content, .. } => {
             content.iter().find_map(|block| match block {
-                lingxi_core::types::ContentBlock::Text { text } if !text.is_empty() => {
+                lingxi_core::types::ContentBlock::Text { text, .. } if !text.is_empty() => {
                     Some(text.chars().take(160).collect())
                 }
                 lingxi_core::types::ContentBlock::ToolUse { name, .. } => Some(name.clone()),
@@ -1815,12 +2218,23 @@ struct BoundSessionAgentMeta {
     persistent: bool,
 }
 
+#[derive(Clone, Default)]
+pub(super) struct SessionAgentTranscriptRows {
+    rows: Vec<client::protocol::listings::SessionAgentMessageRowDto>,
+    next_message_index: u64,
+    revision: u64,
+}
+
+pub(super) type SessionAgentTranscriptCache =
+    Arc<tokio::sync::Mutex<HashMap<String, SessionAgentTranscriptRows>>>;
+
 struct MobileSessionAgentObserver {
     event_sink: Arc<dyn client::adapter::ClientEventSink>,
     session_uuid: Arc<std::sync::Mutex<String>>,
     bound_agents: tokio::sync::Mutex<HashMap<String, BoundSessionAgentMeta>>,
     tool_indexes: tokio::sync::Mutex<HashMap<String, client::adapter::turn::ToolUseIndex>>,
     message_indexes: tokio::sync::Mutex<HashMap<String, u64>>,
+    transcript_cache: SessionAgentTranscriptCache,
 }
 
 impl MobileSessionAgentObserver {
@@ -1834,6 +2248,7 @@ impl MobileSessionAgentObserver {
             bound_agents: tokio::sync::Mutex::new(HashMap::new()),
             tool_indexes: tokio::sync::Mutex::new(HashMap::new()),
             message_indexes: tokio::sync::Mutex::new(HashMap::new()),
+            transcript_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -1889,6 +2304,11 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                     .lock()
                     .await
                     .insert(agent_id.to_string(), initial_message_index);
+                {
+                    let mut cache = self.transcript_cache.lock().await;
+                    let rows = cache.entry(agent_id.to_string()).or_default();
+                    rows.next_message_index = rows.next_message_index.max(initial_message_index);
+                }
                 self.event_sink
                     .emit(ClientEvent::SessionAgentUpdated {
                         session_id,
@@ -1904,6 +2324,24 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                         },
                     })
                     .await;
+            }
+            lingxi_core::host::subagent_spawn::SubagentObservation::MessageRow {
+                agent_id,
+                message,
+                message_index,
+            } => {
+                let agent_key = agent_id.to_string();
+                let mut indexes = self.message_indexes.lock().await;
+                let next = indexes.entry(agent_key).or_default();
+                *next = (*next).max(message_index);
+                drop(indexes);
+                Box::pin(self.on_event(
+                    lingxi_core::host::subagent_spawn::SubagentObservation::Message {
+                        agent_id,
+                        message,
+                    },
+                ))
+                .await;
             }
             lingxi_core::host::subagent_spawn::SubagentObservation::Message {
                 agent_id,
@@ -1963,12 +2401,25 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                     *next = next.saturating_add(1);
                     current
                 };
+                let row = client::protocol::listings::SessionAgentMessageRowDto {
+                    message_index,
+                    message_uuid: message.id().as_uuid().to_string(),
+                    message: dto,
+                    api_error_json: None,
+                };
+                {
+                    let mut cache = self.transcript_cache.lock().await;
+                    let rows = cache.entry(agent_key.clone()).or_default();
+                    rows.next_message_index =
+                        rows.next_message_index.max(message_index.saturating_add(1));
+                    rows.revision = rows.revision.saturating_add(1);
+                    rows.rows.push(row.clone());
+                }
                 self.event_sink
                     .emit(ClientEvent::SessionAgentMessage {
                         session_id: bound.session_id.clone(),
                         agent_id: agent_key.clone(),
-                        message_index,
-                        message: dto,
+                        row,
                     })
                     .await;
                 self.event_sink
@@ -1984,6 +2435,77 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for MobileSessionA
                             latest_activity: live_session_agent_activity(&message),
                             updated_at_ms: Some(unix_time_ms()),
                         },
+                    })
+                    .await;
+            }
+            lingxi_core::host::subagent_spawn::SubagentObservation::ServerFallbackTombstone {
+                agent_id,
+                message,
+                display_only,
+            } => {
+                let agent_key = agent_id.to_string();
+                let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
+                    return;
+                };
+                {
+                    let mut cache = self.transcript_cache.lock().await;
+                    if let Some(rows) = cache.get_mut(&agent_key) {
+                        rows.rows
+                            .retain(|row| row.message_uuid != message.uuid.as_uuid().to_string());
+                        rows.revision = rows.revision.saturating_add(1);
+                    }
+                }
+                self.event_sink
+                    .emit(ClientEvent::SessionAgentTombstone {
+                        session_id: bound.session_id,
+                        agent_id: agent_key,
+                        message_uuid: message.uuid.as_uuid().to_string(),
+                        display_only,
+                    })
+                    .await;
+            }
+            lingxi_core::host::subagent_spawn::SubagentObservation::ServerFallbackApiErrorRow {
+                agent_id,
+                row,
+                message_index,
+            } => {
+                let agent_key = agent_id.to_string();
+                let Some(bound) = self.bound_agents.lock().await.get(&agent_key).cloned() else {
+                    return;
+                };
+                let message = row.query_message();
+                let dto = {
+                    let mut indexes = self.tool_indexes.lock().await;
+                    let index = indexes.entry(agent_key.clone()).or_default();
+                    client::adapter::lowering::lower_conversation_message_with(&message, index)
+                };
+                let message_index = {
+                    let mut indexes = self.message_indexes.lock().await;
+                    let next = indexes.entry(agent_key.clone()).or_default();
+                    *next = (*next).max(message_index.saturating_add(1));
+                    message_index
+                };
+                let row_dto = client::protocol::listings::SessionAgentMessageRowDto {
+                    message_index,
+                    message_uuid: row.uuid.as_uuid().to_string(),
+                    message: dto,
+                    api_error_json: Some(
+                        serde_json::to_string(&row).expect("fallback API-error row serializes"),
+                    ),
+                };
+                {
+                    let mut cache = self.transcript_cache.lock().await;
+                    let rows = cache.entry(agent_key.clone()).or_default();
+                    rows.next_message_index =
+                        rows.next_message_index.max(message_index.saturating_add(1));
+                    rows.revision = rows.revision.saturating_add(1);
+                    rows.rows.push(row_dto.clone());
+                }
+                self.event_sink
+                    .emit(ClientEvent::SessionAgentMessage {
+                        session_id: bound.session_id,
+                        agent_id: agent_key,
+                        row: row_dto,
                     })
                     .await;
             }
@@ -2494,6 +3016,9 @@ impl TurnLifecycleListener {
         matches!(
             event,
             ClientEvent::SystemNotice { .. }
+                | ClientEvent::UiLog { .. }
+                | ClientEvent::UiToast { .. }
+                | ClientEvent::UiStatus { .. }
                 | ClientEvent::TextDelta { .. }
                 | ClientEvent::ToolUseStarted { .. }
                 | ClientEvent::ToolHeartbeat { .. }
@@ -2587,11 +3112,14 @@ impl ClientEventListener for TurnLifecycleListener {
         };
 
         if should_forward {
-            let durable_identity = active.as_ref().and_then(|turn| {
-                turn.turn_id
-                    .filter(|_| !turn.session_id.is_empty())
-                    .map(|turn_id| (turn.session_id.as_str(), turn_id))
-            });
+            let durable_identity = active
+                .as_ref()
+                .filter(|turn| !turn.is_quiescing())
+                .and_then(|turn| {
+                    turn.turn_id
+                        .filter(|_| !turn.session_id.is_empty())
+                        .map(|turn_id| (turn.session_id.as_str(), turn_id))
+                });
             let is_recovery_event = matches!(
                 event,
                 ClientEvent::TurnRecoveryState { .. } | ClientEvent::TurnEventReplay { .. }
@@ -2690,14 +3218,14 @@ impl ClientEventListener for TurnLifecycleListener {
                     ),
                     _ => return None,
                 };
-                match self.durable_turns.as_ref()?.transition(
+                match self.durable_turns.as_ref()?.transition_if_live(
                     session_id,
                     turn_id,
                     state,
                     safe_to_resume,
                     reason,
                 ) {
-                    Ok(snapshot) => Some(snapshot),
+                    Ok(snapshot) => snapshot,
                     Err(DurableTurnStoreError::Terminal { .. }) => None,
                     Err(error) => {
                         tracing::warn!(%error, session_id, turn_id, "mobile: failed to transition durable turn");
@@ -2947,10 +3475,32 @@ impl MobileEngineHandle {
             .is_some_and(|turn| turn.cancel.is_cancelled())
     }
 
-    async fn retarget_session_writer(&self, session_id: lingxi_core::types::SessionId, cwd: &str) {
+    async fn retarget_session_writer(
+        &self,
+        session_id: lingxi_core::types::SessionId,
+        cwd: &str,
+    ) -> Result<(), ClientError> {
         self.inner
             .retarget_session_context(&self.lingxi_home, session_id, cwd)
             .await;
+        let transcript_path = orchestrator::transcript_paths::main_transcript_path(
+            &self.lingxi_home,
+            cwd,
+            &session_id.as_uuid().to_string(),
+        );
+        if self.inner.session_writer.active_path() != transcript_path {
+            return Err(ClientError::Internal {
+                message: format!(
+                    "session transcript identity import failed: writer did not activate {}",
+                    transcript_path.display()
+                ),
+            });
+        }
+        session_identity_snapshot_for_path(&self.inner.session_writer, &transcript_path)
+            .await
+            .map_err(|error| ClientError::Internal {
+                message: format!("session transcript identity import failed: {error}"),
+            })?;
         if let Some(scheduler) = &self.session_cron {
             if let Err(error) = scheduler
                 .set_session_id(session_id.as_uuid().to_string())
@@ -2971,6 +3521,25 @@ impl MobileEngineHandle {
                 "failed to retarget managed Local App MCP tools"
             );
         }
+        if let Err(error) = self.inner.orchestrator.recover_main_reports().await {
+            tracing::warn!(%error, "could not recover reports for the resumed mobile session");
+        }
+        let subagents_dir =
+            orchestrator::transcript_paths::subagents_dir(&self.lingxi_home, cwd, &session_uuid);
+        for (agent_id, outcome) in crate::parked_agent_restore::restore_parked_agents_in_registry(
+            &subagents_dir,
+            self.inner.task_registry.clone(),
+            self.inner.agent_resume_gate.as_ref(),
+            &self.inner.parked_agent_restore_inheritance,
+            self.inner.orchestrator.permission_mode(),
+        )
+        .await
+        {
+            if let crate::parked_agent_restore::RestoreOutcome::Failed(error) = outcome {
+                tracing::warn!(%agent_id, %error, "mobile parked agent restore failed");
+            }
+        }
+        Ok(())
     }
 
     async fn recorded_permission_mode(&self, session_id: uuid::Uuid, cwd: &str) -> Option<String> {
@@ -3103,6 +3672,11 @@ impl MobileEngineHandle {
 
     async fn persist_session_permission_mode(&self, mode: &str) -> Result<(), ClientError> {
         let path = self.inner.session_writer.active_path();
+        session_identity_snapshot_for_path(&self.inner.session_writer, &path)
+            .await
+            .map_err(|error| ClientError::Internal {
+                message: format!("session transcript identity import failed: {error}"),
+            })?;
         if !path.exists() {
             let session_id = path
                 .file_stem()
@@ -3126,13 +3700,24 @@ impl MobileEngineHandle {
                     message: format!("persist session mode failed: {error}"),
                 })?;
         }
+        session_identity_snapshot_for_path(&self.inner.session_writer, &path)
+            .await
+            .map_err(|error| ClientError::Internal {
+                message: format!("session transcript identity import failed: {error}"),
+            })?;
         self.inner
             .session_writer
             .append_permission_mode(mode)
             .await
             .map_err(|error| ClientError::Internal {
                 message: format!("persist session permission mode failed: {error}"),
-            })
+            })?;
+        session_identity_snapshot_for_path(&self.inner.session_writer, &path)
+            .await
+            .map_err(|error| ClientError::Internal {
+                message: format!("session transcript identity import failed: {error}"),
+            })?;
+        Ok(())
     }
 
     async fn has_mobile_empty_session_anchor(&self, session_id: uuid::Uuid, cwd: &str) -> bool {
@@ -3290,7 +3875,7 @@ impl MobileEngineHandle {
                     .local_apps_llm
                     .set_model(current_model.model, current_model.model_profile);
                 self.retarget_session_writer(lingxi_core::types::SessionId::from_uuid(uuid), &cwd)
-                    .await;
+                    .await?;
                 self.inner
                     .workflow_checkpoints
                     .adopt_session(
@@ -3398,7 +3983,7 @@ impl MobileEngineHandle {
                     .local_apps_llm
                     .set_model(current_model.model, current_model.model_profile);
                 self.retarget_session_writer(lingxi_core::types::SessionId::from_uuid(uuid), &cwd)
-                    .await;
+                    .await?;
                 self.inner
                     .workflow_checkpoints
                     .adopt_session(
@@ -4889,6 +5474,89 @@ impl MobileEngineHandle {
             ClientCommand::CancelAskUserQuestion { request_id } => {
                 self.resolve_ask_user_question(request_id, None).await
             }
+            ClientCommand::UiRender {
+                request_id,
+                request_json,
+            } => {
+                let request =
+                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_render");
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiClientModule { request_id, plugin } => {
+                self.emit_mod_ui_control_result(
+                    request_id,
+                    Ok(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                        serde_json::json!({
+                            "subtype": "ui_client_module",
+                            "plugin": plugin,
+                        }),
+                    )),
+                )
+                .await
+            }
+            ClientCommand::UiMessage {
+                request_id,
+                request_json,
+            } => {
+                let request = client::adapter::turn::parse_mod_ui_control_request(
+                    &request_json,
+                    "ui_message",
+                );
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiClientFault {
+                request_id,
+                request_json,
+            } => {
+                let request = client::adapter::turn::parse_mod_ui_control_request(
+                    &request_json,
+                    "ui_client_fault",
+                );
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiClientPress {
+                request_id,
+                request_json,
+            } => {
+                let request = client::adapter::turn::parse_mod_ui_control_request(
+                    &request_json,
+                    "ui_client_press",
+                );
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiPress {
+                request_id,
+                request_json,
+            } => {
+                let request =
+                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_press");
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiInput {
+                request_id,
+                request_json,
+            } => {
+                let request =
+                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_input");
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiSelect {
+                request_id,
+                request_json,
+            } => {
+                let request =
+                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_select");
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiClientOperation {
+                request_id,
+                operation_json,
+            } => {
+                let operation =
+                    client::adapter::turn::parse_mod_ui_client_operation(&operation_json);
+                self.emit_mod_ui_client_operation_result(request_id, operation)
+                    .await
+            }
             command => Box::pin(self.submit_impl(command)).await,
         }
     }
@@ -5348,9 +6016,11 @@ impl MobileEngineHandle {
                         .map(|failure| format!("failed to store provider credential: {failure}"))
                 };
                 let applied = error.is_none();
-                let credential_previews = applied
-                    .then(|| HashMap::from([(provider_id.clone(), credential_preview)]))
-                    .unwrap_or_default();
+                let credential_previews = if applied {
+                    HashMap::from([(provider_id.clone(), credential_preview)])
+                } else {
+                    HashMap::new()
+                };
                 self.event_sink
                     .emit(ClientEvent::ProviderCredentialStatus {
                         operation_id,
@@ -5536,7 +6206,7 @@ impl MobileEngineHandle {
                     }
                 }
                 let after = self.capture_slash_authority().await;
-                self.emit_slash_authority_changes(&before, &after).await;
+                self.emit_slash_authority_changes(&before, &after).await?;
                 Ok(())
             }
 
@@ -5736,7 +6406,7 @@ impl MobileEngineHandle {
                         message: format!("clear_session failed: {e}"),
                     })?;
                 self.retarget_session_writer(handle.current_session_id().await, &self.session_cwd)
-                    .await;
+                    .await?;
                 self.event_sink.emit(ClientEvent::SessionEnded).await;
                 let _ = self
                     .session_lifecycle_tx
@@ -5889,7 +6559,7 @@ impl MobileEngineHandle {
                     })?;
                 let new_session_id = handle.current_session_id().await;
                 self.retarget_session_writer(new_session_id, &self.session_cwd)
-                    .await;
+                    .await?;
                 self.inner
                     .session_writer
                     .append_mobile_empty_session(&new_session_id.as_uuid().to_string(), "新对话")
@@ -6576,7 +7246,6 @@ impl MobileEngineHandle {
     /// Test a provider endpoint without exposing a stored credential to the
     /// foreign host or mutating the live engine configuration.
     ///
-
     /// The request uses each provider's model-list endpoint because it verifies
     /// DNS/TLS, authentication, and the selected model without consuming
     /// inference tokens. An optional draft credential takes precedence over the
@@ -6738,6 +7407,50 @@ impl MobileEngineHandle {
 }
 
 impl MobileEngineHandle {
+    /// Dispatch one non-turn Mod UI query directly to the currently mounted
+    /// session handle. These commands bypass the live-turn/transition gate and
+    /// report a response on the connection sink with their original correlator.
+    async fn emit_mod_ui_control_result(
+        &self,
+        request_id: String,
+        request: Result<lingxi_core::types::utf16_json::Utf16JsonProjection, String>,
+    ) -> Result<(), ClientError> {
+        let result = match request {
+            Ok(request) => {
+                let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                handle.mod_ui_control(request).await
+            }
+            Err(error) => Err(lingxi_core::host::HandleError::ActionFailed(error)),
+        };
+        self.connection_sink
+            .emit(client::adapter::turn::mod_ui_control_result_event(
+                request_id, result,
+            ))
+            .await;
+        Ok(())
+    }
+
+    /// Route one host-local UI VM operation to the current session handle.
+    async fn emit_mod_ui_client_operation_result(
+        &self,
+        request_id: String,
+        operation: Result<lingxi_core::types::utf16_json::Utf16JsonProjection, String>,
+    ) -> Result<(), ClientError> {
+        let result = match operation {
+            Ok(operation) => {
+                let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                handle.mod_ui_client_operation(operation).await
+            }
+            Err(error) => Err(lingxi_core::host::HandleError::ActionFailed(error)),
+        };
+        self.connection_sink
+            .emit(client::adapter::turn::mod_ui_client_operation_result_event(
+                request_id, result,
+            ))
+            .await;
+        Ok(())
+    }
+
     /// Resolve a parked permission request on the connection-scoped gate (the
     /// inbound side of the inverted handshake). The gate owns the original tool
     /// name and rejects stale/unknown ids rather than accepting a phantom tap.
@@ -7220,10 +7933,17 @@ impl MobileEngineHandle {
         session_id: lingxi_core::types::SessionId,
         dir: &std::path::Path,
         agent_id: &str,
-    ) -> Result<(Vec<client::protocol::message::MessageDto>, u64), ClientError> {
-        let (messages, revision) = if agent_id == "main" {
+    ) -> Result<
+        (
+            Vec<client::protocol::listings::SessionAgentMessageRowDto>,
+            u64,
+            u64,
+        ),
+        ClientError,
+    > {
+        let (messages, revision, next_message_index) = if agent_id == "main" {
             let uuid = session_id.as_uuid();
-            let replayed = orchestrator::replay_session_state(
+            let _replayed = orchestrator::replay_session_state(
                 &self.lingxi_home,
                 &self.session_cwd,
                 uuid,
@@ -7238,10 +7958,38 @@ impl MobileEngineHandle {
                 &self.session_cwd,
                 &uuid.to_string(),
             );
-            let raw = tokio::fs::read(path).await.unwrap_or_default();
+            if self.inner.session_writer.active_path() != path {
+                return Err(ClientError::Internal {
+                    message: format!(
+                        "load main transcript identity index failed: shared writer is not active for {}",
+                        path.display()
+                    ),
+                });
+            }
+            let raw = match tokio::fs::read(&path).await {
+                Ok(raw) => raw,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => {
+                    return Err(ClientError::Rejected {
+                        message: format!("load main transcript failed: {error}"),
+                    });
+                }
+            };
+            let identity_snapshot =
+                session_identity_snapshot_for_path(&self.inner.session_writer, &path)
+                    .await
+                    .map_err(|error| ClientError::Rejected {
+                        message: format!("load main transcript identity import failed: {error}"),
+                    })?;
+            let rows = parse_main_session_agent_message_rows(&raw, &identity_snapshot).map_err(
+                |message| ClientError::Rejected {
+                    message: format!("load main transcript rows failed: {message}"),
+                },
+            )?;
             (
-                replayed.state.history,
+                rows,
                 session_agent_transcript_revision(&raw),
+                identity_snapshot.next_message_index,
             )
         } else {
             let parsed =
@@ -7255,24 +8003,43 @@ impl MobileEngineHandle {
                 .map_err(|error| ClientError::Rejected {
                     message: format!("load session agent transcript failed: {error}"),
                 })?;
-            let raw = match path {
-                Some(path) => tokio::fs::read(path).await.unwrap_or_default(),
-                None => Vec::new(),
-            };
-            (
-                parse_session_agent_messages(&raw),
-                session_agent_transcript_revision(&raw),
-            )
+            if let Some(path) = path {
+                let raw = tokio::fs::read(&path).await.unwrap_or_default();
+                let messages = parse_session_agent_message_rows(&raw).map_err(|message| {
+                    ClientError::Rejected {
+                        message: format!("load session-agent transcript rows failed: {message}"),
+                    }
+                })?;
+                let next_message_index =
+                    read_session_agent_next_message_index(self.fs.as_ref(), &path).await?;
+                (
+                    messages,
+                    session_agent_transcript_revision(&raw),
+                    next_message_index,
+                )
+            } else if let Some(snapshot) = self
+                .inner
+                .session_agent_transcript_cache
+                .lock()
+                .await
+                .get(agent_id)
+                .cloned()
+            {
+                (
+                    snapshot.rows,
+                    snapshot.revision,
+                    snapshot.next_message_index,
+                )
+            } else {
+                (Vec::new(), 0, 0)
+            }
         };
-        Ok((
-            client::adapter::lowering::lower_transcript(&messages),
-            revision,
-        ))
+        Ok((messages, revision, next_message_index))
     }
 
     async fn emit_session_agent_transcript(&self, agent_id: String) -> Result<(), ClientError> {
         let (requested_session_id, dir) = self.session_agent_dir().await;
-        let (messages, revision) = self
+        let (messages, revision, next_message_index) = self
             .load_session_agent_transcript_for_session(requested_session_id, &dir, &agent_id)
             .await?;
         let current_session_id = self.inner.orchestrator.current_session_id().await;
@@ -7281,6 +8048,7 @@ impl MobileEngineHandle {
             current_session_id,
             agent_id,
             messages,
+            next_message_index,
             revision,
         ) {
             self.event_sink.emit(event).await;
@@ -7347,13 +8115,13 @@ impl MobileEngineHandle {
         &self,
         before: &SlashAuthoritySnapshot,
         after: &SlashAuthoritySnapshot,
-    ) {
+    ) -> Result<(), ClientError> {
         if before.session_id != after.session_id {
             self.retarget_session_writer(
                 self.inner.orchestrator.current_session_id().await,
                 &self.session_cwd,
             )
-            .await;
+            .await?;
             self.event_sink.emit(ClientEvent::SessionEnded).await;
             let _ = self.session_lifecycle_tx.send(after.session_id.clone());
         }
@@ -7385,6 +8153,7 @@ impl MobileEngineHandle {
                 })
                 .await;
         }
+        Ok(())
     }
 
     /// Pull a single listing kind and emit its listing event through the
@@ -7916,6 +8685,10 @@ impl MobileEngineHandle {
 #[cfg(test)]
 #[path = "host/tests/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "host/app_agent_route_tests.rs"]
+mod app_agent_route_tests;
 
 #[cfg(test)]
 #[path = "host/tests/mobile_provider_allowlist_tests.rs"]

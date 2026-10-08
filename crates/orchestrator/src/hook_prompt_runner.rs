@@ -13,28 +13,22 @@
 //! then injects it via `HookExecutorImpl::with_prompt_runner` (an `Option`,
 //! default `None`).
 //!
-//! Model resolution mirrors `getSmallFastModel()`
-//! (`claude-code/src/utils/model/model.ts:36-37` →
-//! `getDefaultHaikuModel():131-139`) for a session served by Anthropic: the
-//! hook's `model` override wins; else `$ANTHROPIC_SMALL_FAST_MODEL`; else
-//! `$ANTHROPIC_DEFAULT_HAIKU_MODEL`; else the default Haiku 4.5 string. A
-//! session served by any other provider evaluates on its own model and
-//! profile — see [`ApiClientHookPromptRunner::resolve_model`] for why — which
-//! the runner learns through [`ApiClientHookPromptRunner::attach`].
+//! Model overrides use the host's shared model/profile resolver. Native
+//! Anthropic routes may select their configured small-fast alias; every
+//! other route keeps the session model unless the hook explicitly overrides it.
 
 use std::sync::{Arc, OnceLock, Weak};
 
+use agent::model_resolution::{
+    resolve_user_model_selection, resolve_user_specified_model, ModelProviderKind, ModelResolutionContext,
+    ModelResolutionContextProvider, ResolvedModelSelection,
+};
 use async_trait::async_trait;
 use hooks::{HookPromptRunner, PromptHookError, PromptHookRequest};
 use lingxi_core::types::{ConversationMessage, MessageId};
 use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, LlmError};
 
 use crate::conversation::{ConversationOrchestrator, OrchestratorApiClient};
-
-/// Default small-fast model when no override / env var is set
-/// (`getDefaultHaikuModel()` → `getModelStrings().haiku45`;
-/// `model.ts:137`). Matches the orchestrator's `list_available_models` haiku id.
-const DEFAULT_SMALL_FAST_MODEL: &str = "claude-haiku-4-5";
 
 /// Where the evaluator learns which model the session it judges is talking to.
 ///
@@ -62,6 +56,7 @@ impl HookSessionModel for Weak<ConversationOrchestrator> {
 /// non-streaming `messages_create` seam.
 pub struct ApiClientHookPromptRunner {
     api: Arc<dyn OrchestratorApiClient>,
+    model_resolution: Arc<dyn ModelResolutionContextProvider>,
     session: OnceLock<Arc<dyn HookSessionModel>>,
 }
 
@@ -70,15 +65,18 @@ impl ApiClientHookPromptRunner {
     /// `Arc<dyn OrchestratorApiClient>` the orchestrator uses so the prompt hook
     /// shares the provider routing / auth / telemetry.
     #[must_use]
-    pub fn new(api: Arc<dyn OrchestratorApiClient>) -> Self {
+    pub fn new(
+        api: Arc<dyn OrchestratorApiClient>,
+        model_resolution: Arc<dyn ModelResolutionContextProvider>,
+    ) -> Self {
         Self {
             api,
+            model_resolution,
             session: OnceLock::new(),
         }
     }
 
-    /// Bind the runner to the session whose transcript it evaluates. Until
-    /// then the evaluator resolves as if the session were served by Anthropic.
+    /// Bind the runner to the session whose transcript it evaluates.
     ///
     /// First call wins; the runner holds a `Weak`, so this creates no
     /// orchestrator↔hook-executor cycle.
@@ -91,44 +89,69 @@ impl ApiClientHookPromptRunner {
         let _ = self.session.set(session);
     }
 
-    /// The evaluator's `(model, profile)`.
-    ///
-    /// Upstream only ever talks to Anthropic, so `getSmallFastModel()`
-    /// (`model.ts:36-37`) is the whole story there: the hook's override, else
-    /// `ANTHROPIC_SMALL_FAST_MODEL`, else `ANTHROPIC_DEFAULT_HAIKU_MODEL`, else
-    /// Haiku. This port serves other providers too, and a Haiku id on a
-    /// `DeepSeek` session is not a cheaper evaluator — it is a request the
-    /// session's provider cannot serve, routed to an Anthropic codec that
-    /// rejects the session's unsigned reasoning blocks before anything is
-    /// sent. So the Anthropic ladder applies only when the session itself is
-    /// served by Anthropic; every other session evaluates on its own model and
-    /// profile, the one pair known to exist for it. The override stays
-    /// unconditional: it is the hook author's explicit choice.
+    /// Resolve the evaluator's complete route from the shared host authority.
     fn resolve_model(
+        &self,
         override_model: Option<&str>,
         session: Option<(&str, Option<&str>)>,
-    ) -> (String, Option<String>) {
-        if let Some(m) = override_model {
-            return (m.to_string(), None);
-        }
-        let profile = match session {
-            Some((model, profile)) if !anthropic_served(model, profile) => {
-                return (model.to_string(), profile.map(str::to_owned));
-            }
-            Some((_, profile)) => profile.map(str::to_owned),
-            None => None,
-        };
-        for var in [
-            "ANTHROPIC_SMALL_FAST_MODEL",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        ] {
-            if let Ok(m) = std::env::var(var) {
-                if !m.is_empty() {
-                    return (m, profile);
+    ) -> Result<ResolvedModelSelection, PromptHookError> {
+        let context = match session {
+            Some((model, profile)) => self.model_resolution.context_for_route(model, profile),
+            None => match override_model {
+                Some(model) => self.model_resolution.context_for_route(model, None),
+                None => {
+                    return Err(PromptHookError::Query(
+                        "prompt hook current model route is unavailable".into(),
+                    ));
                 }
-            }
+            },
         }
-        (DEFAULT_SMALL_FAST_MODEL.to_string(), profile)
+        .map_err(|error| PromptHookError::Query(error.to_string()))?;
+        let native_provider = matches!(
+            context.route.provider,
+            Some(
+                ModelProviderKind::FirstParty
+                    | ModelProviderKind::Bedrock
+                    | ModelProviderKind::Vertex
+                    | ModelProviderKind::Foundry
+            )
+        );
+        if let Some(model) = override_model {
+            return resolve_user_model_selection(
+                model,
+                None,
+                &context,
+                self.model_resolution.as_ref(),
+            )
+            .map_err(|error| PromptHookError::Query(error.to_string()));
+        }
+        let small_fast_alias = if !native_provider {
+            None
+        } else if context.catalog_aliases.contains_key("small-fast") {
+            Some("small-fast")
+        } else if context.catalog_aliases.contains_key("haiku")
+            || context.family_defaults.haiku.is_some()
+        {
+            Some("haiku")
+        } else {
+            None
+        };
+        if let Some(alias) = small_fast_alias {
+            let model = resolve_user_specified_model(alias, &context)
+                .map_err(|error| PromptHookError::Query(error.to_string()))?;
+            return resolve_user_model_selection(
+                &model,
+                context.route.profile.as_deref(),
+                &context,
+                self.model_resolution.as_ref(),
+            )
+            .map_err(|error| PromptHookError::Query(error.to_string()));
+        }
+        Ok(ResolvedModelSelection {
+            model: context.route.model.clone(),
+            model_profile: context.route.profile.clone(),
+            model_resolution_context: context,
+        })
     }
 
     /// Concatenate the assistant message's text blocks (the analog of
@@ -167,16 +190,6 @@ impl ApiClientHookPromptRunner {
     }
 }
 
-/// Whether `(model, profile)` is served by the Anthropic provider. The profile
-/// is authoritative (`anthropic`, or a connection of it, `anthropic:<name>`);
-/// an unscoped id is judged by its `claude-` prefix.
-fn anthropic_served(model: &str, profile: Option<&str>) -> bool {
-    match profile {
-        Some(profile) => lingxi_core::host::split_connection_profile(profile).0 == "anthropic",
-        None => model.starts_with("claude-"),
-    }
-}
-
 /// Drop reasoning blocks from the transcript before it is judged.
 ///
 /// The evaluator runs with thinking disabled and is told to judge transcript
@@ -203,7 +216,7 @@ fn strip_transcript_thinking(messages: &mut [ConversationMessage]) {
         content.retain(|block| !is_thinking(block));
         if content.is_empty() {
             content.push(lingxi_core::types::ContentBlock::Text {
-                text: "[Thinking removed]".into(),
+                text: "[Thinking removed]".into(), citations: None,
             });
         }
     }
@@ -212,16 +225,21 @@ fn strip_transcript_thinking(messages: &mut [ConversationMessage]) {
 #[async_trait]
 impl HookPromptRunner for ApiClientHookPromptRunner {
     async fn run(&self, req: PromptHookRequest) -> Result<String, PromptHookError> {
-        let session = match self.session.get() {
-            Some(session) => session.session_model().await,
-            None => None,
+        let session = match req.model_selection.as_ref() {
+            Some(selection) => Some((selection.model.clone(), selection.model_profile.clone())),
+            None => match self.session.get() {
+                Some(session) => session.session_model().await,
+                None => None,
+            },
         };
-        let (model, profile) = Self::resolve_model(
+        let selected = self.resolve_model(
             req.model.as_deref(),
             session
                 .as_ref()
                 .map(|(model, profile)| (model.as_str(), profile.as_deref())),
-        );
+        )?;
+        let model = selected.model;
+        let profile = selected.model_profile;
         // Single user turn carrying the (already `$ARGUMENTS`-substituted)
         // hook prompt; the fixed evaluation system prompt is passed via
         // `system`. No tools are advertised — the prompt hook only needs the
@@ -235,7 +253,7 @@ impl HookPromptRunner for ApiClientHookPromptRunner {
             None => load_hook_transcript(req.transcript_path.as_deref()).await?,
         };
         strip_transcript_thinking(&mut transcript);
-        let budget = hook_transcript_budget(&model);
+        let budget = hook_transcript_budget(&selected.model_resolution_context);
         let query = async {
             let mut messages = if last_usage <= budget {
                 transcript.clone()
@@ -248,12 +266,14 @@ impl HookPromptRunner for ApiClientHookPromptRunner {
             ));
             let response = self
                 .api
-                .messages_create_hook_prompt(
-                    &model,
-                    profile.as_deref(),
-                    &req.system_prompt,
-                    messages,
-                )
+                .messages_create(crate::OrchestratorApiRequest::HookPrompt(
+                    crate::HookPromptRequest::new(
+                        &model,
+                        profile.as_deref(),
+                        &req.system_prompt,
+                        messages,
+                    ),
+                ))
                 .await;
             let response = match response {
                 Err(LlmError::ContextOverflow { .. }) if !transcript.is_empty() => {
@@ -267,12 +287,14 @@ impl HookPromptRunner for ApiClientHookPromptRunner {
                         req.prompt.clone(),
                     ));
                     self.api
-                        .messages_create_hook_prompt(
-                            &model,
-                            profile.as_deref(),
-                            &req.system_prompt,
-                            messages,
-                        )
+                        .messages_create(crate::OrchestratorApiRequest::HookPrompt(
+                            crate::HookPromptRequest::new(
+                                &model,
+                                profile.as_deref(),
+                                &req.system_prompt,
+                                messages,
+                            ),
+                        ))
                         .await
                 }
                 other => other,
@@ -290,9 +312,8 @@ impl HookPromptRunner for ApiClientHookPromptRunner {
     }
 }
 
-fn hook_transcript_budget(model: &str) -> usize {
-    use llm_runtime::model::context_window::{has_1m_context, model_native_1m};
-    if has_1m_context(model) || model_native_1m(model) {
+fn hook_transcript_budget(context: &ModelResolutionContext) -> usize {
+    if context.native_1m == Some(true) && !context.disable_1m_context {
         500_000
     } else {
         100_000
@@ -477,6 +498,7 @@ fn bound_hook_transcript(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent::model_resolution::{FamilyModelDefaults, ModelResolutionError, ModelRouteFacts};
     use llm_runtime::{ExecutionUsage as Usage, HistoryResponse};
     use std::sync::Mutex;
 
@@ -497,13 +519,170 @@ mod tests {
         }
     }
 
+    struct TestRoutes(Vec<ModelResolutionContext>);
+
+    impl ModelResolutionContextProvider for TestRoutes {
+        fn context_for_route(
+            &self,
+            model: &str,
+            profile: Option<&str>,
+        ) -> Result<ModelResolutionContext, ModelResolutionError> {
+            let qualified = self.0.iter().find_map(|context| {
+                let profile = context.route.profile.as_deref()?;
+                model
+                    .strip_prefix(&format!("{profile}/"))
+                    .map(|model| (model, profile))
+            });
+            let (model, profile) =
+                qualified.map_or((model, profile), |(model, profile)| (model, Some(profile)));
+            let candidates: Vec<_> = self
+                .0
+                .iter()
+                .filter(|context| {
+                    if profile.is_some() && context.route.profile.as_deref() != profile {
+                        return false;
+                    }
+                    let selected = context
+                        .catalog_aliases
+                        .get(model)
+                        .and_then(|models| (models.len() == 1).then(|| models[0].as_str()))
+                        .or_else(|| context.family_defaults.get(model))
+                        .unwrap_or(model);
+                    context.route.model == selected
+                })
+                .collect();
+            match candidates.as_slice() {
+                [context] => Ok((**context).clone()),
+                [] => Err(ModelResolutionError::RouteUnavailable {
+                    model: model.into(),
+                    profile: profile.map(str::to_owned),
+                    reason: "not configured".into(),
+                }),
+                contexts => Err(ModelResolutionError::AmbiguousRoute {
+                    model: model.into(),
+                    profiles: contexts
+                        .iter()
+                        .filter_map(|context| context.route.profile.clone())
+                        .collect(),
+                }),
+            }
+        }
+    }
+
+    fn test_routes() -> Arc<TestRoutes> {
+        let mut contexts = Vec::new();
+        for (profile, provider, models, fast) in [
+            (
+                "configured",
+                ModelProviderKind::Other,
+                vec!["evaluator-model"],
+                None,
+            ),
+            (
+                "anthropic",
+                ModelProviderKind::FirstParty,
+                vec!["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-8"],
+                Some("claude-haiku-4-5"),
+            ),
+            (
+                "deployment",
+                ModelProviderKind::FirstParty,
+                vec!["native-main", "native-fast"],
+                Some("native-fast"),
+            ),
+            (
+                "native-only",
+                ModelProviderKind::FirstParty,
+                vec!["only-main"],
+                None,
+            ),
+            (
+                "native-small-fast",
+                ModelProviderKind::FirstParty,
+                vec!["override-main", "configured-small-fast", "native-fallback"],
+                Some("native-fallback"),
+            ),
+            (
+                "broken-small-fast",
+                ModelProviderKind::FirstParty,
+                vec!["broken-main"],
+                None,
+            ),
+            (
+                "deepseek:cn",
+                ModelProviderKind::Other,
+                vec!["deepseek-flash"],
+                None,
+            ),
+            (
+                "gateway",
+                ModelProviderKind::Other,
+                vec!["claude-unrelated", "foreign-fast"],
+                Some("foreign-fast"),
+            ),
+            (
+                "left",
+                ModelProviderKind::Other,
+                vec!["shared-model", "balanced-left"],
+                None,
+            ),
+            (
+                "right",
+                ModelProviderKind::Other,
+                vec!["shared-model", "balanced-right"],
+                None,
+            ),
+        ] {
+            for model in models {
+                let mut catalog_aliases = std::collections::BTreeMap::new();
+                if profile == "left" || profile == "right" {
+                    catalog_aliases.insert("review".into(), vec![format!("balanced-{profile}")]);
+                }
+                let small_fast = match profile {
+                    "native-small-fast" => Some("configured-small-fast"),
+                    "broken-small-fast" => Some("balanced-right"),
+                    "gateway" => Some("foreign-fast"),
+                    _ => None,
+                };
+                if let Some(model) = small_fast {
+                    catalog_aliases.insert("small-fast".into(), vec![model.into()]);
+                }
+                contexts.push(ModelResolutionContext {
+                    route: ModelRouteFacts {
+                        model: model.into(),
+                        profile: Some(profile.into()),
+                        provider: Some(provider),
+                        ..Default::default()
+                    },
+                    family_defaults: FamilyModelDefaults {
+                        haiku: fast.map(str::to_owned),
+                        ..Default::default()
+                    },
+                    catalog_aliases,
+                    native_1m: Some(model == "claude-opus-4-8"),
+                    ..Default::default()
+                });
+            }
+        }
+        Arc::new(TestRoutes(contexts))
+    }
+
+    fn test_runner(api: Arc<dyn OrchestratorApiClient>) -> ApiClientHookPromptRunner {
+        let runner = ApiClientHookPromptRunner::new(api, test_routes());
+        runner.attach_session_model(Arc::new(FixedSession(
+            "evaluator-model".into(),
+            Some("configured".into()),
+        )));
+        runner
+    }
+
     fn make_text_response(body: &str) -> HistoryResponse {
         HistoryResponse {
             id: "msg_1".into(),
             model: "claude-haiku-4-5".into(),
             content: vec![LlmContentBlock::Text {
                 text: body.into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             stop_reason: Some("end_turn".into()),
             stop_details: None,
@@ -531,12 +710,28 @@ mod tests {
     impl OrchestratorApiClient for MockApi {
         async fn messages_create(
             &self,
-            model: &str,
-            profile: Option<&str>,
-            system: Option<&str>,
-            msgs: Vec<ConversationMessage>,
-            _tools: Vec<serde_json::Value>,
+            request: crate::OrchestratorApiRequest,
         ) -> Result<HistoryResponse, LlmError> {
+            let (request_model, request_profile, request_system, msgs, _tools) = match request {
+                crate::OrchestratorApiRequest::Main(request) => (
+                    request.model,
+                    request.profile,
+                    request.system.map(|system| system.display_text()),
+                    request.messages,
+                    request.tools,
+                ),
+                crate::OrchestratorApiRequest::HookPrompt(request) => (
+                    request.model,
+                    request.profile,
+                    Some(request.system),
+                    request.messages,
+                    Vec::new(),
+                ),
+            };
+            let model = request_model.as_str();
+            let profile = request_profile.as_deref();
+            let system = request_system.as_deref();
+
             self.recorded.lock().unwrap().push((
                 model.to_string(),
                 profile.map(str::to_owned),
@@ -555,6 +750,7 @@ mod tests {
 
     fn req(prompt: &str, model: Option<&str>) -> PromptHookRequest {
         PromptHookRequest {
+            model_selection: None,
             transcript: None,
             transcript_path: None,
             prompt: prompt.into(),
@@ -601,7 +797,7 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(usage, 15);
         assert!(
-            matches!(&messages[1], ConversationMessage::Assistant { content, .. } if matches!(&content[0], lingxi_core::types::ContentBlock::Text { text } if text == "tests passed"))
+            matches!(&messages[1], ConversationMessage::Assistant { content, .. } if matches!(&content[0], lingxi_core::types::ContentBlock::Text { text, .. } if text == "tests passed"))
         );
     }
 
@@ -612,7 +808,7 @@ mod tests {
             ConversationMessage::Assistant {
                 id: MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
-                    text: "latest".into(),
+                    text: "latest".into(), citations: None,
                 }],
                 stop_reason: None,
             },
@@ -625,7 +821,7 @@ mod tests {
             panic!("truncation preface")
         };
         assert!(
-            matches!(&content[0], lingxi_core::types::ContentBlock::Text { text } if text.contains("1 earlier messages omitted"))
+            matches!(&content[0], lingxi_core::types::ContentBlock::Text { text, .. } if text.contains("1 earlier messages omitted"))
         );
         assert!(bound_hook_transcript(&[], 1, &Default::default()).is_empty());
     }
@@ -635,7 +831,10 @@ mod tests {
         let id = MessageId::new();
         let assistant = |text: &str| ConversationMessage::Assistant {
             id,
-            content: vec![lingxi_core::types::ContentBlock::Text { text: text.into() }],
+            content: vec![lingxi_core::types::ContentBlock::Text {
+                text: text.into(),
+                citations: None,
+            }],
             stop_reason: None,
         };
         let messages = vec![
@@ -678,16 +877,19 @@ mod tests {
     }
 
     #[test]
-    fn evaluator_budget_recognizes_native_1m_without_suffix() {
-        assert_eq!(hook_transcript_budget("claude-opus-4-8"), 500_000);
-        assert_eq!(hook_transcript_budget("claude-sonnet-5"), 500_000);
-        assert_eq!(hook_transcript_budget("claude-haiku-4-5"), 100_000);
+    fn evaluator_budget_uses_host_capability_facts() {
+        let mut context = ModelResolutionContext::default();
+        assert_eq!(hook_transcript_budget(&context), 100_000);
+        context.native_1m = Some(true);
+        assert_eq!(hook_transcript_budget(&context), 500_000);
+        context.disable_1m_context = true;
+        assert_eq!(hook_transcript_budget(&context), 100_000);
     }
 
     #[tokio::test]
     async fn live_transcript_wins_over_unreadable_persisted_path() {
         let api = MockApi::text("x", r#"{"ok":true}"#);
-        let runner = ApiClientHookPromptRunner::new(api.clone());
+        let runner = test_runner(api.clone());
         let dir = tempfile::tempdir().unwrap();
         let mut request = req("judge", Some("claude-opus-4-8"));
         // A directory is not a readable JSONL file. A live snapshot must never
@@ -698,7 +900,7 @@ mod tests {
             ConversationMessage::Assistant {
                 id: MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
-                    text: "just completed".into(),
+                    text: "just completed".into(), citations: None,
                 }],
                 stop_reason: None,
             },
@@ -721,7 +923,7 @@ mod tests {
     #[tokio::test]
     async fn run_calls_messages_create_with_prompt_and_system_and_extracts_text() {
         let api = MockApi::text("claude-haiku-4-5", r#"{"ok": true}"#);
-        let runner = ApiClientHookPromptRunner::new(api.clone());
+        let runner = test_runner(api.clone());
 
         let out = runner.run(req("is this safe?", None)).await.unwrap();
 
@@ -729,10 +931,8 @@ mod tests {
         let recorded = api.recorded.lock().unwrap();
         assert_eq!(recorded.len(), 1);
         let (model, profile, system, msgs) = &recorded[0];
-        // Unbound runner: the small-fast haiku string, unscoped (no env set in
-        // the typical test environment).
-        assert_eq!(model, "claude-haiku-4-5");
-        assert_eq!(profile, &None);
+        assert_eq!(model, "evaluator-model");
+        assert_eq!(profile.as_deref(), Some("configured"));
         assert_eq!(system.as_deref(), Some("SYS"));
         assert_eq!(msgs.len(), 1);
         match &msgs[0] {
@@ -740,7 +940,7 @@ mod tests {
                 assert_eq!(
                     content,
                     &vec![lingxi_core::types::ContentBlock::Text {
-                        text: "is this safe?".into()
+                        text: "is this safe?".into(), citations: None
                     }]
                 );
             }
@@ -751,7 +951,7 @@ mod tests {
     #[tokio::test]
     async fn model_override_is_passed_through() {
         let api = MockApi::text("x", r#"{"ok": true}"#);
-        let runner = ApiClientHookPromptRunner::new(api.clone());
+        let runner = test_runner(api.clone());
 
         let _ = runner
             .run(req("p", Some("claude-sonnet-4-6")))
@@ -770,7 +970,7 @@ mod tests {
                 message: "request timeout after 30s".into(),
             }))),
         });
-        let runner = ApiClientHookPromptRunner::new(api);
+        let runner = test_runner(api);
 
         let err = runner.run(req("p", None)).await.unwrap_err();
         assert!(matches!(err, PromptHookError::Timeout(_)), "got {err:?}");
@@ -784,80 +984,141 @@ mod tests {
                 message: String::new(),
             }))),
         });
-        let runner = ApiClientHookPromptRunner::new(api);
+        let runner = test_runner(api);
 
         let err = runner.run(req("p", None)).await.unwrap_err();
         assert!(matches!(err, PromptHookError::Query(_)), "got {err:?}");
     }
 
     #[test]
-    fn resolve_model_prefers_override() {
-        assert_eq!(
-            ApiClientHookPromptRunner::resolve_model(
-                Some("custom-model"),
-                Some(("deepseek-flash", Some("deepseek")))
-            ),
-            ("custom-model".to_string(), None)
-        );
+    fn resolve_model_preserves_scoped_alias_and_concrete_overrides() {
+        let runner = test_runner(MockApi::text("x", "{}"));
+        for (override_model, expected) in [
+            ("review", "balanced-left"),
+            ("shared-model", "shared-model"),
+        ] {
+            let selected = runner
+                .resolve_model(Some(override_model), Some(("shared-model", Some("left"))))
+                .unwrap();
+            assert_eq!(selected.model, expected);
+            assert_eq!(selected.model_profile.as_deref(), Some("left"));
+        }
+        let selected = runner
+            .resolve_model(
+                Some("right/shared-model"),
+                Some(("shared-model", Some("left"))),
+            )
+            .unwrap();
+        assert_eq!(selected.model, "shared-model");
+        assert_eq!(selected.model_profile.as_deref(), Some("right"));
     }
 
     #[test]
-    fn anthropic_sessions_keep_haiku_and_every_other_provider_uses_its_own_model() {
+    fn native_defaults_use_configured_aliases_and_foreign_routes_keep_their_model() {
+        let runner = test_runner(MockApi::text("x", "{}"));
         let resolve = |model: &str, profile: Option<&str>| {
-            ApiClientHookPromptRunner::resolve_model(None, Some((model, profile)))
+            let selected = runner.resolve_model(None, Some((model, profile))).unwrap();
+            (selected.model, selected.model_profile)
         };
-        // Anthropic-served, by profile (plain or a connection of it) or by an
-        // unscoped `claude-` id: the upstream small-fast ladder, pinned to the
-        // session's own profile so a connection keeps its key.
         assert_eq!(
-            resolve("claude-opus-4-8", Some("anthropic")),
-            (
-                "claude-haiku-4-5".to_string(),
-                Some("anthropic".to_string())
-            )
+            resolve("native-main", Some("deployment")),
+            ("native-fast".to_string(), Some("deployment".to_string()))
         );
         assert_eq!(
-            resolve("claude-opus-4-8", Some("anthropic:work#1")),
-            (
-                "claude-haiku-4-5".to_string(),
-                Some("anthropic:work#1".to_string())
-            )
+            resolve("only-main", Some("native-only")),
+            ("only-main".to_string(), Some("native-only".to_string()))
         );
         assert_eq!(
-            resolve("claude-opus-4-8", None),
-            ("claude-haiku-4-5".to_string(), None)
-        );
-        // Anything else: the session's own pair. A Haiku id here would be a
-        // request the session's provider cannot serve.
-        assert_eq!(
-            resolve("deepseek-flash", Some("deepseek")),
-            ("deepseek-flash".to_string(), Some("deepseek".to_string()))
-        );
-        assert_eq!(
-            resolve("deepseek-flash", Some("deepseek:cn#1")),
+            resolve("deepseek-flash", Some("deepseek:cn")),
             (
                 "deepseek-flash".to_string(),
-                Some("deepseek:cn#1".to_string())
+                Some("deepseek:cn".to_string())
             )
         );
-        assert_eq!(resolve("kimi-k2", None), ("kimi-k2".to_string(), None));
-        // A Claude id reached through another provider follows that provider.
+        // Even a Claude-shaped id and a configured Haiku alias do not turn a
+        // foreign provider into an Anthropic route.
         assert_eq!(
-            resolve("claude-opus-4-8", Some("openrouter")),
-            (
-                "claude-opus-4-8".to_string(),
-                Some("openrouter".to_string())
-            )
+            resolve("claude-unrelated", None),
+            ("claude-unrelated".to_string(), Some("gateway".to_string()))
         );
+    }
+
+    #[tokio::test]
+    async fn unbound_or_ambiguous_routes_fail_before_model_communication() {
+        let api = MockApi::text("x", "{}");
+        let runner = ApiClientHookPromptRunner::new(api.clone(), test_routes());
+        assert!(matches!(
+            runner.run(req("judge", None)).await,
+            Err(PromptHookError::Query(_))
+        ));
+        assert!(matches!(
+            runner.run(req("judge", Some("shared-model"))).await,
+            Err(PromptHookError::Query(_))
+        ));
+        assert!(api.recorded.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_small_fast_prefers_scoped_configuration_over_haiku() {
+        let api = MockApi::text("x", "{}");
+        let runner = test_runner(api.clone());
+        let mut request = req("judge", None);
+        request.model_selection = Some(hooks::registry::HookModelSelection {
+            model: "override-main".into(),
+            model_profile: Some("native-small-fast".into()),
+        });
+        runner.run(request).await.unwrap();
+        let recorded = api.recorded.lock().unwrap();
+        assert_eq!(recorded[0].0, "configured-small-fast");
+        assert_eq!(recorded[0].1.as_deref(), Some("native-small-fast"));
+    }
+
+    #[tokio::test]
+    async fn configured_small_fast_cannot_escape_its_native_profile() {
+        let api = MockApi::text("x", "{}");
+        let runner = test_runner(api.clone());
+        let mut request = req("judge", None);
+        request.model_selection = Some(hooks::registry::HookModelSelection {
+            model: "broken-main".into(),
+            model_profile: Some("broken-small-fast".into()),
+        });
+        assert!(matches!(
+            runner.run(request).await,
+            Err(PromptHookError::Query(_))
+        ));
+        assert!(api.recorded.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn child_hook_uses_host_route_before_the_root_session() {
+        for (model_override, expected_model) in
+            [(None, "shared-model"), (Some("review"), "balanced-right")]
+        {
+            let api = MockApi::text("x", "{}");
+            let runner = ApiClientHookPromptRunner::new(api.clone(), test_routes());
+            runner.attach_session_model(Arc::new(FixedSession(
+                "shared-model".into(),
+                Some("left".into()),
+            )));
+            let mut request = req("judge", model_override);
+            request.model_selection = Some(hooks::registry::HookModelSelection {
+                model: "shared-model".into(),
+                model_profile: Some("right".into()),
+            });
+            runner.run(request).await.unwrap();
+            let recorded = api.recorded.lock().unwrap();
+            assert_eq!(recorded[0].0, expected_model);
+            assert_eq!(recorded[0].1.as_deref(), Some("right"));
+        }
     }
 
     #[tokio::test]
     async fn a_bound_deepseek_session_evaluates_on_its_own_model_and_profile() {
         let api = MockApi::text("x", r#"{"ok": true}"#);
-        let runner = ApiClientHookPromptRunner::new(api.clone());
+        let runner = ApiClientHookPromptRunner::new(api.clone(), test_routes());
         runner.attach_session_model(Arc::new(FixedSession(
-            "deepseek-flash".into(),
-            Some("deepseek:cn".into()),
+            "deepseek-flash".to_string(),
+            Some("deepseek:cn".to_string()),
         )));
 
         runner.run(req("judge", None)).await.unwrap();
@@ -870,7 +1131,7 @@ mod tests {
     #[tokio::test]
     async fn reasoning_blocks_never_reach_the_evaluator() {
         let api = MockApi::text("x", r#"{"ok": true}"#);
-        let runner = ApiClientHookPromptRunner::new(api.clone());
+        let runner = test_runner(api.clone());
         let mut request = req("judge", None);
         request.transcript = Some(hooks::PromptHookTranscript {
             messages: vec![
@@ -885,7 +1146,7 @@ mod tests {
                             signature: None,
                         },
                         lingxi_core::types::ContentBlock::Text {
-                            text: "tests passed".into(),
+                            text: "tests passed".into(), citations: None,
                         },
                     ],
                     stop_reason: None,
@@ -925,7 +1186,7 @@ mod tests {
         assert_eq!(
             assistant_content(1),
             vec![lingxi_core::types::ContentBlock::Text {
-                text: "tests passed".into()
+                text: "tests passed".into(), citations: None
             }]
         );
         // Signed and redacted traces go too: the evaluator judges text, and a
@@ -933,7 +1194,7 @@ mod tests {
         assert_eq!(
             assistant_content(3),
             vec![lingxi_core::types::ContentBlock::Text {
-                text: "[Thinking removed]".into()
+                text: "[Thinking removed]".into(), citations: None
             }]
         );
     }

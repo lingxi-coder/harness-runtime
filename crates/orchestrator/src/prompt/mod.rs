@@ -18,6 +18,7 @@ pub mod git_status;
 pub mod goal_checkin;
 pub mod goal_interruption;
 pub mod locked_templates;
+pub(crate) mod mcp_instructions;
 pub mod memory_block;
 pub mod memory_section;
 pub mod memory_update;
@@ -38,9 +39,8 @@ pub mod large_memory;
 pub use large_memory::{large_memory_warning_rows, shorten_memory_path};
 
 pub use memory_block::{
-    build_memdir_prefetch, build_memdir_prefetch_from_anthropic, build_session_memory_handle,
-    real_provider, real_provider_with_excludes, MemoryHierarchyProvider,
-    RealMemoryHierarchyProvider,
+    build_memdir_prefetch, build_session_memory_handle, real_provider, real_provider_with_excludes,
+    MemoryHierarchyProvider, RealMemoryHierarchyProvider,
 };
 
 /// Re-export of the LINGXI.md tier enum so consumers that depend on
@@ -80,6 +80,330 @@ pub struct ActiveOutputStyle<'a> {
     pub keep_coding_instructions: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromptSectionScope {
+    Shared,
+    Session,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PromptSection {
+    pub id: String,
+    pub text: String,
+    pub scope: PromptSectionScope,
+    pub id_utf16_code_units: Option<Vec<u16>>,
+    pub text_utf16_code_units: Option<Vec<u16>>,
+}
+
+pub(crate) struct RenderedPromptSections {
+    pub text: String,
+    /// Static source blocks captured before dynamic context is appended.
+    pub source_sections: Vec<PromptSection>,
+    /// Exact restored Native source vector when this prompt comes from resume.
+    pub snapshot_system_prompt: Option<Vec<lingxi_llm_client::providers::anthropic::system_prompt::PromptText>>,
+    /// Joined static bytes before the separately-carried dynamic context.
+    pub static_text: String,
+    /// Current Native `systemContext` block, kept separate from frozen source
+    /// sections so provider projection can append it after every static block.
+    pub dynamic_system_context: Option<String>,
+}
+
+pub(crate) struct PromptSectionSlot {
+    pub id: String,
+    pub text: Option<String>,
+    pub scope: PromptSectionScope,
+    pub id_utf16_code_units: Option<Vec<u16>>,
+    pub text_utf16_code_units: Option<Vec<u16>>,
+}
+
+impl PromptSectionSlot {
+    fn id_units(&self) -> Vec<u16> {
+        self.id_utf16_code_units
+            .clone()
+            .unwrap_or_else(|| self.id.encode_utf16().collect())
+    }
+
+    pub(crate) fn id_prompt(
+        &self,
+    ) -> lingxi_llm_client::providers::anthropic::system_prompt::PromptText {
+        self.id_utf16_code_units.as_ref().map_or_else(
+            || {
+                lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
+                    self.id.clone(),
+                )
+            },
+            |units| {
+                lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(
+                    units.clone(),
+                )
+            },
+        )
+    }
+
+    pub(crate) fn text_prompt(
+        &self,
+    ) -> Option<lingxi_llm_client::providers::anthropic::system_prompt::PromptText> {
+        self.text.as_ref().map(|display| {
+            self.text_utf16_code_units.as_ref().map_or_else(
+                || {
+                    lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
+                        display.clone(),
+                    )
+                },
+                |units| {
+                    lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(
+                        units.clone(),
+                    )
+                },
+            )
+        })
+    }
+
+    pub(crate) fn public_id_prompt(
+        &self,
+    ) -> lingxi_llm_client::providers::anthropic::system_prompt::PromptText {
+        lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(
+            self.id_units()
+                .into_iter()
+                .take_while(|unit| *unit != b':' as u16)
+                .collect(),
+        )
+    }
+}
+
+pub(crate) fn prompt_section_slots(
+    sections: Vec<PromptSection>,
+    ctx: &SystemPromptContext,
+) -> Vec<PromptSectionSlot> {
+    let lean = sections.iter().any(|section| section.id_equals_ascii("lean_body"));
+    let suffix = if lean { ":L" } else { "" };
+    let mut shared = Vec::new();
+    let mut available = Vec::new();
+    for section in sections {
+        if section.scope == PromptSectionScope::Shared {
+            shared.push(PromptSectionSlot {
+                id: section.id,
+                text: Some(section.text),
+                scope: PromptSectionScope::Shared,
+                id_utf16_code_units: section.id_utf16_code_units,
+                text_utf16_code_units: section.text_utf16_code_units,
+            });
+        } else {
+            available.push(section);
+        }
+    }
+    let mut output_style = available
+        .iter()
+        .position(|section| section.id_equals_ascii("output_style"))
+        .map(|index| available.remove(index));
+    let mut slots = shared;
+    let ordered = [
+        "communication",
+        "pronouns",
+        "action_caution",
+        "task_continuity",
+        "fable_identity",
+        "tool_param_json",
+        "session_guidance",
+        "memory",
+        "env_info",
+        "bg-session",
+        "context_management",
+        "brief",
+        "focus_mode",
+        "act_dont_rederive",
+        "delivering_work_max",
+        "overcorrection",
+        "subagent_steer_delegation",
+        "opus5_reduced_delegation",
+        "heron_brook",
+        "brook_heron",
+        "willow_tern",
+        "autonomy_append",
+        "endconv_deferred_hint",
+    ];
+    for base in ordered {
+        if base == "memory"
+            && ctx.exclude_dynamic_sections
+            && !available
+                .iter()
+                .any(|section| section.id_base_equals_ascii("memory"))
+        {
+            continue;
+        }
+        let base = if base == "env_info" {
+            if ctx.exclude_dynamic_sections {
+                "env_info_static"
+            } else {
+                "env_info_simple"
+            }
+        } else {
+            base
+        };
+        let slot = if let Some(index) = available
+            .iter()
+            .position(|section| section.id_base_equals_ascii(base))
+        {
+            let section = available.remove(index);
+            PromptSectionSlot {
+                id: section.id,
+                text: Some(section.text),
+                scope: PromptSectionScope::Session,
+                id_utf16_code_units: section.id_utf16_code_units,
+                text_utf16_code_units: section.text_utf16_code_units,
+            }
+        } else {
+            let id = match base {
+                "communication" | "action_caution" | "memory" | "focus_mode" => {
+                    format!("{base}{suffix}")
+                }
+                "session_guidance" => format!(
+                    "session_guidance{suffix}{}:false",
+                    if ctx.exclude_dynamic_sections {
+                        ":sdk"
+                    } else {
+                        ""
+                    }
+                ),
+                _ => base.to_string(),
+            };
+            PromptSectionSlot {
+                id,
+                text: None,
+                scope: PromptSectionScope::Session,
+                id_utf16_code_units: None,
+                text_utf16_code_units: None,
+            }
+        };
+        slots.push(slot);
+        if matches!(base, "env_info_simple" | "env_info_static") {
+            if let Some(section) = output_style.take() {
+                slots.push(PromptSectionSlot {
+                    id: section.id,
+                    text: Some(section.text),
+                    scope: PromptSectionScope::Session,
+                    id_utf16_code_units: section.id_utf16_code_units,
+                    text_utf16_code_units: section.text_utf16_code_units,
+                });
+            }
+        }
+    }
+    slots.extend(available.into_iter().map(|section| PromptSectionSlot {
+        id: section.id,
+        text: Some(section.text),
+        scope: PromptSectionScope::Session,
+        id_utf16_code_units: section.id_utf16_code_units,
+        text_utf16_code_units: section.text_utf16_code_units,
+    }));
+    slots
+}
+
+impl PromptSection {
+    fn new(id: &str, text: String, scope: PromptSectionScope) -> Self {
+        Self {
+            id: id.to_string(),
+            text,
+            scope,
+            id_utf16_code_units: None,
+            text_utf16_code_units: None,
+        }
+    }
+
+    fn id_units(&self) -> Vec<u16> {
+        self.id_utf16_code_units
+            .clone()
+            .unwrap_or_else(|| self.id.encode_utf16().collect())
+    }
+
+    pub(crate) fn text_prompt(
+        &self,
+    ) -> lingxi_llm_client::providers::anthropic::system_prompt::PromptText {
+        self.text_utf16_code_units.as_ref().map_or_else(
+            || {
+                lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
+                    self.text.clone(),
+                )
+            },
+            |units| {
+                lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(
+                    units.clone(),
+                )
+            },
+        )
+    }
+
+    pub(crate) fn id_prompt(
+        &self,
+    ) -> lingxi_llm_client::providers::anthropic::system_prompt::PromptText {
+        self.id_utf16_code_units.as_ref().map_or_else(
+            || {
+                lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
+                    self.id.clone(),
+                )
+            },
+            |units| {
+                lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(
+                    units.clone(),
+                )
+            },
+        )
+    }
+
+    fn id_equals_ascii(&self, value: &str) -> bool {
+        self.id_units().into_iter().eq(value.encode_utf16())
+    }
+
+    fn id_base_units(&self) -> Vec<u16> {
+        self.id_units()
+            .into_iter()
+            .take_while(|unit| *unit != b':' as u16)
+            .collect()
+    }
+
+    fn id_base_equals_ascii(&self, value: &str) -> bool {
+        self.id_base_units().into_iter().eq(value.encode_utf16())
+    }
+
+    pub(crate) fn public_id_prompt(
+        &self,
+    ) -> lingxi_llm_client::providers::anthropic::system_prompt::PromptText {
+        lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(
+            self.id_base_units(),
+        )
+    }
+}
+
+pub(crate) fn render_prompt_sections(sections: &[PromptSection]) -> String {
+    render_prompt_sections_scoped(sections).text
+}
+
+pub(crate) fn render_prompt_sections_scoped(sections: &[PromptSection]) -> RenderedPromptSections {
+    let mut text = String::with_capacity(2048);
+    let mut session_started = false;
+    for section in sections {
+        debug_assert!(!section.id.is_empty());
+        if section.scope == PromptSectionScope::Session {
+            session_started = true;
+        } else {
+            debug_assert!(
+                !session_started,
+                "shared prompt section after session section"
+            );
+        }
+        if !text.is_empty() {
+            push_section_separator(&mut text);
+        }
+        text.push_str(&section.text);
+    }
+    RenderedPromptSections {
+        static_text: text.clone(),
+        text,
+        source_sections: sections.to_vec(),
+        snapshot_system_prompt: None,
+        dynamic_system_context: None,
+    }
+}
+
 /// Assemble a system prompt from a [`SystemPromptContext`].
 ///
 /// Equivalent to [`assemble_system_prompt_with_style`] with no active style —
@@ -116,8 +440,21 @@ pub fn assemble_system_prompt_with_style(
     ctx: &SystemPromptContext,
     output_style: Option<ActiveOutputStyle<'_>>,
 ) -> String {
-    let mut s = String::with_capacity(2048);
-    s.push_str(HEADER);
+    render_prompt_sections(&named_prompt_sections_with_style(ctx, output_style))
+}
+
+/// Preserve the section boundaries used by the prompt renderer so Mod hooks
+/// can operate on named entries before the model request is serialized.
+#[must_use]
+pub(crate) fn named_prompt_sections_with_style(
+    ctx: &SystemPromptContext,
+    output_style: Option<ActiveOutputStyle<'_>>,
+) -> Vec<PromptSection> {
+    let mut sections = vec![PromptSection::new(
+        "header",
+        HEADER.to_string(),
+        PromptSectionScope::Shared,
+    )];
 
     // Static system-prompt BODY (claude-code `J0` statics: opening / `# System`
     // / `# Doing tasks` / `# Executing actions with care` / `# Using your tools`
@@ -128,7 +465,6 @@ pub fn assemble_system_prompt_with_style(
     // `# Doing tasks` (`Lym`) section is gated on the active style's
     // `keepCodingInstructions` (default true ⇒ no-style and builtins stay
     // byte-identical to before).
-    push_section_separator(&mut s);
     let keep_coding = output_style.is_none_or(|s| s.keep_coding_instructions);
     // Session guidance differs between the interactive TUI and print/SDK
     // paths. Keep that signal explicit in the context rather than assuming
@@ -140,7 +476,7 @@ pub fn assemble_system_prompt_with_style(
         /* is_coordinator */ false,
         /* is_non_interactive */ !ctx.is_interactive,
     );
-    s.push_str(&body_sections::format(
+    sections.extend(body_sections::named_sections(
         output_style.is_some(),
         keep_coding,
         &ctx.tool_names,
@@ -149,11 +485,12 @@ pub fn assemble_system_prompt_with_style(
         /* fork_mode_enabled = */ fork_mode,
         /* model = */ &ctx.model,
         /* skills_available = */ ctx.skills_available,
+        /* exclude_dynamic_sections = */ ctx.exclude_dynamic_sections,
     ));
 
     // R-P1c/R-P1d: the LINGXI.md memory block is NO LONGER spliced into the
     // MAIN system prompt. claude-code v2.1.183 carries it as an additional-
-    // context `<system-reminder>` meta user message (the `claudeMd` key of
+    // context `<system-reminder>` meta user message (the `instructions` key of
     // `A6n(re, userContext)`), prepended to each turn's messages — NOT a system-
     // prompt section. The orchestrator builds that message from
     // `memory_block::format` (see `conversation.rs::additional_context_message`).
@@ -169,10 +506,18 @@ pub fn assemble_system_prompt_with_style(
     // compact `# Memory` protocol; standard Claude and non-Claude FullHarness
     // profiles keep the complete `# auto memory` protocol.
     if let Some(dir) = &ctx.memory_dir {
-        push_section_separator(&mut s);
-        s.push_str(&memory_section::render_for_profile(
-            &dir.to_string_lossy(),
-            lingxi_core::host::model_capabilities::prompt_profile_for(&ctx.model),
+        let memory_id = if sections.iter().any(|section| section.id == "lean_body") {
+            "memory:L"
+        } else {
+            "memory"
+        };
+        sections.push(PromptSection::new(
+            memory_id,
+            memory_section::render_for_profile(
+                &dir.to_string_lossy(),
+                lingxi_core::host::model_capabilities::prompt_profile_for(&ctx.model),
+            ),
+            PromptSectionScope::Session,
         ));
     }
 
@@ -181,39 +526,51 @@ pub fn assemble_system_prompt_with_style(
     // prompt is identical across machines (prompt-cache reuse). The conversation
     // re-emits the same env block in the first-user-message context reminder.
     if !ctx.exclude_dynamic_sections {
-        push_section_separator(&mut s);
-        s.push_str(&env_block::format(ctx));
+        sections.push(PromptSection::new(
+            "env_info_simple",
+            env_block::format(ctx),
+            PromptSectionScope::Session,
+        ));
     }
 
     if let Some(style) = output_style {
-        push_section_separator(&mut s);
-        s.push_str(&output_style_section(style));
+        sections.push(PromptSection::new(
+            "output_style",
+            output_style_section(style),
+            PromptSectionScope::Session,
+        ));
     }
 
     // (M8 cc2.1.198) `# Background Session` (`_ff()` @219583413) — bg jobs
     // only (`LINGXI_SESSION_KIND=bg` + `LINGXI_JOB_DIR`); binary position is
     // after output style and before context management.
     if let Some(bg) = bg_session::from_env() {
-        push_section_separator(&mut s);
-        s.push_str(&bg);
+        sections.push(PromptSection::new(
+            "bg-session",
+            bg,
+            PromptSectionScope::Session,
+        ));
     }
 
     // GAP-2: `# Context management` (iIm) — always, unconditional.
     // Binary cx() position: after env_info_simple + language + output_style +
     // bg-session + scratchpad. Model-specific post-context sections may follow.
-    push_section_separator(&mut s);
-    s.push_str(body_sections::CONTEXT_MANAGEMENT_SECTION);
+    sections.push(PromptSection::new(
+        "context_management",
+        body_sections::CONTEXT_MANAGEMENT_SECTION.to_string(),
+        PromptSectionScope::Session,
+    ));
 
     // Model-specific 2.1.220 tail: act-don't-rederive for every profile,
     // Opus-5 delivery/correction restrictions, or Fable/Mythos autonomous
     // mitigation. These are after context management in the oracle.
-    for section in body_sections::post_context_sections(&ctx.model, output_style.is_some()) {
-        push_section_separator(&mut s);
-        s.push_str(&section);
-    }
+    sections.extend(body_sections::post_context_named_sections(
+        &ctx.model,
+        output_style.is_some(),
+    ));
 
     // R-P1b: NO `Notes:` FOOTER on the MAIN prompt.
-    s
+    sections
 }
 
 /// Format the active output-style section, byte-for-byte as TS
@@ -237,14 +594,6 @@ fn push_section_separator(s: &mut String) {
         s.push_str(SECTION_SEP);
     }
 }
-
-// The cache-block splitter and its supporting types live in `llm_runtime`
-// (provider-protocol logic, not prompt content). Re-exported here so that
-// in-orchestrator callers (`crate::prompt::split_system_blocks_with`, etc.)
-// continue to resolve without any edit to their call sites.
-pub use llm_runtime::prompt_format::{
-    split_system_blocks, split_system_blocks_with, SplitOptions, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
-};
 
 /// Runtime context required to assemble a system prompt.
 ///
@@ -352,19 +701,23 @@ pub struct FileTreeEntry {
 /// One loaded LINGXI.md (or `LINGXI.local.md`) file.
 ///
 /// Distinct from [`memory::lingxi_md::LoadedFile`] — the
-/// assembler keeps a leaner representation post-trim.
+/// assembler retains the native sanitized acquisition body.
 #[derive(Debug, Clone)]
 pub struct MemoryFile {
     /// Absolute path on disk (PII-safe — only emitted into the
     /// system prompt, never into telemetry).
     pub path: PathBuf,
-    /// File body, leading/trailing whitespace trimmed. NEVER empty
-    /// (whitespace-only files are filtered upstream).
+    /// Direct instruction file which imported this file, when present.
+    pub parent: Option<PathBuf>,
+    /// Sanitized source content exposed to Mod instruction lists.
+    pub source_content: Option<String>,
+    /// Sanitized file body with its original leading/trailing whitespace.
+    /// Whitespace-only files are filtered by the acquisition loader.
     pub body: String,
     /// `true` when this is a `LINGXI.local.md`; `false` for `LINGXI.md`.
     ///
-    /// Retained for backward compatibility; the injection description is now
-    /// driven by [`MemoryFile::tier`] (a `Local` tier implies this is `true`).
+    /// Records direct local-file origin; an imported child keeps its inherited
+    /// tier while this flag distinguishes it from the named local entry.
     pub is_local_override: bool,
     /// Which LINGXI.md tier the file came from. Selects the injection
     /// description (`getLingxiMds`, claudemd.ts:1168-1186): Managed and User
@@ -377,13 +730,13 @@ pub struct MemoryFile {
     /// system prompt (claudemd.ts:773 `conditionalRule:false` filter — enforced
     /// by [`memory_block::format`]); instead they are lazily activated per
     /// edited/opened file by the orchestrator's
-    /// `conditional_rules_reminder_message` (§F, claudemd.ts
+    /// `nested_memory_reminder_messages` (§F, claudemd.ts
     /// `processConditionedMdRules`).
     pub globs: Option<Vec<String>>,
     /// claude-code `rawContent` — the file's RAW on-disk text, byte-verbatim
     /// (carried through from [`memory::lingxi_md::loader::MemoryEntry::raw_content`]).
     ///
-    /// Distinct from [`Self::body`], which is stripped AND trimmed. Consumed by
+    /// Distinct from [`Self::body`], which is stripped. Consumed by
     /// `ConversationOrchestrator::seed_memory_read_state` so a later `Read` of
     /// this path can be compared against the bytes actually on disk.
     pub raw_content: String,
@@ -443,6 +796,8 @@ mod tests {
     #[test]
     fn memory_file_constructs() {
         let f = MemoryFile {
+            parent: None,
+            source_content: None,
             path: PathBuf::from("/proj/LINGXI.md"),
             body: "# title\nbody\n".into(),
             is_local_override: false,
@@ -513,6 +868,117 @@ mod tests {
     }
 
     #[test]
+    fn named_prompt_sections_keep_stable_order_and_cache_scopes() {
+        let sections = named_prompt_sections_with_style(&ctx_minimal(), None);
+        let ids = sections
+            .iter()
+            .map(|section| section.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &ids[..7],
+            &[
+                "header",
+                "intro",
+                "system",
+                "doing_tasks",
+                "actions",
+                "tools",
+                "tone"
+            ]
+        );
+        assert!(ids.contains(&"communication"));
+        assert!(ids.contains(&"env_info_simple"));
+        assert!(ids.contains(&"context_management"));
+        let mut unique = std::collections::HashSet::new();
+        assert!(ids.iter().all(|id| unique.insert(*id)));
+        let first_session = sections
+            .iter()
+            .position(|section| section.scope == PromptSectionScope::Session)
+            .unwrap();
+        assert!(sections[..first_session]
+            .iter()
+            .all(|section| section.scope == PromptSectionScope::Shared));
+        assert!(sections[first_session..]
+            .iter()
+            .all(|section| section.scope == PromptSectionScope::Session));
+    }
+
+    #[test]
+    fn scoped_rendering_retains_native_source_sections() {
+        let shared = PromptSection::new("shared", "共享".into(), PromptSectionScope::Shared);
+        let session = PromptSection::new("session", "会话".into(), PromptSectionScope::Session);
+        let rendered = render_prompt_sections_scoped(&[shared.clone(), session]);
+        assert_eq!(rendered.text, "共享\n\n会话");
+        assert_eq!(rendered.static_text, rendered.text);
+        assert_eq!(rendered.source_sections.len(), 2);
+        assert_eq!(
+            rendered.source_sections[0].scope,
+            PromptSectionScope::Shared
+        );
+        assert_eq!(
+            rendered.source_sections[1].scope,
+            PromptSectionScope::Session
+        );
+        assert!(rendered.snapshot_system_prompt.is_none());
+
+        let shared_only = render_prompt_sections_scoped(&[shared]);
+        assert_eq!(shared_only.source_sections.len(), 1);
+    }
+
+    #[test]
+    fn lean_sdk_section_names_follow_the_oracle_suffixes() {
+        let mut ctx = ctx_minimal();
+        ctx.model = "claude-opus-5".into();
+        ctx.tool_names.push("Agent".into());
+        ctx.is_interactive = true;
+        ctx.exclude_dynamic_sections = true;
+        let sections = named_prompt_sections_with_style(&ctx, None);
+        let ids = sections
+            .iter()
+            .map(|section| section.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"lean_body"));
+        assert!(ids.contains(&"communication:L"));
+        assert!(ids.contains(&"action_caution:L"));
+        assert!(ids.contains(&"session_guidance:L:sdk:false"));
+    }
+
+    #[test]
+    fn optional_prompt_slots_preserve_present_section_bytes() {
+        let standard = ctx_minimal();
+        let mut lean = standard.clone();
+        lean.model = "claude-opus-5".into();
+        let mut sdk = lean.clone();
+        sdk.exclude_dynamic_sections = true;
+        let mut sdk_with_memory = sdk.clone();
+        sdk_with_memory.memory_dir = Some(PathBuf::from("/tmp/memory"));
+        for ctx in [standard, lean, sdk, sdk_with_memory] {
+            let sections = named_prompt_sections_with_style(&ctx, None);
+            let expected = render_prompt_sections(&sections);
+            let slots = prompt_section_slots(sections, &ctx);
+            assert!(slots
+                .iter()
+                .any(|slot| slot.id == "task_continuity" && slot.text.is_none()));
+            assert!(slots
+                .iter()
+                .any(|slot| slot.id == "brief" && slot.text.is_none()));
+            let present = slots
+                .into_iter()
+                .filter_map(|slot| {
+                    slot.text.map(|text| PromptSection {
+                        id: slot.id,
+                        text,
+                        scope: slot.scope,
+                        id_utf16_code_units: slot.id_utf16_code_units,
+                        text_utf16_code_units: slot.text_utf16_code_units,
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(render_prompt_sections(&present), expected);
+        }
+    }
+
+    #[test]
     fn active_style_injects_section_after_env_no_footer() {
         let ctx = ctx_minimal();
         let style = ActiveOutputStyle {
@@ -566,33 +1032,33 @@ mod tests {
         assert!(out.ends_with("you don't need to wrap up early or hand off mid-task."));
     }
 
-    // ---- system-prompt cache-block split (splitSysPromptPrefix parity) ----
-    // Unit tests for split_system_blocks_with live in llm_runtime::prompt_format.
-    // This end-to-end test stays here because it exercises assemble_system_prompt
-    // (orchestrator) and verifies the round-trip via the re-exported splitter.
+    // ---- SDK-owned system-prompt cache projection ----
 
     #[test]
-    fn split_assembled_default_prompt_splits_at_header() {
-        // End-to-end: the real assembler output begins with HEADER and splits
-        // into prefix + rest, with the rest carrying the static BODY + the
-        // `# Environment` block (no memory/tools/footer).
+    fn assembled_default_prompt_projects_through_current_source_vector_api() {
+        // The current API carries source sections, not a flattened string.
+        // With no provider-global cache scope, the SDK joins the source vector
+        // into one ordinary Anthropic system block without changing its text.
         let ctx = ctx_minimal();
         let s = assemble_system_prompt(&ctx);
-        let blocks = split_system_blocks(&s, true);
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].text, HEADER);
-        // The rest block now opens with the static BODY (the `Pym` opening
-        // paragraph), which precedes the env block.
-        assert!(blocks[1].text.starts_with(
-            "\nYou are an interactive agent that helps users with software engineering tasks."
-        ));
-        assert!(blocks[1]
-            .text
-            .contains("\n\n# Environment\nYou have been invoked in the following environment: "));
-        // No `Notes:` footer; the model tail follows context management.
-        assert!(!blocks[1].text.contains("Notes:"));
-        assert!(blocks[1]
-            .text
-            .ends_with("give a recommendation, not an exhaustive survey"));
+        let source = named_prompt_sections_with_style(&ctx, None)
+            .iter()
+            .map(PromptSection::text_prompt)
+            .collect();
+        let system = lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
+            source,
+            None,
+            None,
+        );
+        let blocks = lingxi_llm_client::providers::anthropic::system_prompt::project_system_prompt(
+            &system,
+            None,
+            "claude-sonnet-4-5",
+            lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
+            Default::default(),
+        );
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].block.text, s);
+        assert!(blocks[0].block.text.starts_with(HEADER));
     }
 }

@@ -100,6 +100,22 @@ struct PersistentTeardown {
     agent_id: Arc<StdMutex<Option<AgentId>>>,
 }
 
+struct RestoreStartupGuard(Option<lingxi_core::host::handback::HandbackRestoreParticipant>);
+
+impl RestoreStartupGuard {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for RestoreStartupGuard {
+    fn drop(&mut self) {
+        if let Some(participant) = &self.0 {
+            participant.release_failed();
+        }
+    }
+}
+
 struct AgentIdentityObserver {
     effort: Option<String>,
     task_id: String,
@@ -482,9 +498,10 @@ impl Task for LocalAgentHandler {
     async fn register_resume_recipe(
         &self,
         task_id: &str,
-        request: SubagentSpawnRequest,
+        mut request: SubagentSpawnRequest,
         inheritance: SubagentInheritance,
     ) -> Result<(), TaskError> {
+        request.restore_handback_start = None;
         self.resume_recipes
             .lock()
             .unwrap()
@@ -613,6 +630,46 @@ impl Task for LocalAgentHandler {
         }
         Ok(())
     }
+
+    async fn send_peer(
+        &self,
+        task_id: &str,
+        envelope: lingxi_core::host::handback::HandbackEnvelope,
+        _ctx: TaskContext,
+    ) -> Result<(), TaskError> {
+        let streaming = self
+            .streaming_spawner
+            .as_ref()
+            .ok_or(TaskError::Unsupported)?;
+        let agent_id = self
+            .agent_ids
+            .lock()
+            .await
+            .get(task_id)
+            .copied()
+            .ok_or(TaskError::TerminatedTask)?;
+        if !envelope.validate()
+            || !matches!(envelope.receipt.recipient, lingxi_core::host::handback::HandbackRecipient::Agent { agent_id: recipient, .. } if recipient == agent_id)
+        {
+            return Err(TaskError::Internal("invalid peer report recipient".into()));
+        }
+        if lingxi_core::host::agent_processes::is_stop_pending(&agent_id.to_string())
+            || (self.workers.lock().await.contains_key(task_id)
+                && self.status_sink.is_terminal(task_id).await)
+        {
+            return Err(TaskError::TerminatedTask);
+        }
+        if let Some(gate) = &self.fork_resume_gate {
+            let fork_name = self.fork_names.lock().await.get(task_id).cloned();
+            gate.check_resume(agent_id, fork_name.as_deref())
+                .await
+                .map_err(TaskError::Internal)?;
+        }
+        if let Err(error) = streaming.resume_peer(&agent_id, envelope).await {
+            return Err(TaskError::Internal(error.to_string()));
+        }
+        Ok(())
+    }
 }
 
 #[path = "human_resume.rs"]
@@ -683,6 +740,15 @@ impl LocalAgentHandler {
             .as_ref()
             .and_then(|r| r.forked_skill_name.clone());
         let request = spawn_request.unwrap_or_else(|| SubagentSpawnRequest {
+            stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::Session,
+            agent_spawn_provenance: Default::default(),
+            handback_opt_in: false,
+            parent_permission_mode: None,
+            handback_enabled: None,
+            handback_ends_turn_enabled: None,
+            restored_handback_state: None,
+            restored_handback_history: Vec::new(),
+            restore_handback_start: None,
             teammate_color: None,
             subagent_type,
             prompt,
@@ -702,6 +768,7 @@ impl LocalAgentHandler {
             cwd: None,
             worktree: None,
             fork_context_messages: None,
+            instruction_context: None,
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
@@ -714,6 +781,7 @@ impl LocalAgentHandler {
             depth: 0,
             origin_session_id: None,
             parent_model_override: None,
+            parent_model_profile_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
             forked_skill_effort: None,
@@ -728,6 +796,9 @@ impl LocalAgentHandler {
         });
         // What `park` needs, cloned BEFORE `request` moves into the spawn:
         // the launch configuration is what a rebuilt runner is configured from.
+        if let Some(store) = &self.parked_store {
+            store.register_origin(requested_agent_id, &request);
+        }
         let parked_request = request.clone();
         let parked_description = request.description.clone().unwrap_or_default();
 
@@ -739,10 +810,12 @@ impl LocalAgentHandler {
         });
 
         if restoring.is_none() {
+            let mut recipe_request = request.clone();
+            recipe_request.restore_handback_start = None;
             self.resume_recipes
                 .lock()
                 .unwrap()
-                .insert(task_id.clone(), (request.clone(), inherit.clone()));
+                .insert(task_id.clone(), (recipe_request, inherit.clone()));
         }
         let human_epoch = restoring.as_ref().map(|restore| restore.epoch);
         let mut human_ready = restoring.take().map(|restore| restore.ready);
@@ -802,6 +875,7 @@ impl LocalAgentHandler {
         } else {
             (None, None)
         };
+        let restore_startup = RestoreStartupGuard(request.restore_handback_start.clone());
         let worker: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
             if is_backgrounded && worker_streaming.is_some() {
                 // ── PERSISTENT / resumable path (local_agent "comes to rest"). ──
@@ -812,6 +886,7 @@ impl LocalAgentHandler {
                 // evicted). Terminal only on Failed / Killed / channel-close.
                 let streaming = worker_streaming.expect("is_some checked");
                 Box::pin(async move {
+                    let mut restore_startup = restore_startup;
                     if let Some(activation_rx) = activation_rx {
                         if activation_rx.await.is_err() {
                             if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree)
@@ -866,8 +941,14 @@ impl LocalAgentHandler {
                             .await
                     };
                     let (agent_id, mut rx) = match started {
-                        Ok(v) => v,
+                        Ok(v) => {
+                            restore_startup.disarm();
+                            v
+                        }
                         Err(e) => {
+                            // Release before output/cleanup awaits: peer runners
+                            // must not depend on this failed worker's I/O.
+                            drop(restore_startup);
                             let ready = human_ready.take();
                             if human_epoch.is_none() {
                                 let _ = output_manager
@@ -936,7 +1017,16 @@ impl LocalAgentHandler {
                     let mut terminal_status = TaskStatus::Completed;
                     loop {
                         match rx.recv().await {
+                            Some(SubagentEvent::TranscriptSnapshot {
+                                agent_id: snapshot_agent_id,
+                                messages,
+                            }) if snapshot_agent_id == agent_id => {
+                                status_sink
+                                    .replace_agent_transcript(&worker_task_id, messages)
+                                    .await;
+                            }
                             Some(SubagentEvent::Completed {
+                                handback,
                                 result,
                                 usage,
                                 total_tool_use_count,
@@ -981,21 +1071,29 @@ impl LocalAgentHandler {
                                 // can resume from, so this is where the durable
                                 // record is written.
                                 if let Some(store) = &parked_store {
+                                    let history = match status_sink.task_registry() {
+                                        Some(registry) => {
+                                            registry.handback_history_for_agent(agent_id).await
+                                        }
+                                        None => Vec::new(),
+                                    };
                                     store
                                         .park(
                                             &worker_task_id,
                                             agent_id,
                                             &parked_description,
                                             &parked_request,
+                                            handback.as_ref(),
+                                            &history,
                                         )
                                         .await;
                                 }
-                                if rest_result.is_some() {
-                                    outcome.result = rest_result.clone();
-                                }
-                                if rest_usage.is_some() {
-                                    outcome.usage = rest_usage.clone();
-                                }
+                                // Each outer run starts a fresh report allowance.
+                                // Empty or withheld output must not revive an old
+                                // report, warning or terminal usage projection.
+                                outcome.result = rest_result.clone();
+                                outcome.usage = rest_usage.clone();
+                                outcome.handback = handback;
                                 // Unconditional, unlike the two above: this
                                 // accumulator is what a LATER terminal
                                 // notification reads, so a clean rest after a
@@ -1017,13 +1115,15 @@ impl LocalAgentHandler {
                                     .set_agent_outcome(&worker_task_id, outcome.clone())
                                     .await;
                                 status_sink
-                                    .notify_rest(
+                                    .notify_rest_with_finalizing(
                                         &worker_task_id,
                                         rest_result,
                                         rest_usage,
                                         Some(agent_id),
                                         parked_request.name.clone(),
                                         parked_request.team_name.clone(),
+                                        outcome.handback.as_ref().map(|state| state.run),
+                                        true,
                                     )
                                     .await;
                             }
@@ -1087,6 +1187,7 @@ impl LocalAgentHandler {
                 })
             } else {
                 Box::pin(async move {
+                    let _restore_startup = restore_startup;
                     if let Some(activation_rx) = activation_rx {
                         if activation_rx.await.is_err() {
                             if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree)
@@ -1146,6 +1247,7 @@ impl LocalAgentHandler {
                         lingxi_core::host::task_registry::AgentTerminalOutcome::default();
                     match &result {
                         Ok(SubagentResult::Completed {
+                            handback,
                             content,
                             total_tool_use_count,
                             total_duration_ms,
@@ -1157,6 +1259,7 @@ impl LocalAgentHandler {
                             // (`s ? "<result>…" : ""`), so an empty answer omits
                             // `<result>` rather than rendering an empty one.
                             outcome.result = (!text.is_empty()).then_some(text);
+                            outcome.handback = handback.clone();
                             outcome.usage = Some(lingxi_core::host::task_registry::AgentRunUsage {
                                 subagent_tokens: *total_tokens,
                                 tool_uses: *total_tool_use_count,
@@ -1211,7 +1314,17 @@ impl LocalAgentHandler {
                     status_sink
                         .set_agent_outcome(&worker_task_id, outcome)
                         .await;
-                    status_sink.set_status(&worker_task_id, status).await;
+                    if matches!(&result, Ok(SubagentResult::Completed { .. })) {
+                        status_sink
+                            .set_agent_status_with_finalizing(
+                                &worker_task_id,
+                                TaskStatus::Completed,
+                                true,
+                            )
+                            .await;
+                    } else {
+                        status_sink.set_status(&worker_task_id, status).await;
+                    }
 
                     // The subagent has terminated; drop the cancel record so a late
                     // kill is a graceful no-op (claude-code `status !== 'running'`).
@@ -1282,6 +1395,7 @@ mod tests {
     }
     use super::*;
     use crate::state::TaskStatus;
+    use futures::StreamExt;
     use lingxi_core::host::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
     use lingxi_core::host::tool_invoker::{
         SubagentInvocationContext, ToolInvoker, ToolInvokerError,
@@ -1319,7 +1433,10 @@ mod tests {
             limit: Option<u64>,
         ) -> Result<FileContent, FsError> {
             let map = self.files.lock().await;
-            let content = map.get(path).cloned().unwrap_or_default();
+            let content = map
+                .get(path)
+                .cloned()
+                .ok_or_else(|| FsError::NotFound(path.to_string()))?;
             let off = usize::try_from(offset.unwrap_or(0)).unwrap_or(usize::MAX);
             let body: String = content.chars().skip(off).collect();
             let truncated = limit.is_some_and(|lim| body.len() as u64 > lim);
@@ -1445,6 +1562,7 @@ mod tests {
             match canned {
                 Some(CannedResult::Completed(content, total_tokens)) => {
                     Ok(SubagentResult::Completed {
+                        handback: None,
                         agent_id: lingxi_core::types::AgentId::new(),
                         content,
                         usage: SubagentUsage {
@@ -1584,12 +1702,16 @@ mod tests {
     }
     #[async_trait]
     impl lingxi_core::host::parked_agent_store::ParkedAgentStore for RecordingParkedStore {
+        fn register_origin(&self, _agent_id: AgentId, _request: &SubagentSpawnRequest) {}
+
         async fn park(
             &self,
             task_id: &str,
             agent_id: AgentId,
             description: &str,
             _request: &SubagentSpawnRequest,
+            _handback: Option<&lingxi_core::host::handback::HandbackState>,
+            _history: &[lingxi_core::host::handback::HandbackState],
         ) {
             self.parked.lock().unwrap().push((
                 task_id.to_string(),
@@ -1615,6 +1737,15 @@ mod tests {
     /// resolved before dispatch (the P1-01 ownership transfer).
     fn request_with_worktree(prompt: &str) -> SubagentSpawnRequest {
         SubagentSpawnRequest {
+            stop_hook_scope: Default::default(),
+            agent_spawn_provenance: Default::default(),
+            handback_opt_in: false,
+            parent_permission_mode: None,
+            handback_enabled: None,
+            handback_ends_turn_enabled: None,
+            restored_handback_state: None,
+            restored_handback_history: Vec::new(),
+            restore_handback_start: None,
             teammate_color: None,
             subagent_type: "general-purpose".into(),
             prompt: prompt.into(),
@@ -1634,6 +1765,7 @@ mod tests {
             cwd: Some("/repo/.lingxi/worktrees/agent-1".into()),
             worktree: Some(isolation_worktree_handle()),
             fork_context_messages: None,
+            instruction_context: None,
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
@@ -1646,6 +1778,7 @@ mod tests {
             depth: 1,
             origin_session_id: None,
             parent_model_override: None,
+            parent_model_profile_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
             forked_skill_effort: None,
@@ -1696,6 +1829,7 @@ mod tests {
         /// terminal `set_status` — the drain is terminal-gated, so the payload
         /// must land first.
         outcome: StdMutex<Option<lingxi_core::host::task_registry::AgentTerminalOutcome>>,
+        transcript: StdMutex<Option<Vec<lingxi_core::types::ConversationMessage>>>,
         calls: StdMutex<Vec<&'static str>>,
     }
     #[async_trait]
@@ -1722,6 +1856,13 @@ mod tests {
             self.calls.lock().unwrap().push("outcome");
             *self.outcome.lock().unwrap() = Some(outcome);
         }
+        async fn replace_agent_transcript(
+            &self,
+            _task_id: &str,
+            messages: Vec<lingxi_core::types::ConversationMessage>,
+        ) {
+            *self.transcript.lock().unwrap() = Some(messages);
+        }
         async fn notify_rest(
             &self,
             task_id: &str,
@@ -1730,6 +1871,7 @@ mod tests {
             agent_id: Option<lingxi_core::types::AgentId>,
             agent_name: Option<String>,
             team_name: Option<String>,
+            _run: Option<lingxi_core::host::handback::HandbackRunKey>,
         ) {
             *self.parked.lock().unwrap() = true;
             self.statuses
@@ -1916,6 +2058,7 @@ mod tests {
 
     fn completed_event(marker: &str) -> SubagentEvent {
         SubagentEvent::Completed {
+            handback: None,
             agent_id: AgentId::new(),
             result: json!({ "marker": marker }),
             usage: llm_runtime::ExecutionUsage::default(),
@@ -1948,6 +2091,139 @@ mod tests {
     }
 
     // ---- Tests --------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handback_restore_batch_async_pool_failure_releases_remaining_runner() {
+        use lingxi_core::host::handback::HandbackRestoreBatch;
+
+        #[derive(Default)]
+        struct Api(std::sync::atomic::AtomicUsize);
+        #[async_trait]
+        impl agent::SubagentApiClient for Api {
+            async fn stream(
+                &self,
+                _request: agent::api::SubagentApiRequest,
+            ) -> Result<
+                futures::stream::BoxStream<
+                    'static,
+                    Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+                >,
+                llm_runtime::LlmError,
+            > {
+                let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(llm_runtime::HistoryResponse {
+                        id: "restored-response".into(),
+                        model: "mock".into(),
+                        content: vec![llm_runtime::ContentBlock::Text {
+                            text: "restored answer".into(),
+                            cache_control: None, citations: None,
+                        }],
+                        stop_reason: Some("end_turn".into()),
+                        stop_details: None,
+                        usage: llm_runtime::ExecutionUsage::default(),
+                        cost: None,
+                        provider_metadata: serde_json::Value::Null,
+                    })
+                };
+                let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+                Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
+            }
+        }
+
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let (_dir, output) = make_output_manager(fs.clone());
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(agent::StateMachinePool::new(runtime.clone(), 1));
+        let api = Arc::new(Api::default());
+        let spawner = Arc::new(agent::PoolSubagentSpawner::new(pool).with_api_client(api.clone()));
+        let sink = Arc::new(crate::registry_status_sink::RegistryStatusSink::new());
+        let handler = Arc::new(
+            LocalAgentHandler::new(
+                spawner.clone(),
+                Arc::new(MockInvoker),
+                Arc::new(MockBudget),
+                output.clone(),
+            )
+            .with_status_sink(sink.clone())
+            .with_streaming_spawner(spawner.clone()),
+        );
+        let mut registry = crate::registry::TaskRegistry::new(runtime, fs, output);
+        registry.register_handler(TaskType::LocalAgent, handler.clone());
+        let registry = Arc::new(registry);
+        sink.bind(registry.clone());
+        spawner.set_task_registry(registry.clone());
+        let actors = [AgentId::new(), AgentId::new(), AgentId::new()];
+        let batch = HandbackRestoreBatch::new(actors);
+        let mut task_ids = Vec::new();
+        // Every host launch succeeds synchronously. The two capacity failures
+        // occur later in the actual persistent spawner's detached worker.
+        for actor in actors {
+            let request = SubagentSpawnRequest {
+                subagent_type: "general-purpose".into(),
+                run_in_background: true,
+                resumed_history: Some(vec![lingxi_core::types::ConversationMessage::user(
+                    lingxi_core::types::MessageId::new(),
+                    "restored history".into(),
+                )]),
+                restore_handback_start: batch.participant(actor),
+                ..Default::default()
+            };
+            task_ids.push(
+                registry
+                    .spawn(
+                        TaskType::LocalAgent,
+                        TaskSpawnInput::LocalAgent {
+                            agent_id: actor,
+                            subagent_type: request.subagent_type.clone(),
+                            prompt: String::new(),
+                            is_backgrounded: true,
+                            tool_use_id: None,
+                            creator_teammate_name: None,
+                            creator_team_name: None,
+                            creator_agent_id: None,
+                            spawn_request: Some(request),
+                            inheritance: None,
+                        },
+                        "restored batch".into(),
+                    )
+                    .await
+                    .expect("host launch returns before async capacity failure"),
+            );
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let mut completed = 0;
+                let mut failed = 0;
+                for task_id in &task_ids {
+                    match registry.get(task_id).await.unwrap().base().status {
+                        TaskStatus::Completed => completed += 1,
+                        TaskStatus::Failed => failed += 1,
+                        _ => {}
+                    }
+                }
+                if completed == 1 && failed == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("failed startup slots release the real surviving runner");
+        assert_eq!(api.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(handler
+            .resume_recipes
+            .lock()
+            .unwrap()
+            .values()
+            .all(|(request, _)| request.restore_handback_start.is_none()));
+        // Keep the batch alive through the assertions: Arc final-drop cannot
+        // accidentally make a missing asynchronous release pass this test.
+        assert!(batch.participant(actors[0]).is_some());
+        for task_id in task_ids {
+            registry.kill(&task_id).await.unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn real_background_pool_identity_routes_nested_completion_to_its_parent() {
@@ -2011,88 +2287,98 @@ mod tests {
         }
         #[async_trait]
         impl agent::SubagentApiClient for Api {
-            async fn messages_create(
+            async fn stream(
                 &self,
-                _: &str,
-                _: Option<&str>,
-                messages: Vec<lingxi_core::types::ConversationMessage>,
-                _: Vec<serde_json::Value>,
-            ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-                let registry = self.registry.get().unwrap().upgrade().unwrap();
-                let history = serde_json::to_string(&messages).unwrap();
-                let child = history.contains("nested child prompt");
-                let label = if child { "nested child" } else { "real parent" };
-                let actual = *self
-                    .allocations
-                    .0
-                    .lock()
-                    .unwrap()
-                    .get(label)
-                    .expect("allocation precedes model");
-                assert!(
-                    self.mcp_ids.lock().unwrap().contains(&actual),
-                    "MCP builder must see the actual owner ID before the first model request"
-                );
-                let row = registry
-                    .get(&actual.to_string())
-                    .await
-                    .expect("actual pool id must resolve before the first model request");
-                assert!(
-                    matches!(row, crate::state::TaskState::LocalAgent(ref agent) if agent.agent_id == actual)
-                );
-                if !child {
-                    if let Some(expected) = self.expected_restored_id {
-                        assert_eq!(actual, expected, "restore must allocate the persisted runner ID, not merely add an alias");
-                        let old = registry
-                            .get("arestoredold")
-                            .await
-                            .expect("old task alias must resolve before the first model request");
-                        assert!(
-                            matches!(old, crate::state::TaskState::LocalAgent(ref agent) if agent.agent_id == expected)
-                        );
-                        assert!(!history.contains("original prompt must not replay"));
-                    }
-                }
-                let text = if child {
-                    self.release_child.notified().await;
-                    "nested child answer"
-                } else if self
-                    .parent_calls
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                    == 0
-                {
-                    let mut req = request("nested child prompt", "nested child");
-                    req.creator_agent_id = Some(actual);
-                    let id = registry
-                        .spawn(
-                            TaskType::LocalAgent,
-                            input(req, Some(actual)),
-                            "nested child".into(),
-                        )
-                        .await
-                        .unwrap();
-                    *self.child_task.lock().unwrap() = Some(id);
-                    "waiting for child"
-                } else {
+                api_request: agent::api::SubagentApiRequest,
+            ) -> Result<
+                futures::stream::BoxStream<
+                    'static,
+                    Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+                >,
+                llm_runtime::LlmError,
+            > {
+                let messages = api_request.messages;
+                let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = {
+                    let registry = self.registry.get().unwrap().upgrade().unwrap();
+                    let history = serde_json::to_string(&messages).unwrap();
+                    let child = history.contains("nested child prompt");
+                    let label = if child { "nested child" } else { "real parent" };
+                    let actual = *self
+                        .allocations
+                        .0
+                        .lock()
+                        .unwrap()
+                        .get(label)
+                        .expect("allocation precedes model");
                     assert!(
-                        history.contains("nested child answer"),
-                        "the real owner's resumed model must receive its child's result"
+                        self.mcp_ids.lock().unwrap().contains(&actual),
+                        "MCP builder must see the actual owner ID before the first model request"
                     );
-                    "parent folded child"
+                    let row = registry
+                        .get(&actual.to_string())
+                        .await
+                        .expect("actual pool id must resolve before the first model request");
+                    assert!(
+                        matches!(row, crate::state::TaskState::LocalAgent(ref agent) if agent.agent_id == actual)
+                    );
+                    if !child {
+                        if let Some(expected) = self.expected_restored_id {
+                            assert_eq!(
+                                actual, expected,
+                                "restore must allocate the persisted runner ID, not merely add an alias"
+                            );
+                            let old = registry.get("arestoredold").await.expect(
+                                "old task alias must resolve before the first model request",
+                            );
+                            assert!(
+                                matches!(old, crate::state::TaskState::LocalAgent(ref agent) if agent.agent_id == expected)
+                            );
+                            assert!(!history.contains("original prompt must not replay"));
+                        }
+                    }
+                    let text = if child {
+                        self.release_child.notified().await;
+                        "nested child answer"
+                    } else if self
+                        .parent_calls
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        == 0
+                    {
+                        let mut req = request("nested child prompt", "nested child");
+                        req.creator_agent_id = Some(actual);
+                        let id = registry
+                            .spawn(
+                                TaskType::LocalAgent,
+                                input(req, Some(actual)),
+                                "nested child".into(),
+                            )
+                            .await
+                            .unwrap();
+                        *self.child_task.lock().unwrap() = Some(id);
+                        "waiting for child"
+                    } else {
+                        assert!(
+                            history.contains("nested child answer"),
+                            "the real owner's resumed model must receive its child's result"
+                        );
+                        "parent folded child"
+                    };
+                    Ok(llm_runtime::HistoryResponse {
+                        id: "response".into(),
+                        model: "mock".into(),
+                        content: vec![llm_runtime::ContentBlock::Text {
+                            text: text.into(),
+                            cache_control: None, citations: None,
+                        }],
+                        stop_reason: Some("end_turn".into()),
+                        stop_details: None,
+                        usage: llm_runtime::ExecutionUsage::default(),
+                        cost: None,
+                        provider_metadata: serde_json::Value::Null,
+                    })
                 };
-                Ok(llm_runtime::HistoryResponse {
-                    id: "response".into(),
-                    model: "mock".into(),
-                    content: vec![llm_runtime::ContentBlock::Text {
-                        text: text.into(),
-                        cache_control: None,
-                    }],
-                    stop_reason: Some("end_turn".into()),
-                    stop_details: None,
-                    usage: llm_runtime::ExecutionUsage::default(),
-                    cost: None,
-                    provider_metadata: serde_json::Value::Null,
-                })
+                let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+                Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
             }
         }
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
@@ -2503,7 +2789,7 @@ mod tests {
             manager.clone(),
             sink.clone(),
         )
-        .with_streaming_spawner(streaming);
+        .with_streaming_spawner(streaming.clone());
         let ctx = make_ctx(fs);
         let handle = handler
             .spawn(local_agent_input("start"), ctx.clone())
@@ -2516,6 +2802,26 @@ mod tests {
             }
             tokio::task::yield_now().await;
         };
+        let agent_id = streaming.spawned_id.lock().unwrap().unwrap();
+        let settled_transcript = vec![
+            lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                "prompt from the runner".into(),
+            ),
+            lingxi_core::types::ConversationMessage::Assistant {
+                id: lingxi_core::types::MessageId::new(),
+                content: vec![lingxi_core::types::ContentBlock::Text {
+                    text: "actual last assistant row".into(), citations: None,
+                }],
+                stop_reason: Some("end_turn".into()),
+            },
+        ];
+        tx.send(SubagentEvent::TranscriptSnapshot {
+            agent_id,
+            messages: settled_transcript.clone(),
+        })
+        .await
+        .unwrap();
         tx.send(completed_event("clean report")).await.unwrap();
         for _ in 0..200 {
             if std::fs::read_link(&output).is_ok() && *sink.parked.lock().unwrap() {
@@ -2524,6 +2830,11 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert_eq!(std::fs::read_link(&output).unwrap(), target);
+        assert_eq!(
+            sink.transcript.lock().unwrap().as_deref(),
+            Some(settled_transcript.as_slice()),
+            "the handler replaces the task state with the runner's full settled transcript before rest"
+        );
         assert_eq!(
             std::fs::read_to_string(&output).unwrap(),
             "transcript line\n"
@@ -3559,6 +3870,7 @@ mod tests {
         let spawned_id = streaming.spawned_id.lock().unwrap().expect("spawn ran");
 
         tx.send(SubagentEvent::Completed {
+            handback: None,
             agent_id: AgentId::new(),
             result: json!({ "text": "rest answer" }),
             usage: llm_runtime::ExecutionUsage::default(),
@@ -3899,6 +4211,15 @@ mod tests {
         let inherited_budget: Arc<dyn BudgetEnforcerHandle> = Arc::new(MockBudget);
         let creator_agent_id = lingxi_core::types::AgentId::new();
         let expected = SubagentSpawnRequest {
+            stop_hook_scope: Default::default(),
+            agent_spawn_provenance: Default::default(),
+            handback_opt_in: false,
+            parent_permission_mode: None,
+            handback_enabled: None,
+            handback_ends_turn_enabled: None,
+            restored_handback_state: None,
+            restored_handback_history: Vec::new(),
+            restore_handback_start: None,
             teammate_color: None,
             subagent_type: "code-reviewer".into(),
             prompt: "inspect the background request".into(),
@@ -3918,6 +4239,7 @@ mod tests {
             cwd: Some("/workspace/subdir".into()),
             worktree: None,
             fork_context_messages: None,
+            instruction_context: None,
             fork_parent_system_prompt: None,
             schema: Some(r#"{\"type\":\"object\"}"#.into()),
             structured_output_mode: Default::default(),
@@ -3930,6 +4252,7 @@ mod tests {
             depth: 3,
             origin_session_id: None,
             parent_model_override: Some("claude-opus-4-6".into()),
+            parent_model_profile_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
             forked_skill_effort: None,

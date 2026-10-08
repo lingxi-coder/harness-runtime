@@ -28,17 +28,25 @@ use crate::host::subagent_spawn::SubagentSpawnRequest;
 /// Records which background agents are parked and restorable.
 #[async_trait]
 pub trait ParkedAgentStore: Send + Sync {
+    /// Pin this actor's persistence directory before its first rest or model
+    /// call. A later session switch must not redirect terminal row removal.
+    fn register_origin(&self, agent_id: crate::types::AgentId, request: &SubagentSpawnRequest);
+
     /// Record `agent_id` as parked, with everything a rebuild needs.
     ///
     /// Called on every rest, not only the first: the launch configuration does
     /// not change, but re-writing keeps the record's presence tied to the
     /// agent's liveness rather than to a single moment early in its life.
+    /// The current reporting state and archived runs must both be preserved;
+    /// archived receipts do not become the active run's report allowance.
     async fn park(
         &self,
         task_id: &str,
         agent_id: crate::types::AgentId,
         description: &str,
         request: &SubagentSpawnRequest,
+        handback: Option<&crate::host::handback::HandbackState>,
+        history: &[crate::host::handback::HandbackState],
     );
 
     /// Forget `agent_id` — it reached a terminal state and must never be

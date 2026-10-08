@@ -258,6 +258,41 @@ impl ImplicitTeammateSpawner {
                 });
             }
         };
+        let selection = match self.seam.resolved_model_selection(&task_id).await {
+            Ok(selection) if !selection.model.is_empty() => selection,
+            result => {
+                let _ = self.seam.kill(&task_id).await;
+                self.rollback(&team_name, &name, &agent_id).await;
+                return Err(error(&match result {
+                    Err(cause) => cause.to_string(),
+                    Ok(_) => "teammate admission returned an empty model selection".into(),
+                }));
+            }
+        };
+        if let Some(home) = &self.home {
+            if let Err(cause) = crate::team_file::update_team_file(home, &team_name, |current| {
+                if let Some(member) = current
+                    .as_mut()
+                    .and_then(|value| value.get_mut("members"))
+                    .and_then(serde_json::Value::as_array_mut)
+                    .and_then(|members| {
+                        members
+                            .iter_mut()
+                            .find(|member| member["agentId"].as_str() == Some(&advertised_id))
+                    })
+                {
+                    member["model"] = selection.model.clone().into();
+                    member["model_profile"] = serde_json::json!(selection.model_profile);
+                }
+                Ok(())
+            })
+            .await
+            {
+                let _ = self.seam.kill(&task_id).await;
+                self.rollback(&team_name, &name, &agent_id).await;
+                return Err(error(&cause.to_string()));
+            }
+        }
         self.team.set_task_id(&agent_id, task_id.clone()).await;
         self.team
             .mailbox_router
@@ -341,9 +376,10 @@ impl ImplicitTeammateSpawner {
             task_id,
             launch: TeammateLaunch {
                 teammate_id: advertised_id.clone(),
-                agent_id: advertised_id,
+                agent_id: agent_id.to_string(),
                 agent_type: request.subagent_type,
-                model: request.model.unwrap_or_default(),
+                model: selection.model,
+                model_profile: selection.model_profile,
                 name,
                 color: color.into(),
                 tmux_session_name: pane
@@ -493,6 +529,15 @@ mod tests {
             self.alive.store(false, Ordering::SeqCst);
             Ok(())
         }
+        async fn resolved_model_selection(
+            &self,
+            _: &str,
+        ) -> Result<lingxi_core::host::team_spawn::TeammateModelSelection, TeamSpawnError> {
+            Ok(lingxi_core::host::team_spawn::TeammateModelSelection {
+                model: "gpt-4o".into(),
+                model_profile: Some("openai".into()),
+            })
+        }
         async fn is_alive(&self, _: &str) -> bool {
             self.alive.load(Ordering::SeqCst)
         }
@@ -611,6 +656,28 @@ mod tests {
         );
         assert!(unique_name("MAIN", [].into_iter()).is_err());
     }
+    #[tokio::test]
+    async fn launch_reports_resolved_model_and_profile_for_inherited_and_alias_inputs() {
+        let (service, _team, harness, directory) = setup();
+        service.initialize().await;
+        for model in [None, Some("sonnet".into()), Some("openai/gpt-4o".into())] {
+            let mut input = request();
+            input.model = model;
+            let launch = service.spawn(input, inherit(&harness)).await.unwrap();
+            assert_eq!(launch.model, "gpt-4o");
+            assert_eq!(launch.model_profile.as_deref(), Some("openai"));
+            let file =
+                crate::team_file::read_team_file(directory.path(), "session-12345678").unwrap();
+            let member = file
+                .members
+                .iter()
+                .find(|member| member.agent_id == launch.teammate_id)
+                .unwrap();
+            assert_eq!(member.model.as_deref(), Some("gpt-4o"));
+            assert_eq!(member.model_profile.as_deref(), Some("openai"));
+        }
+    }
+
     #[tokio::test]
     async fn spawn_preserves_idle_reported_before_task_link() {
         let (service, team, harness, _tmp) = setup();

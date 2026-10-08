@@ -46,9 +46,10 @@ use std::sync::Arc;
 
 use crate::protocol::events::{ClientEvent, ErrorKindDto};
 use crate::protocol::message::{MessageBlockDto, MessageDto};
+use lingxi_core::host::{HandleError, orchestrator::ModUiControlOutcome};
 use lingxi_core::types::ContentBlock;
-use orchestrator::streaming_loop::PumpedTurn;
 use orchestrator::OrchestratorError;
+use orchestrator::streaming_loop::PumpedTurn;
 
 use crate::adapter::lowering::value_to_json_string;
 use crate::adapter::sink::ClientEventSink;
@@ -116,8 +117,13 @@ pub fn lower_content_block_with(
     block: &ContentBlock,
     index: &mut ToolUseIndex,
 ) -> Option<MessageBlockDto> {
+    if let Some(text) = block.visible_text() {
+        return Some(MessageBlockDto::Text {
+            text: text.to_owned(),
+        });
+    }
     match block {
-        ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
+        ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
             Some(MessageBlockDto::Text { text: text.clone() })
         }
         ContentBlock::Thinking {
@@ -163,12 +169,15 @@ pub fn lower_content_block_with(
                 id,
                 tool: tool.clone(),
                 result_json: value_to_json_string(&result),
-                is_error: *is_error,
+                is_error: is_error.unwrap_or(false),
                 old_string,
                 new_string,
                 file_path,
                 display: Some(crate::adapter::tool_display::lower_tool_result_display(
-                    &tool, input, &result, *is_error,
+                    &tool,
+                    input,
+                    &result,
+                    is_error.unwrap_or(false),
                 )),
             })
         }
@@ -284,6 +293,110 @@ pub fn map_orchestrator_error(err: &OrchestratorError) -> ClientEvent {
     }
 }
 
+/// Parse a canonical Native UI control payload and require the subtype bound
+/// to the selected `ClientCommand` variant. The correlation id is a separate
+/// protocol field and cannot be smuggled into the Native request body.
+pub fn parse_mod_ui_control_request(
+    request_json: &str,
+    expected_subtype: &str,
+) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, String> {
+    let value = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(request_json)
+        .map_err(|error| format!("invalid Mod UI control JSON: {error}"))?;
+    let Some(object) = value.value.as_object() else {
+        return Err("Mod UI control request must be a JSON object".into());
+    };
+    if object.get("subtype").and_then(serde_json::Value::as_str) != Some(expected_subtype) {
+        return Err(format!("Mod UI control subtype must be {expected_subtype}"));
+    }
+    if object.contains_key("request_id") {
+        return Err("Mod UI request_id must remain outside the canonical request body".into());
+    }
+    Ok(value)
+}
+
+/// Parse a host-local UI operation. Its route/operation allowlist is enforced
+/// by the session-bound Core method, not by this wire adapter.
+pub fn parse_mod_ui_client_operation(
+    operation_json: &str,
+) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, String> {
+    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(operation_json)
+        .map_err(|error| format!("invalid Mod UI operation JSON: {error}"))
+}
+
+/// Lower one correlated Mod UI control response to the Client protocol.
+/// Arbitrary Native response data and local render metadata stay JSON strings
+/// at the UniFFI boundary; the request id remains outside the canonical body.
+#[must_use]
+pub fn mod_ui_control_result_event(
+    request_id: impl Into<String>,
+    result: Result<ModUiControlOutcome, HandleError>,
+) -> ClientEvent {
+    let (response_json, metadata_json, error) = match result {
+        Ok(outcome) => {
+            let mut metadata = serde_json::Map::new();
+            if let Some(revision) = outcome.render_revision {
+                metadata.insert("renderRevision".into(), serde_json::json!(revision));
+            }
+            if !outcome.client_runtime_epochs.is_empty() {
+                metadata.insert(
+                    "clientRuntimeEpochs".into(),
+                    serde_json::to_value(&outcome.client_runtime_epochs)
+                        .expect("client runtime epoch map is serializable"),
+                );
+            }
+            if let Some(token) = outcome.client_state_token {
+                metadata.insert("clientStateToken".into(), serde_json::Value::String(token));
+            }
+            match outcome.response.to_json_string() {
+                Ok(response_json) => (
+                    Some(response_json),
+                    (!metadata.is_empty())
+                        .then(|| value_to_json_string(&serde_json::Value::Object(metadata))),
+                    None,
+                ),
+                Err(error) => (
+                    None,
+                    (!metadata.is_empty())
+                        .then(|| value_to_json_string(&serde_json::Value::Object(metadata))),
+                    Some(format!("invalid Mod UI control response: {error}")),
+                ),
+            }
+        }
+        Err(error) => (None, None, Some(error.to_string())),
+    };
+    ClientEvent::UiControlResult {
+        request_id: request_id.into(),
+        response_json,
+        metadata_json,
+        error,
+    }
+}
+
+/// Lower one host-local UI operation response. Operations have no Native
+/// render-revision metadata, but use the same outer correlation event.
+#[must_use]
+pub fn mod_ui_client_operation_result_event(
+    request_id: impl Into<String>,
+    result: Result<lingxi_core::types::utf16_json::Utf16JsonProjection, HandleError>,
+) -> ClientEvent {
+    let (response_json, error) = match result {
+        Ok(response) => match response.to_json_string() {
+            Ok(response) => (Some(response), None),
+            Err(error) => (
+                None,
+                Some(format!("invalid Mod UI operation response: {error}")),
+            ),
+        },
+        Err(error) => (None, Some(error.to_string())),
+    };
+    ClientEvent::UiControlResult {
+        request_id: request_id.into(),
+        response_json,
+        metadata_json: None,
+        error,
+    }
+}
+
 /// The connection-scoped live-turn wrapper.
 ///
 /// Holds the same `Arc<dyn ClientEventSink>` as the [`AdapterOutputStream`]
@@ -307,6 +420,28 @@ impl TurnEventEmitter {
     /// receipt, BEFORE driving the turn future.
     pub async fn emit_turn_started(&self, turn_id: Option<u64>) {
         self.sink.emit(turn_started_event(turn_id)).await;
+    }
+
+    /// Emit a correlated Mod UI control result on this connection's sink.
+    pub async fn emit_mod_ui_control_result(
+        &self,
+        request_id: impl Into<String>,
+        result: Result<ModUiControlOutcome, HandleError>,
+    ) {
+        self.sink
+            .emit(mod_ui_control_result_event(request_id, result))
+            .await;
+    }
+
+    /// Emit a correlated local UI operation result on this connection's sink.
+    pub async fn emit_mod_ui_client_operation_result(
+        &self,
+        request_id: impl Into<String>,
+        result: Result<lingxi_core::types::utf16_json::Utf16JsonProjection, HandleError>,
+    ) {
+        self.sink
+            .emit(mod_ui_client_operation_result_event(request_id, result))
+            .await;
     }
 
     /// Translate a finished turn `Result` into its boundary [`ClientEvent`].
@@ -448,23 +583,18 @@ mod tests {
     /// the `stop_reason` rides on the event (the named F1-13 test).
     #[test]
     fn message_complete_synthesized_from_pumped_turn() {
-        let turn = PumpedTurn {
-            stop_details: None,
-            output_tokens: 0,
-            assistant_blocks: vec![
-                ContentBlock::Thinking {
-                    thinking: "let me think".into(),
-                    signature: Some("sig".into()),
-                },
-                ContentBlock::Text {
-                    text: "the answer is 42".into(),
-                },
-            ],
-            tool_uses: Vec::new(),
-            stop_reason: Some("end_turn".into()),
-            usage: None,
-            cost_quote: None,
-        };
+        let mut turn = PumpedTurn::default();
+        turn.assistant_blocks = vec![
+            ContentBlock::Thinking {
+                thinking: "let me think".into(),
+                signature: Some("sig".into()),
+            },
+            ContentBlock::Text {
+                text: "the answer is 42".into(),
+                citations: None,
+            },
+        ];
+        turn.stop_reason = Some("end_turn".into());
 
         match message_complete_event(&turn) {
             ClientEvent::MessageComplete {
@@ -495,24 +625,18 @@ mod tests {
     /// dropped from the reproduced scrollback rather than mismodeled.
     #[test]
     fn image_block_is_dropped_from_synthesized_message() {
-        let turn = PumpedTurn {
-            stop_details: None,
-            output_tokens: 0,
-            assistant_blocks: vec![
-                ContentBlock::Image {
-                    source: lingxi_core::types::ImageSource::Url {
-                        url: "https://example.test/x.png".into(),
-                    },
+        let mut turn = PumpedTurn::default();
+        turn.assistant_blocks = vec![
+            ContentBlock::Image {
+                source: lingxi_core::types::ImageSource::Url {
+                    url: "https://example.test/x.png".into(),
                 },
-                ContentBlock::Text {
-                    text: "caption".into(),
-                },
-            ],
-            tool_uses: Vec::new(),
-            stop_reason: None,
-            usage: None,
-            cost_quote: None,
-        };
+            },
+            ContentBlock::Text {
+                text: "caption".into(),
+                citations: None,
+            },
+        ];
         let msg = synthesize_message(&turn);
         assert_eq!(
             msg.blocks,
@@ -577,6 +701,142 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mod_ui_control_request_parser_enforces_variant_subtype_and_outer_id() {
+        let payload = r#"{"subtype":"ui_message","data":{"value":1}}"#;
+        assert_eq!(
+            parse_mod_ui_control_request(payload, "ui_message").unwrap().value,
+            serde_json::json!({"subtype":"ui_message","data":{"value":1}})
+        );
+        assert!(
+            parse_mod_ui_control_request(payload, "ui_client_fault")
+                .unwrap_err()
+                .contains("subtype must be ui_client_fault")
+        );
+        assert!(
+            parse_mod_ui_control_request(
+                r#"{"subtype":"ui_message","request_id":"inner"}"#,
+                "ui_message"
+            )
+            .unwrap_err()
+            .contains("outside the canonical request body")
+        );
+
+        for subtype in ["ui_press", "ui_input", "ui_select"] {
+            let payload = format!(r#"{{"subtype":"{subtype}","plugin":"plugin","handle":1}}"#);
+            assert_eq!(
+                parse_mod_ui_control_request(&payload, subtype).unwrap().value["subtype"],
+                subtype
+            );
+            assert!(parse_mod_ui_control_request(&payload, "ui_client_press").is_err());
+        }
+    }
+
+    #[test]
+    fn mod_ui_operation_parser_only_requires_valid_json_syntax() {
+        assert_eq!(
+            parse_mod_ui_client_operation(r#"{"subtype":"mount","target":null}"#).unwrap().value,
+            serde_json::json!({"subtype":"mount","target":null})
+        );
+        assert!(parse_mod_ui_client_operation("{").is_err());
+    }
+
+    #[tokio::test]
+    async fn mod_ui_control_result_echoes_request_id_and_separates_render_metadata() {
+        let sink = MockSink::arc();
+        let wrapper = TurnEventEmitter::new(sink.clone());
+        wrapper
+            .emit_mod_ui_control_result(
+                "render-request-7",
+                Ok(ModUiControlOutcome {
+                    response: lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                        serde_json::json!({"tree":{"type":"text"}}),
+                    ),
+                    render_revision: Some(7),
+                    client_runtime_epochs: std::collections::BTreeMap::from([("review".into(), 3)]),
+                    client_state_token: Some("42".into()),
+                }),
+            )
+            .await;
+
+        let events = sink.events().await;
+        assert_eq!(events.len(), 1);
+        let ClientEvent::UiControlResult {
+            request_id,
+            response_json,
+            metadata_json,
+            error,
+        } = &events[0]
+        else {
+            panic!("expected a correlated Mod UI control result")
+        };
+        assert_eq!(request_id, "render-request-7");
+        assert_eq!(
+            response_json.as_deref(),
+            Some(r#"{"tree":{"type":"text"}}"#)
+        );
+        assert_eq!(error, &None);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                metadata_json
+                    .as_deref()
+                    .expect("render metadata is present")
+            )
+            .unwrap(),
+            serde_json::json!({
+                "renderRevision":7,
+                "clientRuntimeEpochs":{"review":3},
+                "clientStateToken":"42",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_ui_operation_result_is_correlated_without_control_metadata() {
+        let sink = MockSink::arc();
+        let wrapper = TurnEventEmitter::new(sink.clone());
+        wrapper
+            .emit_mod_ui_client_operation_result(
+                "operation-request-3",
+                Ok(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                    serde_json::json!({"handled":true}),
+                )),
+            )
+            .await;
+
+        assert_eq!(
+            sink.events().await,
+            vec![ClientEvent::UiControlResult {
+                request_id: "operation-request-3".into(),
+                response_json: Some(r#"{"handled":true}"#.into()),
+                metadata_json: None,
+                error: None,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_ui_control_error_preserves_correlator() {
+        let sink = MockSink::arc();
+        let wrapper = TurnEventEmitter::new(sink.clone());
+        wrapper
+            .emit_mod_ui_control_result(
+                "fault-4",
+                Err(HandleError::ActionFailed("invalid UI request".into())),
+            )
+            .await;
+
+        assert_eq!(
+            sink.events().await,
+            vec![ClientEvent::UiControlResult {
+                request_id: "fault-4".into(),
+                response_json: None,
+                metadata_json: None,
+                error: Some("handle action failed: invalid UI request".into()),
+            }]
+        );
+    }
+
     /// The wrapper's `complete(Ok)` path emits the synthesized `MessageComplete`
     /// on the sink.
     #[tokio::test]
@@ -584,15 +844,12 @@ mod tests {
         let sink = MockSink::arc();
         let wrapper = TurnEventEmitter::new(sink.clone());
 
-        let turn = PumpedTurn {
-            stop_details: None,
-            output_tokens: 0,
-            assistant_blocks: vec![ContentBlock::Text { text: "hi".into() }],
-            tool_uses: Vec::new(),
-            stop_reason: Some("end_turn".into()),
-            usage: None,
-            cost_quote: None,
-        };
+        let mut turn = PumpedTurn::default();
+        turn.assistant_blocks = vec![ContentBlock::Text {
+            text: "hi".into(),
+            citations: None,
+        }];
+        turn.stop_reason = Some("end_turn".into());
         wrapper.complete(Ok(turn)).await;
 
         let events = sink.events().await;

@@ -8,18 +8,15 @@
 //! orchestrator's API client adapter and hands an `Arc<dyn SubagentApiClient>`
 //! to [`crate::handle::PoolSubagentSpawner`].
 //!
-//! The required method is a single non-streaming round-trip. A streaming
-//! variant ([`SubagentApiClient::messages_create_stream`]) layers on top with a
-//! default that wraps the non-streaming call, so retry/cost wiring lives behind
-//! the concrete impl exactly as the orchestrator's `execute_one_turn` consumes
-//! it. The production orchestrator adapter overrides the streaming method to
-//! delegate to its real SSE transport.
+//! Every implementation accepts the complete typed streaming request. Provider
+//! routing, tool choice, effort and registered call options are never silently
+//! discarded by a default adapter.
 
 use async_trait::async_trait;
-use futures::stream::{BoxStream, StreamExt};
+use futures::stream::BoxStream;
 use lingxi_core::host::{SubagentObservation, SubagentSpawnObserver, WorkflowQueryWatchdog};
 use lingxi_core::types::{AgentId, SessionId};
-use llm_runtime::{HistoryEvent, HistoryResponse, LlmError};
+use llm_runtime::{HistoryEvent, LlmError};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -145,6 +142,26 @@ impl ObserverEventSink {
 /// provide a scripted mock (see [`crate::runner`] tests).
 #[async_trait]
 pub trait SubagentApiClient: Send + Sync {
+    /// Resolve the already-captured Native refusal-text facts for a physical
+    /// provider route. `None` means the host has not supplied those facts; the
+    /// Agent must not infer them from its model allowlist or session mode.
+    fn refusal_api_text_snapshot(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Result<Option<lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot>, LlmError> {
+        Ok(None)
+    }
+
+    /// Resolve a Mod's model rewrite through the provider's route catalog.
+    fn resolve_mod_media_route(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Option<llm_runtime::MediaRoute> {
+        None
+    }
+
     /// Consume a pending near-limit wrap-up hint for the current subagent
     /// query loop. Default no-op preserves existing mocks and non-provider
     /// implementations.
@@ -180,182 +197,33 @@ pub trait SubagentApiClient: Send + Sync {
     ) {
     }
 
-    /// Issue one non-streaming model round-trip.
-    ///
-    /// `system` is the assembled system prompt (stable across the run);
-    /// `messages` is the full conversation history, oldest first; `tools` is
-    /// the wire tool-definition array (`{name, description, input_schema}`)
-    /// advertised to the model, from [`crate::context::SubagentContext::tool_schemas`]
-    /// (empty = no tools).
-    async fn messages_create(
+    /// Issue one round-trip with every model, routing and execution option.
+    /// The returned stream contains the provider's decoded history events.
+    async fn stream(
         &self,
-        model: &str,
-        system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-    ) -> Result<HistoryResponse, LlmError>;
+        request: SubagentApiRequest,
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError>;
+}
 
-    /// Issue one model round-trip over the streaming SSE transport, returning
-    /// the wire-decoded [`HistoryEvent`] stream (yielding until `message_stop` or
-    /// `completed`). The [`crate::runner::run_subagent`] loop drains this
-    /// through `crate::accumulator::accumulate_stream` into the same
-    /// `HistoryResponse` the non-streaming path returns, so the turn loop is
-    /// transport-agnostic.
-    ///
-    /// The default wraps [`SubagentApiClient::messages_create`] in a synthetic,
-    /// lossless event sequence — a client that only implements the
-    /// non-streaming round-trip still satisfies this seam (the round-trip
-    /// reproduces the response exactly). The production orchestrator adapter
-    /// overrides this to delegate to its real `StreamingApiClient::stream`.
-    /// `effort` is the per-request thinking-effort hint (claude-code
-    /// `output_config.effort`): a level string or integer budget, or `None`.
-    /// The default (synthetic, non-streaming) path ignores it — only the
-    /// production provider adapter threads it onto the request + emits the
-    /// `effort-2025-11-24` beta.
-    async fn messages_create_stream(
-        &self,
-        model: &str,
-        system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let _ = effort;
-        let resp = self.messages_create(model, system, messages, tools).await?;
-        let events = crate::accumulator::response_to_stream_events(resp);
-        Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
-    }
-
-    /// Like [`Self::messages_create_stream`], but FORCES the model to call the
-    /// named tool (`tool_choice`) — used to make a subagent emit structured
-    /// output by forcing a synthetic `StructuredOutput` tool. The default
-    /// implementation ignores `forced_tool` (no forcing), so existing impls and
-    /// the non-schema path are unchanged; the production provider adapter
-    /// overrides it to thread `tool_choice` into the request.
-    async fn messages_create_stream_forced(
-        &self,
-        model: &str,
-        system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        forced_tool: Option<&str>,
-        effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let _ = forced_tool;
-        self.messages_create_stream(model, system, messages, tools, effort)
-            .await
-    }
-
-    /// Like [`Self::messages_create`], but threads a provider `profile` so the
-    /// per-spawn route (e.g. a dual-LLM candidate's resolved provider) reaches
-    /// the underlying multi-provider client. The DEFAULT body ignores `profile`
-    /// and delegates to [`Self::messages_create`] — so the ~5 existing impls and
-    /// test mocks that only implement the profile-less method keep their legacy
-    /// (default-provider) behavior unchanged (frozen-trait rule). The production
-    /// orchestrator adapter OVERRIDES this to forward `profile` to
-    /// `ModelRuntime::messages_create(model, profile, …)`.
-    async fn messages_create_in(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-    ) -> Result<HistoryResponse, LlmError> {
-        let _ = profile;
-        self.messages_create(model, system, messages, tools).await
-    }
-
-    /// Streaming analog of [`Self::messages_create_in`] — threads the provider
-    /// `profile` onto the SSE round-trip. The DEFAULT body ignores `profile` and
-    /// delegates to [`Self::messages_create_stream`] (which itself defaults to a
-    /// synthetic stream over [`Self::messages_create`]), so non-streaming /
-    /// profile-less impls and mocks are unaffected. The production orchestrator
-    /// adapter OVERRIDES this to forward `profile` to its real SSE transport.
-    async fn messages_create_stream_in(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let _ = profile;
-        self.messages_create_stream(model, system, messages, tools, effort)
-            .await
-    }
-
-    /// Like [`Self::messages_create_stream_in`], but FORCES the named tool
-    /// (`tool_choice`). The DEFAULT delegates to
-    /// [`Self::messages_create_stream_forced`] (ignoring `profile`); the
-    /// production adapter overrides it to thread BOTH `profile` and the forced
-    /// tool. Keeps the structured-output (schema) subagent path provider-routed.
-    async fn messages_create_stream_forced_in(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        forced_tool: Option<&str>,
-        effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        let _ = profile;
-        self.messages_create_stream_forced(model, system, messages, tools, forced_tool, effort)
-            .await
-    }
-
-    /// Like [`Self::messages_create_stream_in`], with Fusion per-turn ceilings
-    /// and a COGS query-source label. The default ignores `opts`.
-    async fn messages_create_stream_in_opts(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        effort: Option<serde_json::Value>,
-        opts: SubagentApiCallOpts,
-    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        if opts.model_attempt.is_some() {
-            return Err(LlmError::InvalidRequest {
-                message: "registered model attempt requires an opts-aware host adapter".into(),
-            });
-        }
-        self.messages_create_stream_in(model, profile, system, messages, tools, effort)
-            .await
-    }
-
-    /// Like [`Self::messages_create_stream_forced_in`], with Fusion per-turn
-    /// ceilings. The default ignores `opts`.
-    async fn messages_create_stream_forced_in_opts(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        forced_tool: Option<&str>,
-        effort: Option<serde_json::Value>,
-        opts: SubagentApiCallOpts,
-    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        if opts.model_attempt.is_some() {
-            return Err(LlmError::InvalidRequest {
-                message: "registered model attempt requires an opts-aware host adapter".into(),
-            });
-        }
-        self.messages_create_stream_forced_in(
-            model,
-            profile,
-            system,
-            messages,
-            tools,
-            forced_tool,
-            effort,
-        )
-        .await
-    }
+/// Complete owned input for one subagent model round-trip.
+#[derive(Debug, Clone)]
+pub struct SubagentApiRequest {
+    /// Resolved provider wire model identifier.
+    pub model: String,
+    /// Provider profile; absence selects the host's current default route.
+    pub profile: Option<String>,
+    /// Stable rendered system prompt for this run.
+    pub system: Option<String>,
+    /// Current oldest-first conversation history.
+    pub messages: Vec<lingxi_core::types::ConversationMessage>,
+    /// Advertised tool definitions for this round-trip.
+    pub tools: Vec<serde_json::Value>,
+    /// Explicit tool choice for the designated structured-output turn.
+    pub forced_tool: Option<String>,
+    /// Per-request thinking-effort hint.
+    pub effort: Option<serde_json::Value>,
+    /// Registered attempt, output ceiling and query-source accounting.
+    pub opts: SubagentApiCallOpts,
 }
 
 /// Optional per-round-trip Fusion / COGS knobs.
@@ -403,6 +271,22 @@ impl WorkflowWatchdogApiClient {
 
 #[async_trait]
 impl SubagentApiClient for WorkflowWatchdogApiClient {
+    fn refusal_api_text_snapshot(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<Option<lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot>, LlmError> {
+        self.inner.refusal_api_text_snapshot(model, profile)
+    }
+
+    fn resolve_mod_media_route(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Option<llm_runtime::MediaRoute> {
+        self.inner.resolve_mod_media_route(model, profile)
+    }
+
     fn consume_pending_near_limit_wrap_up_hint(&self) -> bool {
         self.inner.consume_pending_near_limit_wrap_up_hint()
     }
@@ -427,149 +311,88 @@ impl SubagentApiClient for WorkflowWatchdogApiClient {
         });
     }
 
-    async fn messages_create(
+    async fn stream(
         &self,
-        model: &str,
-        system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-    ) -> Result<HistoryResponse, LlmError> {
-        self.inner
-            .messages_create(model, system, messages, tools)
-            .await
-    }
-
-    async fn messages_create_stream(
-        &self,
-        model: &str,
-        system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        effort: Option<serde_json::Value>,
+        request: SubagentApiRequest,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        self.inner
-            .messages_create_stream(model, system, messages, tools, effort)
-            .await
-    }
-
-    async fn messages_create_stream_forced(
-        &self,
-        model: &str,
-        system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        forced_tool: Option<&str>,
-        effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        self.inner
-            .messages_create_stream_forced(model, system, messages, tools, forced_tool, effort)
-            .await
-    }
-
-    async fn messages_create_in(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-    ) -> Result<HistoryResponse, LlmError> {
-        self.inner
-            .messages_create_in(model, profile, system, messages, tools)
-            .await
-    }
-
-    async fn messages_create_stream_in(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        self.inner
-            .messages_create_stream_in(model, profile, system, messages, tools, effort)
-            .await
-    }
-
-    async fn messages_create_stream_forced_in(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        forced_tool: Option<&str>,
-        effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        self.inner
-            .messages_create_stream_forced_in(
-                model,
-                profile,
-                system,
-                messages,
-                tools,
-                forced_tool,
-                effort,
-            )
-            .await
-    }
-
-    // WP2a item 2 (F002 sub-claim 3), round 2: WITHOUT these two overrides the
-    // trait's default `_in_opts` bodies re-dispatch through `self` (this
-    // wrapper)'s non-opts methods above, silently dropping `opts` — the exact
-    // Fusion per-turn `max_output_tokens` ceiling and `query_source_label`
-    // this seam exists to carry — on the ONLY path that spawns a Fusion panel
-    // (`panel.rs` -> `handle.rs`'s `WORKFLOW_QUERY_WATCHDOG_OVERRIDE` wraps
-    // `ctx.api_client` in this decorator). Delegate verbatim, same as every
-    // other method on this impl.
-    async fn messages_create_stream_in_opts(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        effort: Option<serde_json::Value>,
-        opts: SubagentApiCallOpts,
-    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        self.inner
-            .messages_create_stream_in_opts(model, profile, system, messages, tools, effort, opts)
-            .await
-    }
-
-    async fn messages_create_stream_forced_in_opts(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        forced_tool: Option<&str>,
-        effort: Option<serde_json::Value>,
-        opts: SubagentApiCallOpts,
-    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        self.inner
-            .messages_create_stream_forced_in_opts(
-                model,
-                profile,
-                system,
-                messages,
-                tools,
-                forced_tool,
-                effort,
-                opts,
-            )
-            .await
+        self.inner.stream(request).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    struct CapturedRequest(std::sync::Mutex<Option<SubagentApiRequest>>);
+
+    #[async_trait]
+    impl SubagentApiClient for CapturedRequest {
+        async fn stream(
+            &self,
+            request: SubagentApiRequest,
+        ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+            *self.0.lock().unwrap() = Some(request);
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_wrapper_preserves_the_complete_stream_request() {
+        for forced_tool in [None, Some("StructuredOutput".to_owned())] {
+            let inner = Arc::new(CapturedRequest(std::sync::Mutex::new(None)));
+            let wrapper = WorkflowWatchdogApiClient::new(
+                inner.clone(),
+                WorkflowQueryWatchdog::default(),
+                Vec::new(),
+            );
+            let run = lingxi_core::host::ModelAttemptRun::new(Arc::new(()));
+            let attempt = run
+                .context(lingxi_core::host::ModelAttemptStage::Panel, Some(2))
+                .unwrap();
+            let request = SubagentApiRequest {
+                model: "exact-model".into(),
+                profile: Some("second-provider".into()),
+                system: Some("EXACT SYSTEM".into()),
+                messages: vec![lingxi_core::types::ConversationMessage::user(
+                    lingxi_core::types::MessageId::new(),
+                    "EXACT HISTORY".into(),
+                )],
+                tools: vec![serde_json::json!({"name":"Read","input_schema":{"type":"object"}})],
+                forced_tool,
+                effort: Some(serde_json::json!(8192)),
+                opts: SubagentApiCallOpts {
+                    model_attempt: Some(attempt.clone()),
+                    max_output_tokens: Some(4096),
+                    query_source_label: Some("fusion_panel".into()),
+                },
+            };
+            let _stream = wrapper.stream(request.clone()).await.unwrap();
+            let captured = inner.0.lock().unwrap().take().unwrap();
+            assert_eq!(captured.model, request.model);
+            assert_eq!(captured.profile, request.profile);
+            assert_eq!(captured.system, request.system);
+            assert_eq!(captured.messages, request.messages);
+            assert_eq!(captured.tools, request.tools);
+            assert_eq!(captured.forced_tool, request.forced_tool);
+            assert_eq!(captured.effort, request.effort);
+            assert_eq!(captured.opts.max_output_tokens, Some(4096));
+            assert_eq!(
+                captured.opts.query_source_label.as_deref(),
+                Some("fusion_panel")
+            );
+            let captured_attempt = captured.opts.model_attempt.unwrap();
+            assert_eq!(
+                captured_attempt.registration_id(),
+                attempt.registration_id()
+            );
+            assert_eq!(
+                captured_attempt.logical_call_id(),
+                attempt.logical_call_id()
+            );
+            assert_eq!(captured_attempt.panel_slot(), Some(2));
+        }
+    }
 
     #[tokio::test]
     async fn observer_saturation_preserves_lifecycle_fifo_without_blocking_producer() {
@@ -629,7 +452,7 @@ mod tests {
             *content = vec![lingxi_core::types::ContentBlock::ToolResult {
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "ordinary tool output".into(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }];
@@ -656,6 +479,7 @@ mod tests {
                 content: "idle".into(),
                 subtype: Some("agent_idle".into()),
                 compact_metadata: None,
+                model_fallback: None,
                 refusal_fallback: None,
             },
         });
@@ -732,61 +556,6 @@ mod tests {
                 "failed",
                 "killed"
             ]
-        );
-    }
-
-    /// A mock that implements ONLY the required `messages_create`. It records
-    /// the call so we can prove the DEFAULTED `messages_create_in` routes back
-    /// through it (ignoring the profile) without the impl knowing about the new
-    /// method — the frozen-trait back-compat guarantee.
-    struct LegacyOnlyClient {
-        calls: AtomicUsize,
-    }
-
-    #[async_trait]
-    impl SubagentApiClient for LegacyOnlyClient {
-        async fn messages_create(
-            &self,
-            _model: &str,
-            _system: Option<&str>,
-            _messages: Vec<lingxi_core::types::ConversationMessage>,
-            _tools: Vec<serde_json::Value>,
-        ) -> Result<HistoryResponse, LlmError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(HistoryResponse {
-                id: "mock".into(),
-                model: "mock".into(),
-                content: Vec::new(),
-                stop_reason: Some("end_turn".into()),
-                stop_details: None,
-                usage: llm_runtime::ExecutionUsage::default(),
-                cost: None,
-                provider_metadata: serde_json::Value::Null,
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn messages_create_in_default_routes_through_legacy_method() {
-        let client = Arc::new(LegacyOnlyClient {
-            calls: AtomicUsize::new(0),
-        });
-        // Calling the NEW profile-aware method on a mock that only implements
-        // the legacy one must transparently fall through to `messages_create`.
-        let resp = client
-            .messages_create_in(
-                "some-model",
-                Some("a-profile"),
-                None,
-                Vec::new(),
-                Vec::new(),
-            )
-            .await;
-        assert!(resp.is_ok(), "default messages_create_in delegates cleanly");
-        assert_eq!(
-            client.calls.load(Ordering::SeqCst),
-            1,
-            "the defaulted messages_create_in must route through the legacy messages_create"
         );
     }
 }

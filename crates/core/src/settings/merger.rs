@@ -35,6 +35,10 @@ fn merge_attribution(
 pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
     SettingsJson {
         teammate_mode: next.teammate_mode.or(prev.teammate_mode),
+        prompt_cache_ttl: next.prompt_cache_ttl.or(prev.prompt_cache_ttl),
+        subagent_prompt_cache_ttl: next
+            .subagent_prompt_cache_ttl
+            .or(prev.subagent_prompt_cache_ttl),
         dollar_schema: next.dollar_schema.or(prev.dollar_schema),
         trusted_directories: concat_dedup(prev.trusted_directories, next.trusted_directories),
         additional_directories: concat_dedup(
@@ -46,14 +50,9 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         lingxi_md_excludes: concat_dedup(prev.lingxi_md_excludes, next.lingxi_md_excludes),
         sandbox: deep_merge_object(prev.sandbox, next.sandbox),
         hooks: deep_merge_object(prev.hooks, next.hooks),
-        // Deep-merge the opaque block. NOTE: claude-code concat-dedups the
-        // allow/deny/ask arrays across tiers; deep_merge_object takes `next`
-        // for a matching array key. This only affects a reader of the MERGED
-        // field — the permission loader reads each settings FILE per-source
-        // (`permission::permission_rules_from_settings_json`), so it is moot
-        // for rule loading. (Refine to per-array concat if the merged field is
-        // ever consumed directly.)
-        permissions: deep_merge_object(prev.permissions, next.permissions),
+        // Permission arrays accumulate across tiers in Claude Code's settings
+        // merge. `$.settings.read()` observes this merged field directly.
+        permissions: merge_permissions_object(prev.permissions, next.permissions),
         // Scalar fields — Override semantics: next wins when set, else prev.
         // OUTSTYLE.1: `outputStyle` is a string in claude-code and merges
         // scalar-override (settingsMergeCustomizer special-cases only arrays).
@@ -127,6 +126,10 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
             .or(prev.workflow_keyword_trigger_enabled),
         auto_memory_enabled: next.auto_memory_enabled.or(prev.auto_memory_enabled),
         effort_level: next.effort_level.or(prev.effort_level),
+        fast_mode: next.fast_mode.or(prev.fast_mode),
+        fast_mode_per_session_opt_in: next
+            .fast_mode_per_session_opt_in
+            .or(prev.fast_mode_per_session_opt_in),
         // Cap fold (lowest wins) is done at the /effort consumer over raw
         // files; the merged view is still later-source-wins like other scalars.
         max_effort_level: next.max_effort_level.or(prev.max_effort_level),
@@ -142,6 +145,9 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         include_git_instructions: next
             .include_git_instructions
             .or(prev.include_git_instructions),
+        include_code_review_suggestion: next
+            .include_code_review_suggestion
+            .or(prev.include_code_review_suggestion),
         bash_edit_diff_enabled: next.bash_edit_diff_enabled.or(prev.bash_edit_diff_enabled),
         enable_workflows: next.enable_workflows.or(prev.enable_workflows),
         workflow_size_guideline: next
@@ -228,9 +234,9 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
 }
 
 fn merge_model_settings(
-    prev: Option<std::collections::BTreeMap<String, crate::settings::schema::ModelSettings>>,
-    next: Option<std::collections::BTreeMap<String, crate::settings::schema::ModelSettings>>,
-) -> Option<std::collections::BTreeMap<String, crate::settings::schema::ModelSettings>> {
+    prev: Option<indexmap::IndexMap<String, crate::settings::schema::ModelSettings>>,
+    next: Option<indexmap::IndexMap<String, crate::settings::schema::ModelSettings>>,
+) -> Option<indexmap::IndexMap<String, crate::settings::schema::ModelSettings>> {
     match (prev, next) {
         (None, other) | (other, None) => other,
         (Some(mut prev), Some(next)) => {
@@ -338,6 +344,9 @@ pub fn merge_raw_layer(
             },
             // Non-objects fall through `deep_merge_value`'s own mismatch arm to
             // `next`, matching `deep_merge_object` / `deep_merge_value_opt`.
+            MergeStrategy::DeepMerge if key == "permissions" => {
+                merge_permissions_value(v_prev, v_next.clone())
+            }
             MergeStrategy::DeepMerge => deep_merge_value(v_prev, v_next.clone()),
         };
         if merged != v_next {
@@ -418,6 +427,45 @@ fn deep_merge_object(
     }
 }
 
+fn merge_permissions_object(
+    prev: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    next: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+) -> Option<std::collections::BTreeMap<String, serde_json::Value>> {
+    match (prev, next) {
+        (None, other) | (other, None) => other,
+        (Some(prev), Some(next)) => {
+            let merged = merge_permissions_value(
+                serde_json::Value::Object(prev.into_iter().collect()),
+                serde_json::Value::Object(next.into_iter().collect()),
+            );
+            match merged {
+                serde_json::Value::Object(merged) => Some(merged.into_iter().collect()),
+                _ => unreachable!("two permission objects merge to an object"),
+            }
+        }
+    }
+}
+
+fn merge_permissions_value(prev: serde_json::Value, next: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match (prev, next) {
+        (Value::Object(mut prev), Value::Object(next)) => {
+            for (key, value) in next {
+                let merged = match prev.remove(&key) {
+                    Some(earlier) => merge_permissions_value(earlier, value),
+                    None => value,
+                };
+                prev.insert(key, merged);
+            }
+            Value::Object(prev)
+        }
+        (Value::Array(prev), Value::Array(next)) => {
+            Value::Array(concat_dedup(Some(prev), Some(next)).unwrap_or_default())
+        }
+        (_, next) => next,
+    }
+}
+
 /// Deep-merge two `Option<serde_json::Value>` fields.
 ///
 /// Both sides `None` → `None`. One side `None` → the other side. Both sides
@@ -462,6 +510,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn permission_arrays_accumulate_across_sources_in_typed_and_raw_views() {
+        let lower = serde_json::json!({
+            "permissions": {"allow":["Read", "Bash"], "deny":["WebFetch"],
+                "custom":{"rules":["lower"]}}
+        });
+        let upper = serde_json::json!({
+            "permissions": {"allow":["Bash", "Write"], "deny":["Read"],
+                "custom":{"rules":["upper"]}}
+        });
+        let expected = serde_json::json!({
+            "allow":["Read", "Bash", "Write"],
+            "deny":["WebFetch", "Read"],
+            "custom":{"rules":["lower", "upper"]},
+        });
+        let typed = merge(
+            serde_json::from_value(lower.clone()).unwrap(),
+            serde_json::from_value(upper.clone()).unwrap(),
+        );
+        assert_eq!(serde_json::to_value(typed.permissions).unwrap(), expected);
+        let mut raw = std::collections::BTreeMap::new();
+        let _ = merge_raw_layer(&mut raw, serde_json::from_value(lower).unwrap());
+        let _ = merge_raw_layer(&mut raw, serde_json::from_value(upper).unwrap());
+        assert_eq!(raw.get("permissions"), Some(&expected));
+    }
+
+    #[test]
     fn agent_push_notification_setting_is_scalar_override() {
         let merged = merge(
             SettingsJson {
@@ -474,6 +548,34 @@ mod tests {
             },
         );
         assert_eq!(merged.agent_push_notif_enabled, Some(true));
+    }
+
+    #[test]
+    fn prompt_cache_ttl_settings_are_scalar_override() {
+        let merged = merge(
+            SettingsJson {
+                prompt_cache_ttl: Some(crate::settings::schema::PromptCacheTtl::FiveMinutes),
+                subagent_prompt_cache_ttl: Some(
+                    crate::settings::schema::PromptCacheTtl::OneHour,
+                ),
+                ..Default::default()
+            },
+            SettingsJson {
+                prompt_cache_ttl: Some(crate::settings::schema::PromptCacheTtl::OneHour),
+                subagent_prompt_cache_ttl: Some(
+                    crate::settings::schema::PromptCacheTtl::FiveMinutes,
+                ),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            merged.prompt_cache_ttl,
+            Some(crate::settings::schema::PromptCacheTtl::OneHour)
+        );
+        assert_eq!(
+            merged.subagent_prompt_cache_ttl,
+            Some(crate::settings::schema::PromptCacheTtl::FiveMinutes)
+        );
     }
     use crate::settings::schema::SettingsJson;
 
@@ -1212,6 +1314,8 @@ mod tests {
             // case that used to panic.
             (json!("auto"), json!("tmux")),
             (json!("china_mainland"), json!("international")),
+            (json!("low"), json!("medium")),
+            (json!("5m"), json!("1h")),
         ];
 
         // Whether `{field: value}` survives a `SettingsJson` round trip

@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
+use futures::StreamExt;
 use std::collections::HashMap as StdHashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -18,6 +19,62 @@ use tokio::sync::Mutex as TokioMutex;
 struct InMemoryFs {
     files: TokioMutex<StdHashMap<String, String>>,
 }
+
+#[test]
+fn fallback_api_error_projects_once_and_tombstone_is_not_spooled_or_terminal() {
+    let agent_id = lingxi_core::types::AgentId::new();
+    let row = lingxi_core::host::ServerFallbackApiErrorRow::new(
+        "refusal body",
+        "2026-10-04T00:00:00.000Z".into(),
+    );
+    let query_message = serde_json::to_value(row.query_message()).unwrap();
+    let api_error_event = SubagentEvent::ServerFallbackApiErrorRow {
+        agent_id: agent_id.clone(),
+        row: row.clone(),
+        message_index: 7,
+    };
+    let ordinary_message_event = SubagentEvent::Message {
+        agent_id,
+        message: query_message,
+        message_index: Some(7),
+    };
+    let api_line = event_line(&api_error_event);
+    assert!(
+        api_line.contains("refusal body"),
+        "refusal text remains visible"
+    );
+    assert_eq!(
+        api_line,
+        event_line(&ordinary_message_event),
+        "the dedicated row event projects visible assistant text exactly once"
+    );
+    assert_eq!(terminal_status(&api_error_event), None);
+    assert!(!is_idle_event(&api_error_event));
+
+    let tombstone = SubagentEvent::ServerFallbackTombstone {
+        agent_id,
+        message: lingxi_core::host::ServerFallbackTombstoneMessage {
+            uuid: row.uuid.clone(),
+            message_type: "assistant".into(),
+            timestamp: "2026-10-04T00:00:00.000Z".into(),
+            request_id: row.request_id.clone(),
+            request_ref: None,
+            provider_message_id: None,
+            model: Some("test-model".into()),
+            stop_reason: Some("refusal".into()),
+            stop_details: row.message.stop_details.clone(),
+            usage: Some(row.message.usage.clone()),
+            content: row.message.content.clone(),
+            is_api_error_message: Some(true),
+            supersedes_uuids: None,
+        },
+        display_only: true,
+    };
+    assert!(event_line(&tombstone).is_empty());
+    assert_eq!(terminal_status(&tombstone), None);
+    assert!(!is_idle_event(&tombstone));
+}
+
 impl InMemoryFs {
     fn new() -> Self {
         Self {
@@ -90,7 +147,7 @@ impl FileSystem for InMemoryFs {
 
 // ---- Scripted SubagentApiClient ----------------------------------------
 
-/// Hands back a pre-scripted queue of responses, one per `messages_create`.
+/// Hands back a pre-scripted queue of responses, one per `stream(request)`.
 /// When exhausted it returns an `end_turn` text turn so each turn-set
 /// terminates and the persistent runner parks for the next message. An
 /// `Err` entry surfaces as an API error (driving the runner to `Failed`).
@@ -121,20 +178,28 @@ impl GatedApiClient {
 
 #[async_trait]
 impl SubagentApiClient for GatedApiClient {
-    async fn messages_create(
+    async fn stream(
         &self,
-        _model: &str,
-        _system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        self.histories.lock().unwrap().push(messages);
-        if call == 0 {
-            self.first_started.add_permits(1);
-            self.release_first.acquire().await.unwrap().forget();
-        }
-        Ok(text_response(if call == 0 { "first" } else { "second" }))
+        request: agent::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let messages = request.messages;
+        let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            self.histories.lock().unwrap().push(messages);
+            if call == 0 {
+                self.first_started.add_permits(1);
+                self.release_first.acquire().await.unwrap().forget();
+            }
+            Ok(text_response(if call == 0 { "first" } else { "second" }))
+        };
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+        Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
     }
 }
 impl ScriptedApiClient {
@@ -163,20 +228,27 @@ impl ScriptedApiClient {
 }
 #[async_trait]
 impl SubagentApiClient for ScriptedApiClient {
-    async fn messages_create(
+    async fn stream(
         &self,
-        _model: &str,
-        _system: Option<&str>,
-        _messages: Vec<lingxi_core::types::ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        let next = self.responses.lock().unwrap().pop_front();
-        match next {
-            Some(Ok(resp)) => Ok(resp),
-            Some(Err(msg)) => Err(llm_runtime::LlmError::InvalidRequest { message: msg }),
-            None => Ok(text_response("(idle)")),
-        }
+        _request: agent::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let next = self.responses.lock().unwrap().pop_front();
+            match next {
+                Some(Ok(resp)) => Ok(resp),
+                Some(Err(msg)) => Err(llm_runtime::LlmError::InvalidRequest { message: msg }),
+                None => Ok(text_response("(idle)")),
+            }
+        };
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+        Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
     }
 }
 
@@ -187,6 +259,7 @@ fn text_response(text: &str) -> llm_runtime::HistoryResponse {
         content: vec![llm_runtime::ContentBlock::Text {
             text: text.into(),
             cache_control: None,
+            citations: None,
         }],
         stop_reason: Some("end_turn".into()),
         stop_details: None,
@@ -207,6 +280,8 @@ struct RecordingSink {
     /// Failure reasons received through the `set_failed` seam (cc 2.1.198:
     /// the failed idle notification's `failureReason` to the lead).
     failures: StdMutex<Vec<(String, String)>>,
+    team_activity: StdMutex<Vec<(lingxi_core::types::AgentId, bool)>>,
+    event_order: StdMutex<Vec<String>>,
 }
 #[async_trait]
 impl TaskStatusSink for RecordingSink {
@@ -221,17 +296,34 @@ impl TaskStatusSink for RecordingSink {
     }
 
     async fn set_status(&self, task_id: &str, status: TaskStatus) {
+        self.event_order
+            .lock()
+            .unwrap()
+            .push(format!("status:{status:?}"));
         self.statuses
             .lock()
             .unwrap()
             .push((task_id.to_string(), status));
     }
     async fn set_failed(&self, task_id: &str, error: &str) {
+        self.event_order.lock().unwrap().push("failed".into());
         self.failures
             .lock()
             .unwrap()
             .push((task_id.to_string(), error.to_string()));
         self.set_status(task_id, TaskStatus::Failed).await;
+    }
+    async fn set_team_member_active(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        active: bool,
+    ) -> Result<(), String> {
+        self.team_activity.lock().unwrap().push((agent_id, active));
+        self.event_order
+            .lock()
+            .unwrap()
+            .push(format!("team-active:{active}"));
+        Ok(())
     }
 }
 impl RecordingSink {
@@ -429,10 +521,134 @@ fn model_test_handler(default_model: Option<&str>) -> InProcessTeammateHandler {
     let output = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs));
     let runtime = Arc::new(MockRuntimeSpawner::default());
     let pool = Arc::new(StateMachinePool::new(runtime as Arc<dyn RuntimeSpawner>, 8));
-    let handler = InProcessTeammateHandler::new(pool, output, ScriptedApiClient::new(vec!["ok"]));
+    let handler = InProcessTeammateHandler::new(pool, output, ScriptedApiClient::new(vec!["ok"]))
+        .with_model_resolution_context_provider(Arc::new(|model: &str, profile: Option<&str>| {
+            Ok(agent::ModelResolutionContext {
+                route: agent::ModelRouteFacts {
+                    model: model.to_string(),
+                    profile: profile.map(str::to_owned),
+                    provider: Some(agent::ModelProviderKind::FirstParty),
+                    ..Default::default()
+                },
+                family_defaults: agent::FamilyModelDefaults {
+                    opus: Some("claude-opus-4-8".into()),
+                    sonnet: Some("claude-sonnet-5".into()),
+                    haiku: Some("claude-haiku-4-5".into()),
+                    fable: Some("claude-fable-5-1".into()),
+                },
+                ..Default::default()
+            })
+        }));
     match default_model {
         Some(m) => handler.with_default_model(m),
         None => handler,
+    }
+}
+
+struct RoutePromptTool;
+
+#[async_trait]
+impl tool_api::Tool for RoutePromptTool {
+    fn name(&self) -> &str {
+        "RouteFacts"
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        static SCHEMA: OnceLock<serde_json::Value> = OnceLock::new();
+        SCHEMA.get_or_init(|| serde_json::json!({"type": "object"}))
+    }
+    fn is_enabled(&self, _: &tool_api::ToolStaticContext) -> bool {
+        true
+    }
+    fn max_result_size_chars(&self) -> usize {
+        1024
+    }
+    fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+        true
+    }
+    fn is_read_only(&self, _: &serde_json::Value) -> bool {
+        true
+    }
+    async fn check_permissions(
+        &self,
+        _: &serde_json::Value,
+        _: &tool_api::ToolUseContext,
+    ) -> permission::PermissionResult {
+        permission::PermissionResult::Allow {
+            reason: permission::PermissionDecisionReason::Other {
+                reason: "test".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: permission::result::PermissionMetadata::default(),
+        }
+    }
+    async fn description(&self, _: &serde_json::Value, _: &tool_api::DescriptionOptions) -> String {
+        "Route facts".into()
+    }
+    async fn prompt(&self, opts: &tool_api::PromptOptions) -> String {
+        format!("model={:?}, profile={:?}", opts.model, opts.model_profile)
+    }
+    async fn call(
+        &self,
+        _: serde_json::Value,
+        _: tool_api::ToolUseContext,
+        _: tool_api::ToolProgressSender,
+    ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
+        unreachable!("schema rendering does not invoke tools")
+    }
+}
+
+#[tokio::test]
+async fn teammate_tool_prompts_use_child_model_and_profile_for_duplicate_model_ids() {
+    let mut registry = agent::ToolRegistry::new();
+    registry.register_builtin(Arc::new(RoutePromptTool));
+    let handler = model_test_handler(Some("parent-model"))
+        .with_default_model_profile(Some("provider-a".into()))
+        .with_tool_registry(Arc::new(registry))
+        .with_model_resolution_context_provider(Arc::new(|model: &str, profile: Option<&str>| {
+            if !matches!(
+                (model, profile),
+                ("parent-model", Some("provider-a"))
+                    | ("shared-child-model", Some("provider-a" | "provider-b"))
+            ) {
+                return Err(agent::ModelResolutionError::RouteUnavailable {
+                    model: model.into(),
+                    profile: profile.map(str::to_owned),
+                    reason: "unexpected test route".into(),
+                });
+            }
+            Ok(agent::ModelResolutionContext {
+                route: agent::ModelRouteFacts {
+                    model: model.into(),
+                    profile: profile.map(str::to_owned),
+                    provider: Some(agent::ModelProviderKind::Other),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }));
+    for profile in ["provider-b", "provider-a"] {
+        let mut definition = DefaultTeammateDefinition
+            .resolve(&lingxi_core::types::AgentId::new(), "worker")
+            .await
+            .unwrap();
+        definition.model = AgentModel::Explicit("shared-child-model".into());
+        let context = handler
+            .build_context_for_profile(
+                lingxi_core::types::AgentId::new(),
+                "worker",
+                "",
+                "",
+                Some(profile),
+                definition,
+            )
+            .await
+            .unwrap();
+        assert_eq!(context.model_profile.as_deref(), Some(profile));
+        assert_eq!(
+            context.tool_schemas[0]["description"],
+            format!("model=Some(\"shared-child-model\"), profile=Some(\"{profile}\")")
+        );
     }
 }
 
@@ -671,6 +887,640 @@ async fn build_context_without_default_model_leaves_model_raw() {
     assert!(ctx.prompt_messages.is_empty());
 }
 
+#[tokio::test]
+async fn build_context_preserves_the_profile_that_serves_the_inherited_child_route() {
+    let handler = model_test_handler(Some("claude-sonnet-5"))
+        .with_default_model_profile(Some("team-provider".into()));
+    let def = DefaultTeammateDefinition
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
+        .await
+        .unwrap();
+    let ctx = handler
+        .build_context(lingxi_core::types::AgentId::new(), "lead", "", "", def)
+        .await
+        .expect("route is supplied by the host provider");
+
+    assert!(matches!(
+        &ctx.agent_definition.model,
+        AgentModel::Explicit(model) if model == "claude-sonnet-5"
+    ));
+    assert_eq!(ctx.model_profile.as_deref(), Some("team-provider"));
+}
+
+#[tokio::test]
+async fn build_context_uses_shared_live_session_model_and_profile_selection() {
+    let live_selection: Arc<std::sync::OnceLock<agent::DefaultModelSelectionProvider>> =
+        Arc::new(std::sync::OnceLock::new());
+    assert!(live_selection
+        .set(Arc::new(|| {
+            Ok(Some(agent::DefaultModelSelection {
+                model: "live-sonnet".into(),
+                model_profile: Some("live-provider".into()),
+                model_resolution_context: agent::ModelResolutionContext {
+                    route: agent::ModelRouteFacts {
+                        model: "live-sonnet".into(),
+                        profile: Some("live-provider".into()),
+                        provider: Some(agent::ModelProviderKind::Other),
+                        ..Default::default()
+                    },
+                    family_defaults: agent::FamilyModelDefaults {
+                        opus: Some("live-opus".into()),
+                        sonnet: Some("live-sonnet".into()),
+                        haiku: Some("live-haiku".into()),
+                        fable: None,
+                    },
+                    ..Default::default()
+                },
+            }))
+        }))
+        .is_ok());
+    let handler = model_test_handler(Some("boot-model"))
+        .with_default_model_selection_provider_handle(live_selection);
+    let def = DefaultTeammateDefinition
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
+        .await
+        .unwrap();
+    let ctx = handler
+        .build_context(lingxi_core::types::AgentId::new(), "lead", "", "", def)
+        .await
+        .expect("live selection carries its resolved route");
+
+    assert!(matches!(
+        &ctx.agent_definition.model,
+        AgentModel::Explicit(model) if model == "live-sonnet"
+    ));
+    assert_eq!(ctx.model_profile.as_deref(), Some("live-provider"));
+}
+
+#[tokio::test]
+async fn alias_child_keeps_the_profile_that_resolved_its_final_model() {
+    use agent::model_resolution::{
+        FamilyModelDefaults, ModelProviderKind, ModelResolutionContext, ModelResolutionError,
+        ModelRouteFacts,
+    };
+
+    let handler = model_test_handler(Some("parent-model"))
+        .with_default_model_profile(Some("provider-a".into()))
+        .with_model_resolution_context_provider(Arc::new(
+            |model: &str, profile: Option<&str>| match (model, profile) {
+                ("parent-model", Some("provider-a")) => Ok(ModelResolutionContext {
+                    route: ModelRouteFacts {
+                        model: model.into(),
+                        profile: Some("provider-a".into()),
+                        provider: Some(ModelProviderKind::Other),
+                        ..Default::default()
+                    },
+                    family_defaults: FamilyModelDefaults {
+                        sonnet: Some("shared-child-model".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+                ("shared-child-model", Some("provider-a")) => Ok(ModelResolutionContext {
+                    route: ModelRouteFacts {
+                        model: model.into(),
+                        profile: Some("provider-a".into()),
+                        provider: Some(ModelProviderKind::Other),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+                ("shared-child-model", None) => Err(ModelResolutionError::AmbiguousRoute {
+                    model: model.into(),
+                    profiles: vec!["provider-a".into(), "provider-b".into()],
+                }),
+                _ => Err(ModelResolutionError::RouteUnavailable {
+                    model: model.into(),
+                    profile: profile.map(str::to_owned),
+                    reason: "unexpected test route".into(),
+                }),
+            },
+        ));
+    let mut definition = DefaultTeammateDefinition
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
+        .await
+        .unwrap();
+    definition.model = AgentModel::Alias("sonnet".into());
+
+    let context = handler
+        .build_context(
+            lingxi_core::types::AgentId::new(),
+            "lead",
+            "",
+            "",
+            definition,
+        )
+        .await
+        .expect("the alias was resolved under provider-a");
+
+    assert!(matches!(
+        context.agent_definition.model,
+        AgentModel::Explicit(ref model) if model == "shared-child-model"
+    ));
+    assert_eq!(context.model_profile.as_deref(), Some("provider-a"));
+}
+
+#[tokio::test]
+async fn explicit_child_profile_overrides_the_default_route() {
+    use agent::model_resolution::{
+        FamilyModelDefaults, ModelProviderKind, ModelResolutionContext, ModelResolutionError,
+        ModelRouteFacts,
+    };
+
+    let handler = model_test_handler(Some("parent-model"))
+        .with_default_model_profile(Some("provider-a".into()))
+        .with_model_resolution_context_provider(Arc::new(|model: &str, profile: Option<&str>| {
+            let (profile, sonnet) = match (model, profile) {
+                ("parent-model", Some("provider-a")) => ("provider-a", "provider-a-sonnet"),
+                ("sonnet", Some("provider-b")) => ("provider-b", "provider-b-sonnet"),
+                ("provider-b-sonnet", Some("provider-b")) => ("provider-b", "provider-b-sonnet"),
+                _ => {
+                    return Err(ModelResolutionError::RouteUnavailable {
+                        model: model.into(),
+                        profile: profile.map(str::to_owned),
+                        reason: "unexpected test route".into(),
+                    })
+                }
+            };
+            Ok(ModelResolutionContext {
+                route: ModelRouteFacts {
+                    model: model.into(),
+                    profile: Some(profile.into()),
+                    provider: Some(ModelProviderKind::Other),
+                    ..Default::default()
+                },
+                family_defaults: FamilyModelDefaults {
+                    sonnet: Some(sonnet.into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }));
+    let mut definition = DefaultTeammateDefinition
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
+        .await
+        .unwrap();
+    definition.model = AgentModel::Alias("sonnet".into());
+
+    let context = handler
+        .build_context_for_profile(
+            lingxi_core::types::AgentId::new(),
+            "lead",
+            "",
+            "",
+            Some("provider-b"),
+            definition,
+        )
+        .await
+        .expect("explicit profile selects its own alias route");
+
+    assert!(matches!(
+        context.agent_definition.model,
+        AgentModel::Explicit(ref model) if model == "provider-b-sonnet"
+    ));
+    assert_eq!(context.model_profile.as_deref(), Some("provider-b"));
+}
+
+#[tokio::test]
+async fn teammate_cross_provider_model_uses_child_route_without_retargeting_parent() {
+    use agent::model_resolution::{
+        ModelProviderKind, ModelResolutionContext, ModelResolutionError, ModelRouteFacts,
+    };
+    let queries = Arc::new(StdMutex::new(Vec::new()));
+    let observed = queries.clone();
+    let handler = model_test_handler(Some("claude-sonnet-4-5"))
+        .with_default_model_profile(Some("anthropic".into()))
+        .with_model_resolution_context_provider(Arc::new(
+            move |model: &str, profile: Option<&str>| {
+                observed
+                    .lock()
+                    .unwrap()
+                    .push((model.to_owned(), profile.map(str::to_owned)));
+                let (wire_model, selected_profile) = match (model, profile) {
+                    ("claude-sonnet-4-5", Some("anthropic")) => (model, "anthropic"),
+                    ("gpt-4o", Some("openai")) => (model, "openai"),
+                    ("openai/gpt-4o", None) => ("gpt-4o", "openai"),
+                    _ => {
+                        return Err(ModelResolutionError::RouteUnavailable {
+                            model: model.into(),
+                            profile: profile.map(str::to_owned),
+                            reason: "model is unavailable in this profile".into(),
+                        })
+                    }
+                };
+                Ok(ModelResolutionContext {
+                    route: ModelRouteFacts {
+                        model: wire_model.into(),
+                        profile: Some(selected_profile.into()),
+                        provider: Some(ModelProviderKind::Other),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+            },
+        ));
+    for (model, profile) in [("gpt-4o", Some("openai")), ("openai/gpt-4o", None)] {
+        let mut definition = DefaultTeammateDefinition
+            .resolve(&lingxi_core::types::AgentId::new(), "lead")
+            .await
+            .unwrap();
+        definition.model = AgentModel::Explicit(model.into());
+        let mut context = handler
+            .build_context_for_profile(
+                lingxi_core::types::AgentId::new(),
+                "lead",
+                "",
+                "",
+                profile,
+                definition,
+            )
+            .await
+            .expect("target provider supports the child model");
+        assert!(
+            matches!(context.agent_definition.model, AgentModel::Explicit(ref model) if model == "gpt-4o")
+        );
+        assert_eq!(context.model_profile.as_deref(), Some("openai"));
+        apply_spawn_context(
+            &mut context,
+            lingxi_core::host::SubagentSpawnRequest {
+                model_profile: Some("stale-unresolved-profile".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            context.model_profile.as_deref(),
+            Some("openai"),
+            "local context application cannot overwrite the resolved route"
+        );
+    }
+    assert!(!queries.lock().unwrap().iter().any(
+        |(model, profile)| model == "claude-sonnet-4-5" && profile.as_deref() == Some("openai")
+    ));
+}
+
+#[tokio::test]
+async fn teammate_alias_uses_immediate_parent_profile_with_shared_model_id() {
+    use agent::model_resolution::{
+        FamilyModelDefaults, ModelProviderKind, ModelResolutionContext, ModelResolutionError,
+        ModelRouteFacts,
+    };
+    let handler = model_test_handler(Some("shared-parent"))
+        .with_default_model_profile(Some("provider-a".into()))
+        .with_model_resolution_context_provider(Arc::new(|model: &str, profile: Option<&str>| {
+            let (profile, child) = match (model, profile) {
+                ("shared-parent", Some("provider-a")) | ("child-a", Some("provider-a")) => {
+                    ("provider-a", "child-a")
+                }
+                ("shared-parent", Some("provider-b")) | ("child-b", Some("provider-b")) => {
+                    ("provider-b", "child-b")
+                }
+                _ => {
+                    return Err(ModelResolutionError::RouteUnavailable {
+                        model: model.into(),
+                        profile: profile.map(str::to_owned),
+                        reason: "ambiguous without a provider profile".into(),
+                    })
+                }
+            };
+            Ok(ModelResolutionContext {
+                route: ModelRouteFacts {
+                    model: model.into(),
+                    profile: Some(profile.into()),
+                    provider: Some(ModelProviderKind::Other),
+                    ..Default::default()
+                },
+                family_defaults: FamilyModelDefaults {
+                    sonnet: Some(child.into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }));
+    let missing_live_selection: Arc<std::sync::OnceLock<agent::DefaultModelSelectionProvider>> =
+        Arc::new(std::sync::OnceLock::new());
+    assert!(missing_live_selection
+        .set(Arc::new(|| Err(
+            agent::ModelResolutionError::RouteUnavailable {
+                model: "root-route".into(),
+                profile: None,
+                reason: "root selection is unavailable".into(),
+            }
+        )))
+        .is_ok());
+    let handler = handler.with_default_model_selection_provider_handle(missing_live_selection);
+    let mut definition = DefaultTeammateDefinition
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
+        .await
+        .unwrap();
+    definition.model = AgentModel::Alias("sonnet".into());
+    let context = handler
+        .build_context_for_selection(
+            lingxi_core::types::AgentId::new(),
+            "lead",
+            "",
+            "",
+            None,
+            Some("shared-parent"),
+            Some("provider-b"),
+            None,
+            definition,
+        )
+        .await
+        .expect("nested parent's route is pinned independently from the child")
+        .0;
+    assert!(
+        matches!(context.agent_definition.model, AgentModel::Explicit(ref model) if model == "child-b")
+    );
+    assert_eq!(context.model_profile.as_deref(), Some("provider-b"));
+}
+
+#[tokio::test]
+async fn teammate_environment_model_resolves_before_definition_and_call_profile() {
+    let handler = model_test_handler(Some("parent-model"))
+        .with_default_model_profile(Some("parent-profile".into()))
+        .with_model_resolution_context_provider(Arc::new(|model: &str, profile: Option<&str>| {
+            let (model, profile) = match (model, profile) {
+                ("parent-model", Some("parent-profile")) => ("parent-model", "parent-profile"),
+                ("openai/gpt-4o", None) | ("gpt-4o", Some("openai")) => ("gpt-4o", "openai"),
+                _ => {
+                    return Err(agent::ModelResolutionError::RouteUnavailable {
+                        model: model.into(),
+                        profile: profile.map(str::to_owned),
+                        reason: "wrong route".into(),
+                    })
+                }
+            };
+            Ok(agent::ModelResolutionContext {
+                route: agent::ModelRouteFacts {
+                    model: model.into(),
+                    profile: Some(profile.into()),
+                    provider: Some(agent::ModelProviderKind::Other),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }));
+    for preference in [
+        AgentModel::Inherit,
+        AgentModel::Alias("sonnet".into()),
+        AgentModel::Explicit("unavailable-model".into()),
+    ] {
+        let mut definition = DefaultTeammateDefinition
+            .resolve(&lingxi_core::types::AgentId::new(), "lead")
+            .await
+            .unwrap();
+        definition.model = preference;
+        let (context, admitted) = handler
+            .build_context_for_selection(
+                lingxi_core::types::AgentId::new(),
+                "lead",
+                "",
+                "",
+                Some("call-profile"),
+                None,
+                None,
+                Some("openai/gpt-4o"),
+                definition,
+            )
+            .await
+            .expect("environmental model owns its complete route");
+        assert_eq!(context.model_profile.as_deref(), Some("openai"));
+        assert!(
+            matches!(context.agent_definition.model, AgentModel::Explicit(ref model) if model == "gpt-4o")
+        );
+        assert_eq!(admitted.unwrap().model, "gpt-4o");
+    }
+}
+
+#[tokio::test]
+async fn teammate_same_tier_and_bedrock_region_follow_parent_policy() {
+    let parent = "eu.anthropic.claude-sonnet-4-5-v1:0";
+    let handler = model_test_handler(Some(parent))
+        .with_default_model_profile(Some("bedrock".into()))
+        .with_model_resolution_context_provider(Arc::new(|model: &str, profile: Option<&str>| {
+            Ok(agent::ModelResolutionContext {
+                route: agent::ModelRouteFacts {
+                    model: model.into(),
+                    profile: profile.map(str::to_owned),
+                    provider: Some(agent::ModelProviderKind::Bedrock),
+                    ..Default::default()
+                },
+                family_defaults: agent::FamilyModelDefaults {
+                    sonnet: Some("anthropic.claude-sonnet-4-5-v1:0".into()),
+                    haiku: Some("anthropic.claude-haiku-4-5-v1:0".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }));
+    for (preference, expected) in [
+        ("sonnet", parent),
+        ("haiku", "eu.anthropic.claude-haiku-4-5-v1:0"),
+        (
+            "anthropic.claude-haiku-4-5-v1:0",
+            "eu.anthropic.claude-haiku-4-5-v1:0",
+        ),
+    ] {
+        let mut definition = DefaultTeammateDefinition
+            .resolve(&lingxi_core::types::AgentId::new(), "lead")
+            .await
+            .unwrap();
+        definition.model = AgentModel::Explicit(preference.into());
+        let (context, admitted) = handler
+            .build_context_for_selection(
+                lingxi_core::types::AgentId::new(),
+                "lead",
+                "",
+                "",
+                None,
+                None,
+                None,
+                None,
+                definition,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(context.agent_definition.model, AgentModel::Explicit(ref model) if model == expected)
+        );
+        assert_eq!(admitted.unwrap().model, expected);
+        assert_eq!(context.model_profile.as_deref(), Some("bedrock"));
+    }
+}
+
+#[tokio::test]
+async fn named_spawn_rejects_profile_without_child_model() {
+    let (_directory, fs, runtime, handler) = make_handler(ScriptedApiClient::new(vec!["unused"]));
+    let result = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                spawn_request: Some(lingxi_core::host::SubagentSpawnRequest {
+                    model_profile: Some("openai".into()),
+                    ..Default::default()
+                }),
+                inheritance: None,
+                agent_id: lingxi_core::types::AgentId::new(),
+                name: "worker".into(),
+                team_name: "session".into(),
+                description: "inspect".into(),
+            },
+            ctx(fs, runtime),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(TaskError::Internal(ref message)) if message.contains("model_profile requires an explicit child model"))
+    );
+    assert!(handler.entries.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn named_spawn_metadata_keeps_resolved_wire_model_named_sonnet() {
+    let (_directory, fs, runtime, handler) = make_handler(ScriptedApiClient::new(vec!["unused"]));
+    let handler = handler
+        .with_default_model("parent-model")
+        .with_default_model_profile(Some("provider-a".into()))
+        .with_model_resolution_context_provider(Arc::new(|model: &str, profile: Option<&str>| {
+            Ok(agent::ModelResolutionContext {
+                route: agent::ModelRouteFacts {
+                    model: model.into(),
+                    profile: profile.map(str::to_owned),
+                    provider: Some(agent::ModelProviderKind::Other),
+                    ..Default::default()
+                },
+                family_defaults: agent::FamilyModelDefaults {
+                    sonnet: Some("sonnet".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }));
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                spawn_request: Some(lingxi_core::host::SubagentSpawnRequest {
+                    model: Some("sonnet".into()),
+                    ..Default::default()
+                }),
+                inheritance: None,
+                agent_id: lingxi_core::types::AgentId::new(),
+                name: "worker".into(),
+                team_name: "session".into(),
+                description: "inspect".into(),
+            },
+            ctx(fs, runtime),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        handle.teammate_model_route.as_ref(),
+        Some(&("sonnet".into(), Some("provider-a".into())))
+    );
+}
+
+#[tokio::test]
+async fn explicit_child_model_ambiguity_fails_context_admission() {
+    use agent::model_resolution::{
+        FamilyModelDefaults, ModelProviderKind, ModelResolutionContext, ModelResolutionError,
+        ModelRouteFacts,
+    };
+
+    let provider_queries = Arc::new(StdMutex::new(Vec::new()));
+    let observed_queries = provider_queries.clone();
+    let handler = model_test_handler(Some("parent-model")).with_model_resolution_context_provider(
+        Arc::new(move |model: &str, profile: Option<&str>| {
+            observed_queries
+                .lock()
+                .unwrap()
+                .push((model.to_owned(), profile.map(str::to_owned)));
+            match (model, profile) {
+                ("parent-model", _) => Ok(ModelResolutionContext {
+                    route: ModelRouteFacts {
+                        model: model.into(),
+                        profile: Some("provider-a".into()),
+                        provider: Some(ModelProviderKind::Other),
+                        ..Default::default()
+                    },
+                    family_defaults: FamilyModelDefaults {
+                        sonnet: Some("shared-child-model".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+                ("shared-child-model", None) => Err(ModelResolutionError::AmbiguousRoute {
+                    model: model.into(),
+                    profiles: vec!["provider-a".into(), "provider-b".into()],
+                }),
+                _ => Err(ModelResolutionError::RouteUnavailable {
+                    model: model.into(),
+                    profile: profile.map(str::to_owned),
+                    reason: "unexpected test route".into(),
+                }),
+            }
+        }),
+    );
+    let mut definition = DefaultTeammateDefinition
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
+        .await
+        .unwrap();
+    definition.model = AgentModel::Explicit("shared-child-model".into());
+
+    let result = handler
+        .build_context(
+            lingxi_core::types::AgentId::new(),
+            "lead",
+            "",
+            "",
+            definition,
+        )
+        .await;
+    let error = match result {
+        Err(TaskError::Internal(message)) => message,
+        Err(error) => panic!("unexpected context-admission error: {error}"),
+        Ok(_) => panic!("ambiguous explicit model must fail before task admission"),
+    };
+    assert_eq!(
+        error,
+        ModelResolutionError::AmbiguousRoute {
+            model: "shared-child-model".into(),
+            profiles: vec!["provider-a".into(), "provider-b".into()],
+        }
+        .to_string(),
+        "the explicit wire model must fail with the resolver's exact multi-profile cause"
+    );
+    assert_eq!(
+        *provider_queries.lock().unwrap(),
+        vec![
+            ("parent-model".into(), None),
+            ("shared-child-model".into(), Some("provider-a".into())),
+            ("shared-child-model".into(), None),
+        ],
+        "a concrete child first tries the parent profile, then preserves the global ambiguity"
+    );
+}
+
+#[tokio::test]
+async fn build_context_does_not_fall_back_to_boot_route_when_live_selection_is_unavailable() {
+    let live_selection: Arc<std::sync::OnceLock<agent::DefaultModelSelectionProvider>> =
+        Arc::new(std::sync::OnceLock::new());
+    assert!(live_selection.set(Arc::new(|| Ok(None))).is_ok());
+    let handler = model_test_handler(Some("boot-model"))
+        .with_default_model_selection_provider_handle(live_selection);
+    let def = DefaultTeammateDefinition
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
+        .await
+        .unwrap();
+
+    let result = handler
+        .build_context(lingxi_core::types::AgentId::new(), "lead", "", "", def)
+        .await;
+    let Err(error) = result else {
+        panic!("missing live route must not silently select boot provider");
+    };
+    assert!(error
+        .to_string()
+        .contains("model/provider selection is unavailable"));
+}
+
 // ---- #15: opusplan + plan mode resolves an Inherit teammate to Opus -------
 //
 // The composition root threads `with_permission_mode(cfg.permission_mode)` +
@@ -696,7 +1546,18 @@ async fn build_context_opusplan_plan_mode_resolves_inherit_to_opus() {
     // Derive the parent EXACTLY as the composition root does: resolve the raw
     // "opusplan" alias to the main-loop wire id (Sonnet outside plan mode) —
     // proving the swap below is to OPUS, not a pass-through of a literal.
-    let parent = agent::model_resolution::resolve_user_specified_model("opusplan");
+    let parent = agent::model_resolution::resolve_user_specified_model(
+        "opusplan",
+        &agent::ModelResolutionContext {
+            family_defaults: agent::FamilyModelDefaults {
+                opus: Some("claude-opus-4-8".into()),
+                sonnet: Some("claude-sonnet-5".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let handler = model_test_handler(Some(&parent))
         .with_permission_mode(PermissionMode::Plan)
         .with_model_setting("opusplan");
@@ -722,7 +1583,18 @@ async fn build_context_opusplan_default_mode_returns_resolved_parent() {
     // gated on plan mode (not on the setting alone). Parent derived via the
     // resolver, exactly as the composition root produces it.
     let _g = OpusEnvGuard::clear_providers();
-    let parent = agent::model_resolution::resolve_user_specified_model("opusplan");
+    let parent = agent::model_resolution::resolve_user_specified_model(
+        "opusplan",
+        &agent::ModelResolutionContext {
+            family_defaults: agent::FamilyModelDefaults {
+                opus: Some("claude-opus-4-8".into()),
+                sonnet: Some("claude-sonnet-5".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(
         parent, "claude-sonnet-5",
         "opusplan resolves to Sonnet outside plan mode"
@@ -855,13 +1727,14 @@ async fn spawn_send_message_then_kill_lifecycle() {
     let api_handle = api.clone();
     let (dir, fs, rt, handler, sink) = make_handler_with_sink(api);
     let c = ctx(fs.clone(), rt.clone());
+    let agent_id = lingxi_core::types::AgentId::new();
 
     let h = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: lingxi_core::types::AgentId::new(),
+                agent_id,
                 name: "buddy".into(),
                 team_name: "alpha".into(),
                 description: String::new(),
@@ -885,6 +1758,11 @@ async fn spawn_send_message_then_kill_lifecycle() {
     let body = await_spool(&fs, &spool_str, |b| b.contains("answer one")).await;
     assert!(body.contains("completed:"), "turn-set 1 spooled: {body:?}");
     assert!(body.contains("answer one"), "turn-set 1 text: {body:?}");
+    assert_eq!(
+        sink.team_activity.lock().unwrap().as_slice(),
+        &[(agent_id, true)],
+        "the team member becomes active after the pool actually allocates"
+    );
 
     // Inject a message — drives turn-set 2 after the runner had idled.
     handler
@@ -894,6 +1772,11 @@ async fn spawn_send_message_then_kill_lifecycle() {
     let body = await_spool(&fs, &spool_str, |b| b.contains("answer two")).await;
     assert!(body.contains("answer two"), "turn-set 2 text: {body:?}");
     assert_eq!(api_handle.call_count(), 2, "one round-trip per turn-set");
+    assert_eq!(
+        sink.team_activity.lock().unwrap().as_slice(),
+        &[(agent_id, true), (agent_id, true)],
+        "a successfully injected UserMessage re-enters active query state"
+    );
 
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while sink.idle_tasks.lock().unwrap().len() < 2 {
@@ -919,6 +1802,25 @@ async fn spawn_send_message_then_kill_lifecycle() {
 
     // Kill tears it down; the entry is removed.
     handler.kill(&h.task_id, c.clone()).await.unwrap();
+    assert_eq!(
+        sink.team_activity.lock().unwrap().as_slice(),
+        &[(agent_id, true), (agent_id, true), (agent_id, false)],
+        "kill writes inactive before sending UserExit"
+    );
+    let order = sink.event_order.lock().unwrap();
+    let inactive = order
+        .iter()
+        .rposition(|event| event == "team-active:false")
+        .unwrap();
+    let killed = order
+        .iter()
+        .rposition(|event| event == "status:Killed")
+        .unwrap();
+    assert!(
+        inactive < killed,
+        "inactive precedes the terminal status: {order:?}"
+    );
+    drop(order);
     assert!(
         handler.entries.lock().await.is_empty(),
         "kill deregisters the slot"
@@ -952,12 +1854,13 @@ async fn failed_turn_set_spools_failed_and_reports_terminal() {
     let (dir, fs, rt, handler, sink) = make_handler_with_sink(api);
     let c = ctx(fs.clone(), rt.clone());
 
+    let agent_id = lingxi_core::types::AgentId::new();
     let h = handler
         .spawn(
             TaskSpawnInput::InProcessTeammate {
                 spawn_request: None,
                 inheritance: None,
-                agent_id: lingxi_core::types::AgentId::new(),
+                agent_id,
                 name: "buddy".into(),
                 team_name: "alpha".into(),
                 description: String::new(),
@@ -978,6 +1881,21 @@ async fn failed_turn_set_spools_failed_and_reports_terminal() {
         await_terminal(&sink).await,
         Some(TaskStatus::Failed),
         "Failed event reports terminal TaskStatus::Failed"
+    );
+    assert_eq!(
+        sink.team_activity.lock().unwrap().as_slice(),
+        &[(agent_id, true), (agent_id, false)],
+        "failure closes the team activity interval"
+    );
+    let order = sink.event_order.lock().unwrap();
+    let inactive = order
+        .iter()
+        .position(|event| event == "team-active:false")
+        .unwrap();
+    let failed = order.iter().position(|event| event == "failed").unwrap();
+    assert!(
+        inactive < failed,
+        "inactive precedes failure publication: {order:?}"
     );
 }
 
@@ -1234,11 +2152,27 @@ fn idle_hook_follow_up_preserves_feedback_and_additional_context_bytes() {
         ..Default::default()
     };
     assert_eq!(
-        teammate_idle_follow_up(&outcome).as_deref(),
+        teammate_idle_follow_up(&outcome).as_ref().map(|text| text.display.as_str()),
         Some(
             "TeammateIdle hook feedback:\nkeep working\n\n<system-reminder>\nTeammateIdle hook additional context: inspect the failing test\nthen rerun it\n</system-reminder>"
         )
     );
+}
+
+#[test]
+fn teammate_idle_message_event_keeps_isolated_utf16_units() {
+    let text = hooks::ExactHookText::from_utf16(vec![u16::from(b'x'), 0xD800]);
+    let event = teammate_idle_user_message_event(text);
+    let lingxi_core::Event::UserMessageJsUtf16 {
+        content,
+        utf16_code_units,
+        ..
+    } = event
+    else {
+        panic!("isolated surrogate must use the exact user-message event");
+    };
+    assert_eq!(content, "x�");
+    assert_eq!(utf16_code_units, [u16::from(b'x'), 0xD800]);
 }
 
 #[tokio::test]
@@ -1990,14 +2924,25 @@ async fn assigned_teammate_color_reaches_actual_agent_context() {
         )
         .await
         .unwrap();
+    let provenance = lingxi_core::host::subagent_spawn::AgentSpawnProvenance {
+        hook_caller: lingxi_core::host::task_registry::FieldPresence::Value(serde_json::json!(
+            "trusted-plugin"
+        )),
+        hook_origin: lingxi_core::host::task_registry::FieldPresence::Value(serde_json::json!([
+            "trusted-plugin",
+            "parent-api"
+        ])),
+    };
     apply_spawn_context(
         &mut context,
         lingxi_core::host::SubagentSpawnRequest {
             teammate_color: Some("blue".into()),
+            agent_spawn_provenance: provenance.clone(),
             ..Default::default()
         },
     );
     assert_eq!(context.display.color, AgentColor::Blue);
+    assert_eq!(context.agent_spawn_provenance, provenance);
 }
 
 struct PlanReviewTransport {
@@ -2049,7 +2994,10 @@ impl lingxi_core::host::mailbox::MailboxRouterHandle for PlanReviewTransport {
 }
 fn plan_invocation() -> lingxi_core::host::tool_invoker::SubagentInvocationContext {
     lingxi_core::host::tool_invoker::SubagentInvocationContext {
+        cancellation_token: lingxi_core::host::CancellationToken::new(),
         permission_pause_observer: None,
+        instruction_context: None,
+        fork_context: None,
         tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
         parent_agent_id: None,
         origin_session_id: None,
@@ -2065,6 +3013,11 @@ fn plan_invocation() -> lingxi_core::host::tool_invoker::SubagentInvocationConte
         observer: None,
         parent_model: None,
         parent_model_profile: None,
+        agent_spawn_provenance: Default::default(),
+        tool_context_state: None,
+        assistant_message: None,
+        same_turn_tool_uses: Vec::new(),
+        current_history: Vec::new(),
         mode_override: Some("plan".into()),
         request_source: None,
         frozen_command_denies: vec!["Bash(rm)".into()],
@@ -2311,9 +3264,11 @@ async fn typed_plan_verdict_waits_for_idle_then_resumes_with_approval_prose() {
     let spool = dir.path().join(format!("{}.output", handle.task_id));
     await_spool(&fs, spool.to_str().unwrap(), |body| body.contains("second")).await;
     let histories = api.histories.lock().unwrap();
-    assert!(histories[1].iter().any(|message| message
-        .text_content()
-        .contains("[Plan Approved] You can now proceed with implementation")));
+    assert!(histories[1].iter().any(|message| {
+        message
+            .text_content()
+            .contains("[Plan Approved] You can now proceed with implementation")
+    }));
     assert!(!histories[1]
         .iter()
         .any(|message| message.text_content().contains("plan_approval_response")));

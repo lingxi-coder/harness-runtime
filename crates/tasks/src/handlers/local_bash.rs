@@ -118,6 +118,67 @@ pub trait TaskStatusSink: Send + Sync {
     /// completion, failure, timeout, or kill.
     async fn set_status(&self, task_id: &str, status: TaskStatus);
 
+    /// Publish a successful local-Agent completion and Native `finalizing`
+    /// fact in one task-row mutation. Other status transitions use
+    /// [`Self::set_status`].
+    async fn set_agent_status_with_finalizing(
+        &self,
+        task_id: &str,
+        status: TaskStatus,
+        _finalizing: bool,
+    ) {
+        self.set_status(task_id, status).await;
+    }
+
+    /// Atomically publish a persistent Agent rest with its Native finalizing
+    /// state. The registry clears that state after it drains the matching
+    /// result notification.
+    async fn notify_rest_with_finalizing(
+        &self,
+        task_id: &str,
+        result: Option<String>,
+        usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
+        agent_id: Option<lingxi_core::types::AgentId>,
+        agent_name: Option<String>,
+        team_name: Option<String>,
+        run: Option<lingxi_core::host::handback::HandbackRunKey>,
+        _finalizing: bool,
+    ) {
+        self.notify_rest(task_id, result, usage, agent_id, agent_name, team_name, run)
+            .await;
+    }
+
+    /// Apply one source-owned local-Agent list fact update without deriving
+    /// neighboring facts from task status.
+    async fn update_agent_list_local_fact(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        update: lingxi_core::host::task_registry::AgentListLocalFactUpdate,
+    ) {
+        if let Some(registry) = self.task_registry() {
+            let _ = registry
+                .update_agent_list_local_fact(agent_id, update)
+                .await;
+        }
+    }
+
+    /// Publish an explicit coordinator membership activity transition for an
+    /// in-process teammate. Registry-backed sinks resolve the exact team/name
+    /// from the stored teammate row; standalone sinks have no team writer.
+    async fn set_team_member_active(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        active: bool,
+    ) -> Result<(), String> {
+        if let Some(registry) = self.task_registry() {
+            registry
+                .set_team_member_active(agent_id, active)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
     /// A persistent teammate finished a turn and remains available for messages.
     async fn set_teammate_idle(&self, _task_id: &str) {}
 
@@ -150,12 +211,6 @@ pub trait TaskStatusSink: Send + Sync {
     /// sink compiles unchanged; only the monitor worker calls it.
     async fn set_monitor_stdout_bytes(&self, _task_id: &str, _bytes: u64) {}
 
-    /// Record the child's OS pid once known. Retained for sink-implementer
-    /// compatibility; the single-child `run()` path does not surface a pid
-    /// (the OS process is owned by the worker future, killed via cancellation),
-    /// so the handler no longer calls this. Defaulted to a no-op.
-    async fn set_pid(&self, _task_id: &str, _pid: u32) {}
-
     /// Signal that a PERSISTENT task came to rest: it produced a turn-set result
     /// and PARKED (still alive, awaiting the next message). Unlike
     /// [`Self::set_status`] this does NOT mark the task terminal — it arms a
@@ -167,6 +222,7 @@ pub trait TaskStatusSink: Send + Sync {
     /// `result` is the agent's final-text response and `usage` its run usage,
     /// surfaced as the optional `<result>` / `<usage>` notification sections (the
     /// binary `enqueueAgentNotification` always passes them when a result exists).
+    /// A delayed completion may park only the run that produced it.
     async fn notify_rest(
         &self,
         _task_id: &str,
@@ -175,6 +231,7 @@ pub trait TaskStatusSink: Send + Sync {
         _agent_id: Option<lingxi_core::types::AgentId>,
         _agent_name: Option<String>,
         _team_name: Option<String>,
+        _run: Option<lingxi_core::host::handback::HandbackRunKey>,
     ) {
     }
 
@@ -198,6 +255,16 @@ pub trait TaskStatusSink: Send + Sync {
         &self,
         _task_id: &str,
         _outcome: lingxi_core::host::task_registry::AgentTerminalOutcome,
+    ) {
+    }
+
+    /// Replace a local Agent task's typed transcript with a settled snapshot
+    /// from its runner. Unlike incremental `Message` events, this final image
+    /// reflects accepted hooks, tombstones, and resume history.
+    async fn replace_agent_transcript(
+        &self,
+        _task_id: &str,
+        _messages: Vec<lingxi_core::types::ConversationMessage>,
     ) {
     }
 

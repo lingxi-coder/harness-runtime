@@ -246,38 +246,8 @@ impl CredentialManager {
             }
         }
         // Slow path: load from storage.
-        let raw = self.storage.retrieve("lingxi", "anthropic-api-key").await?;
-        let raw = if let Some(raw) = raw {
-            raw
-        } else {
-            // Desktop builds briefly stored Anthropic through the generic
-            // provider path. Recover either alias once and migrate it into the
-            // canonical account so CLI, TUI, and Desktop converge.
-            let mut recovered = None;
-            for legacy_id in ["anthropic", "anthropic-api-key"] {
-                if let Some(value) = self
-                    .storage
-                    .retrieve("lingxi", &provider_key_account(legacy_id))
-                    .await?
-                {
-                    recovered = Some((legacy_id, value));
-                    break;
-                }
-            }
-            let Some((legacy_id, value)) = recovered else {
-                return Ok(None);
-            };
-            self.storage
-                .store("lingxi", "anthropic-api-key", value.clone())
-                .await?;
-            if let Err(error) = self
-                .storage
-                .delete("lingxi", &provider_key_account(legacy_id))
-                .await
-            {
-                tracing::warn!(%error, legacy_id, "failed to remove migrated Anthropic credential alias");
-            }
-            value
+        let Some(raw) = self.storage.retrieve("lingxi", "anthropic-api-key").await? else {
+            return Ok(None);
         };
         let s = String::from_utf8(raw.expose_secret_bytes().to_vec())
             .map_err(|_| CredentialError::Unavailable)?;
@@ -308,15 +278,9 @@ impl CredentialManager {
         Ok(())
     }
 
-    /// Delete the canonical Anthropic API key and any generic aliases written
-    /// by older unified-provider builds.
+    /// Delete the current canonical Anthropic API key.
     pub async fn delete_anthropic_api_key(&self) -> Result<(), CredentialError> {
         self.storage.delete("lingxi", "anthropic-api-key").await?;
-        for legacy_id in ["anthropic", "anthropic-api-key"] {
-            self.storage
-                .delete("lingxi", &provider_key_account(legacy_id))
-                .await?;
-        }
         *self.api_key_cache.write().await = None;
         self.provider_key_cache
             .write()
@@ -452,19 +416,11 @@ impl CredentialManager {
             return Ok(true);
         }
         if is_anthropic_api_key_id(id) {
-            if self.storage.contains("lingxi", "anthropic-api-key").await? {
-                return Ok(true);
-            }
-            for legacy_id in ["anthropic", "anthropic-api-key"] {
-                if self
-                    .storage
-                    .contains("lingxi", &provider_key_account(legacy_id))
-                    .await?
-                {
-                    return Ok(true);
-                }
-            }
-            return Ok(false);
+            return self
+                .storage
+                .contains("lingxi", "anthropic-api-key")
+                .await
+                .map_err(CredentialError::from);
         }
         self.storage
             .contains("lingxi", &provider_key_account(id))
@@ -584,11 +540,10 @@ impl CredentialManager {
     ///
     /// Each `store` overwrites any existing entry, so this is also the rotation
     /// path used by the reactive / proactive refresh driver. The subscription
-    /// fields (`subscription_type` / `rate_limit_tier`) are CARRIED OVER from
-    /// the previous session blob — claude-code's `ltu()` merge
-    /// (`subscriptionType: t.subscriptionType ?? e?.subscriptionType ?? null`)
-    /// preserves them on every save; a login that resolved fresh values writes
-    /// them via [`Self::update_oauth_subscription`] afterwards.
+    /// fields (`subscription_type` / `rate_limit_tier`) are carried over from
+    /// the previous session blob — claude-code's `ltu()` merge preserves them
+    /// on every save; fresh profile values update them through
+    /// [`Self::update_oauth_subscription`] afterwards.
     #[allow(clippy::too_many_arguments)]
     pub async fn store_oauth_tokens(
         &self,
@@ -610,7 +565,7 @@ impl CredentialManager {
         let prior_subscription = self
             .read_oauth_session_meta()
             .await
-            .map(|m| (m.subscription_type, m.rate_limit_tier));
+            .map(|meta| (meta.subscription_type, meta.rate_limit_tier));
 
         let access_meta = SecureStorageMetadata {
             created_at: now,
@@ -685,6 +640,32 @@ impl CredentialManager {
             .or(meta.subscription_type);
         meta.rate_limit_tier = rate_limit_tier.map(str::to_string).or(meta.rate_limit_tier);
         self.write_oauth_session_meta(&meta, self.clock.now()).await
+    }
+
+    /// Merge profile results only when the OAuth session still belongs to the
+    /// account whose token produced the request. The account tuple is captured
+    /// before background I/O; an account switch or logout makes this a no-op.
+    pub async fn update_oauth_subscription_for_account(
+        &self,
+        expected_org_id: &str,
+        expected_email: &str,
+        subscription_type: Option<&str>,
+        rate_limit_tier: Option<&str>,
+    ) -> Result<bool, CredentialError> {
+        let _guard = self.session_meta_lock.lock().await;
+        let Some(mut meta) = self.read_oauth_session_meta().await else {
+            return Ok(false);
+        };
+        if meta.org_id != expected_org_id || meta.email != expected_email {
+            return Ok(false);
+        }
+        meta.subscription_type = subscription_type
+            .map(str::to_string)
+            .or(meta.subscription_type);
+        meta.rate_limit_tier = rate_limit_tier.map(str::to_string).or(meta.rate_limit_tier);
+        self.write_oauth_session_meta(&meta, self.clock.now())
+            .await?;
+        Ok(true)
     }
 
     /// Best-effort read of the persisted session blob (`None` on absence or an
@@ -1205,6 +1186,39 @@ mod oauth_tests {
         assert!(cm.get_oauth_tokens().await.expect("get").is_none());
     }
 
+    #[tokio::test]
+    async fn subscription_refresh_is_bound_to_the_captured_account() {
+        let (_storage, cm) = manager();
+        let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000);
+        cm.store_oauth_tokens("a1", Some("r1"), expires, vec![], "old@x", "org-old")
+            .await
+            .expect("store old account");
+        cm.update_oauth_subscription(Some("max"), Some("old-tier"))
+            .await
+            .expect("seed old subscription");
+
+        // A concurrent old-account profile refresh cannot update the new
+        // credential metadata after login has persisted a different account.
+        cm.store_oauth_tokens("a2", Some("r2"), expires, vec![], "new@x", "org-new")
+            .await
+            .expect("store new account");
+        assert!(!cm
+            .update_oauth_subscription_for_account(
+                "org-old",
+                "old@x",
+                Some("enterprise"),
+                Some("stale-tier"),
+            )
+            .await
+            .expect("stale update is rejected"));
+
+        let current = cm.get_oauth_tokens().await.expect("read").expect("present");
+        assert_eq!(current.org_id, "org-new");
+        assert_eq!(current.email, "new@x");
+        assert_eq!(current.subscription_type.as_deref(), Some("max"));
+        assert_eq!(current.rate_limit_tier.as_deref(), Some("old-tier"));
+    }
+
     /// Storage double that inserts an await point at every operation, so
     /// `tokio::join!` on the current-thread runtime interleaves two credential
     /// writers exactly at the read → write boundary the lock has to close.
@@ -1393,47 +1407,41 @@ mod oauth_tests {
     }
 
     #[tokio::test]
-    async fn generic_anthropic_alias_is_migrated_on_read() {
+    async fn obsolete_anthropic_storage_accounts_are_not_recovered() {
         let (storage, cm) = manager();
-        storage
-            .store(
-                "lingxi",
-                "provider-key-anthropic",
-                SecureStorageData::new(
-                    b"sk-ant-legacy".to_vec(),
-                    SecureStorageMetadata {
-                        created_at: SystemTime::UNIX_EPOCH,
-                        last_accessed: None,
-                        kind: SecretKind::GenericApiKey {
-                            provider: "anthropic".to_string(),
-                        }
-                        .as_dto(),
-                    },
-                ),
-            )
-            .await
-            .expect("seed legacy alias");
-
-        let key = cm
-            .get_anthropic_api_key()
-            .await
-            .expect("read")
-            .expect("migrated key");
-        assert_eq!(key.expose_secret(), "sk-ant-legacy");
-        assert!(storage
-            .retrieve("lingxi", "provider-key-anthropic")
-            .await
-            .expect("retrieve alias")
-            .is_none());
-        assert_eq!(
+        for account in ["provider-key-anthropic", "provider-key-anthropic-api-key"] {
             storage
-                .retrieve("lingxi", "anthropic-api-key")
+                .store(
+                    "lingxi",
+                    account,
+                    SecureStorageData::new(
+                        b"sk-ant-legacy".to_vec(),
+                        SecureStorageMetadata {
+                            created_at: SystemTime::UNIX_EPOCH,
+                            last_accessed: None,
+                            kind: SecretKind::GenericApiKey {
+                                provider: "anthropic".to_string(),
+                            }
+                            .as_dto(),
+                        },
+                    ),
+                )
                 .await
-                .expect("retrieve canonical")
-                .expect("canonical present")
-                .expose_secret_bytes(),
-            b"sk-ant-legacy"
-        );
+                .expect("seed legacy alias");
+        }
+        assert!(cm.get_anthropic_api_key().await.unwrap().is_none());
+        assert!(cm.get_provider_key("anthropic").await.unwrap().is_none());
+        assert!(!cm.has_provider_key("anthropic").await.unwrap());
+        assert!(!cm.has_provider_key("anthropic-api-key").await.unwrap());
+        assert!(storage
+            .retrieve("lingxi", "anthropic-api-key")
+            .await
+            .unwrap()
+            .is_none());
+        cm.delete_anthropic_api_key().await.unwrap();
+        for account in ["provider-key-anthropic", "provider-key-anthropic-api-key"] {
+            assert!(storage.retrieve("lingxi", account).await.unwrap().is_some());
+        }
     }
 
     #[tokio::test]

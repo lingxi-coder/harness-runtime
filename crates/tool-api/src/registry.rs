@@ -1,13 +1,15 @@
 //! `ToolRegistry` — partitioned, dynamic registry of `Tool` implementations.
 //!
 //! The registry holds builtin tools (statically registered at startup) plus
-//! three dynamic partitions:
+//! four dynamic partitions:
 //!
 //! - **MCP**: tools sourced from MCP server connections, keyed by
 //!   [`McpConnectionId`] so a disconnect can drop them en masse.
 //! - **LSP**: tools sourced from Language-Server-Protocol bridges.
 //! - **Plugin**: tools sourced from host plugins, keyed by [`PluginId`]
 //!   so an unloaded plugin can drop its tools.
+//! - **Mod**: runtime-registered tools owned by a session plugin, kept apart
+//!   from MCP catalog snapshots so reconnects cannot erase them.
 //!
 //! Each lookup checks all partitions. The wire / prompt order is parity-fixed
 //! by [`available_tools`](ToolRegistry::available_tools): builtins sorted by
@@ -19,7 +21,7 @@
 
 use crate::defer::DeferralState;
 use crate::tool_search_view::{SharedToolSearchView, ToolSearchEntry};
-use crate::tool_trait::{Tool, ToolStaticContext};
+use crate::tool_trait::{BashPrecommitSkills, Tool, ToolStaticContext};
 use crate::wire::locale_cmp;
 use lingxi_core::types::{McpConnectionId, PluginId};
 use std::sync::{Arc, RwLock};
@@ -42,7 +44,7 @@ pub const RESTRICTED_DEFAULT_BUILTIN_DENY: &[&str] = &[
 ///
 /// Cloning is not supported; share via `Arc<ToolRegistry>` instead.
 ///
-/// The MCP and plugin partitions are insertion-ordered `Vec`s of `(key, tools)`
+/// The MCP, Mod, and plugin partitions are insertion-ordered `Vec`s of `(key, tools)`
 /// entries (rather than a `HashMap`) so iteration order is deterministic; the
 /// dedup/sort that produces the wire order is applied in [`Self::available_tools`].
 pub struct ToolRegistry {
@@ -52,6 +54,9 @@ pub struct ToolRegistry {
     // `Arc<ToolRegistry>` can replace one server's tools without rebuilding the
     // immutable builtin/LSP/plugin partitions.
     mcp_tools: RwLock<Vec<(McpConnectionId, Vec<Arc<dyn Tool>>)>>,
+    // Runtime Mod tools are session-owned. MCP catalog rebuilds must not erase
+    // them while a registered Mod is still loaded.
+    mod_tools: RwLock<Vec<(String, Vec<Arc<dyn Tool>>)>>,
     lsp_tools: Vec<Arc<dyn Tool>>,
     plugin_tools: Vec<(PluginId, Vec<Arc<dyn Tool>>)>,
     /// Shared Tool Search deferral state (mode + loaded-set). Disabled by
@@ -76,7 +81,16 @@ pub struct ToolRegistry {
     /// is already shared as an `Arc`, and because the Tool Search refreshers
     /// take `&self`.
     main_loop_model: RwLock<Option<String>>,
+    /// The owning session's live skill catalog projection, also used by child tools.
+    bash_precommit_skills_provider: RwLock<Option<BashPrecommitSkillsProvider>>,
+    bash_precommit_session_generation: std::sync::atomic::AtomicU64,
 }
+
+type BashPrecommitSkillsProvider = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = BashPrecommitSkills> + Send>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Clone, Debug)]
 struct BuiltinToolFilter {
@@ -101,6 +115,7 @@ impl ToolRegistry {
         Self {
             builtin: Vec::new(),
             mcp_tools: RwLock::new(Vec::new()),
+            mod_tools: RwLock::new(Vec::new()),
             lsp_tools: Vec::new(),
             plugin_tools: Vec::new(),
             deferral: Arc::new(DeferralState::disabled()),
@@ -108,7 +123,47 @@ impl ToolRegistry {
             builtin_filter: None,
             session_allowlist: None,
             main_loop_model: RwLock::new(None),
+            bash_precommit_skills_provider: RwLock::new(None),
+            bash_precommit_session_generation: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Share a live skill projection with subagents using this registry.
+    pub fn set_bash_precommit_skills_provider<F, Fut>(&self, provider: F)
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = BashPrecommitSkills> + Send + 'static,
+    {
+        *self
+            .bash_precommit_skills_provider
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::new(move || Box::pin(provider())));
+    }
+
+    /// Read the session's skill suggestions without holding a registry lock across await.
+    pub async fn bash_precommit_skills(&self) -> BashPrecommitSkills {
+        let provider = self
+            .bash_precommit_skills_provider
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match provider {
+            Some(provider) => provider().await,
+            None => BashPrecommitSkills::default(),
+        }
+    }
+
+    /// Identify the current conversation activation for memoized Bash guidance.
+    pub fn bash_precommit_session_generation(&self) -> u64 {
+        self.bash_precommit_session_generation
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Start a fresh guidance latch when the registry is reused for another session.
+    pub fn reset_bash_precommit_prompt_session(&self) {
+        self.bash_precommit_session_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Install the restricted-session built-in filter. Values are flattened by
@@ -156,6 +211,19 @@ impl ToolRegistry {
 
     fn session_allows_dynamic(&self, name: &str) -> bool {
         self.session_allowlist.is_none() && self.session_allows(name)
+    }
+
+    /// Whether an explicit empty tool selection disables Mod registration.
+    #[must_use]
+    pub fn mod_registration_disabled(&self) -> bool {
+        self.builtin_filter
+            .as_ref()
+            .and_then(|filter| filter.explicit_allowlist.as_ref())
+            .is_some_and(std::collections::HashSet::is_empty)
+            || self
+                .session_allowlist
+                .as_ref()
+                .is_some_and(std::collections::HashSet::is_empty)
     }
 
     fn builtin_allowed(&self, name: &str) -> bool {
@@ -317,13 +385,25 @@ impl ToolRegistry {
             .collect();
         builtins.sort_by(|a, b| locale_cmp(a.name(), b.name()));
 
-        // Dynamic partition: MCP + LSP + plugin, locale-sorted by name.
+        // Dynamic partition: MCP + Mod + LSP + plugin, locale-sorted by name.
         let mut dynamic: Vec<Arc<dyn Tool>> = Vec::new();
         let mcp_tools = self
             .mcp_tools
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (_id, ts) in mcp_tools.iter() {
+            dynamic.extend(
+                ts.iter()
+                    .filter(|tool| self.session_allows_dynamic(tool.name()))
+                    .cloned(),
+            );
+        }
+        for (_plugin, ts) in self
+            .mod_tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+        {
             dynamic.extend(
                 ts.iter()
                     .filter(|tool| self.session_allows_dynamic(tool.name()))
@@ -384,6 +464,16 @@ impl ToolRegistry {
                 return Some(tool.clone());
             }
         }
+        if let Some(tool) = self
+            .mod_tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .flat_map(|(_, tools)| tools.iter())
+            .find(|tool| tool.name() == name || tool.aliases().contains(&name))
+        {
+            return Some(tool.clone());
+        }
         self.lsp_tools
             .iter()
             .chain(self.plugin_tools.iter().flat_map(|(_id, ts)| ts.iter()))
@@ -415,6 +505,19 @@ impl ToolRegistry {
             {
                 return Some(tool.clone());
             }
+        }
+        if let Some(tool) = self
+            .mod_tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .flat_map(|(_, tools)| tools.iter())
+            .find(|tool| {
+                self.session_allows_dynamic(tool.name())
+                    && (tool.name() == name || tool.aliases().contains(&name))
+            })
+        {
+            return Some(tool.clone());
         }
         self.lsp_tools
             .iter()
@@ -458,6 +561,60 @@ impl ToolRegistry {
             .mcp_tools
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = tools;
+        self.refresh_tool_search_view();
+    }
+
+    /// Insert or replace one live tool owned by a Mod.
+    pub fn register_mod_tool(&self, plugin: &str, tool: Arc<dyn Tool>) {
+        let mut mods = self
+            .mod_tools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tools = if let Some((_, tools)) = mods.iter_mut().find(|(name, _)| name == plugin) {
+            tools
+        } else {
+            mods.push((plugin.to_owned(), Vec::new()));
+            &mut mods.last_mut().expect("just inserted").1
+        };
+        if let Some(existing) = tools
+            .iter_mut()
+            .find(|existing| existing.name() == tool.name())
+        {
+            *existing = tool;
+        } else {
+            tools.push(tool);
+        }
+        drop(mods);
+        self.refresh_tool_search_view();
+    }
+
+    /// Check whether a full tool name is already owned by this Mod.
+    #[must_use]
+    pub fn has_mod_tool(&self, plugin: &str, name: &str) -> bool {
+        self.mod_tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|(owner, tools)| owner == plugin && tools.iter().any(|tool| tool.name() == name))
+    }
+
+    /// The owning Mod of a runtime-registered tool, for `tool.describe`'s
+    /// provider identity. MCP catalog refreshes cannot change this partition.
+    pub fn mod_tool_owner(&self, name: &str) -> Option<String> {
+        self.mod_tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|(_, tools)| tools.iter().any(|tool| tool.name() == name))
+            .map(|(owner, _)| owner.clone())
+    }
+
+    /// Remove every live tool owned by a Mod on unload.
+    pub fn unregister_mod_tools(&self, plugin: &str) {
+        self.mod_tools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(name, _)| name != plugin);
         self.refresh_tool_search_view();
     }
 
@@ -505,6 +662,15 @@ impl ToolRegistry {
                 .flat_map(|(_id, tools)| tools.iter())
                 .filter(|tool| self.session_allows_dynamic(tool.name()))
                 .map(|t| t.name().to_string()),
+        );
+        names.extend(
+            self.mod_tools
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .flat_map(|(_, tools)| tools.iter())
+                .filter(|tool| self.session_allows_dynamic(tool.name()))
+                .map(|tool| tool.name().to_string()),
         );
         names.extend(
             self.lsp_tools
@@ -1069,5 +1235,19 @@ mod tests {
         assert!(r.find_by_name("ListMcpResourcesTool").is_some());
         assert!(r.find_by_name("ReadMcpResourceTool").is_some());
         assert!(r.find_by_name("ReadMcpResourceDirTool").is_some());
+    }
+
+    #[test]
+    fn mod_tool_survives_mcp_catalog_rebuild_until_owner_unloads() {
+        let registry = ToolRegistry::new();
+        registry.register_mod_tool("example", Arc::new(NamedTool("mcp__example__run")));
+        registry.replace_mcp_tools(Vec::new());
+        assert!(registry.find_by_name("mcp__example__run").is_some());
+        registry.unregister_mod_tools("example");
+        assert!(registry.find_by_name("mcp__example__run").is_none());
+
+        let mut empty = ToolRegistry::new();
+        empty.set_restricted_builtin_filter(Some(&[]));
+        assert!(empty.mod_registration_disabled());
     }
 }

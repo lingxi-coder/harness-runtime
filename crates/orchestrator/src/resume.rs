@@ -58,6 +58,194 @@ pub enum ResumeError {
     DeferredReplay(String),
 }
 
+#[cfg(test)]
+mod mod_session_turn_resume_tests {
+    use super::*;
+
+    fn hook_attachment_row(session: Uuid, uuid: Uuid, attachment: Value) -> JsonlMessage {
+        serde_json::from_value(serde_json::json!({
+            "type":"attachment",
+            "uuid":uuid.to_string(),
+            "parentUuid":null,
+            "sessionId":session.to_string(),
+            "attachment":attachment
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn restored_mod_chain_context_uses_plugin_origin_and_skips_record_only_hooks() {
+        let session = Uuid::new_v4();
+        let plugin_id = Uuid::new_v4();
+        let ignored_id = Uuid::new_v4();
+        let rows = vec![
+            hook_attachment_row(
+                session,
+                plugin_id,
+                serde_json::json!({
+                    "type":"hook_additional_context",
+                    "hookName":"prompt.submit",
+                    "hookEvent":"UserPromptSubmit",
+                    "content":["plugin context"]
+                }),
+            ),
+            hook_attachment_row(
+                session,
+                ignored_id,
+                serde_json::json!({
+                    "type":"hook_error_during_execution",
+                    "hookName":"PostToolUse",
+                    "hookEvent":"PostToolUse",
+                    "message":"record only"
+                }),
+            ),
+        ];
+        let descriptors = mod_attachment_descriptors_from_messages(&rows);
+        assert_eq!(descriptors.len(), 1);
+        assert_eq!(
+            descriptors.get(&MessageId::from_uuid(plugin_id)),
+            Some(&(
+                "hook_additional_context".into(),
+                serde_json::json!({"kind":"plugin","event":"prompt.submit"})
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn restored_hook_attachment_keeps_origin_and_can_be_omitted_from_model_copy() {
+        use crate::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+
+        let session_id = Uuid::new_v4();
+        let attachment_id = Uuid::new_v4();
+        let rows = vec![hook_attachment_row(
+            session_id,
+            attachment_id,
+            serde_json::json!({
+                "type":"hook_additional_context",
+                "hookName":"SessionStart",
+                "hookEvent":"SessionStart",
+                "content":["RESTORED SECRET"]
+            }),
+        )];
+        let state = state_from_messages(session_id, &rows);
+        assert_eq!(state.history.len(), 1);
+        assert_eq!(state.history[0].id(), MessageId::from_uuid(attachment_id));
+        let descriptors = mod_attachment_descriptors_from_messages(&rows);
+        assert_eq!(
+            descriptors.get(&MessageId::from_uuid(attachment_id)),
+            Some(&(
+                "hook_additional_context".into(),
+                serde_json::json!({"kind":"hook","event":"SessionStart"})
+            ))
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("omit-restored.js");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+              on('prompt.attachment', { type: 'hook_additional_context' }, ($, e, next) =>
+                e.origin.kind === 'hook' && e.origin.event === 'SessionStart'
+                  ? { text: null } : next(e));
+            }"#,
+        )
+        .unwrap();
+        let host = hooks::mods::ModHost::start(None).await.unwrap();
+        host.load("omit-restored", dir.path(), &module, serde_json::json!({}))
+            .await
+            .unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+        *orch.session.lock().await = state;
+        orch.restore_resume_prompt_metadata(&rows).await;
+        let is_regular_user_prompt = orch.regular_user_prompt_for_model_step().await;
+        let prepared = orch
+            .prepare_turn_step(
+                crate::conversation::ModelCallPath::Batched,
+                None,
+                true,
+                is_regular_user_prompt,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            prepared
+                .snapshot
+                .iter()
+                .all(|message| !message.text_content().contains("RESTORED SECRET"))
+        );
+        assert!(
+            orch.session
+                .lock()
+                .await
+                .history
+                .iter()
+                .any(|message| message.text_content().contains("RESTORED SECRET"))
+        );
+    }
+
+    fn user_row(session: &str, content: Value, flags: &[(&str, bool)]) -> JsonlMessage {
+        let mut row = serde_json::json!({
+            "type": "user",
+            "uuid": uuid::Uuid::new_v4().to_string(),
+            "parentUuid": null,
+            "sessionId": session,
+            "message": { "role": "user", "content": content },
+        });
+        for (name, value) in flags {
+            row[*name] = Value::Bool(*value);
+        }
+        serde_json::from_value(row).unwrap()
+    }
+
+    #[test]
+    fn full_jsonl_resume_counts_real_prompts_without_virtual_or_summary_rows() {
+        let id = uuid::Uuid::new_v4();
+        let session = id.to_string();
+        let text = |value: &str| serde_json::json!([{ "type": "text", "text": value }]);
+        let rows = vec![
+            user_row(&session, text("first"), &[]),
+            user_row(&session, text("virtual"), &[("isVirtual", true)]),
+            user_row(
+                &session,
+                serde_json::json!([{ "type": "tool_result", "tool_use_id": "toolu_1", "content": "ok", "is_error": false }]),
+                &[],
+            ),
+            user_row(
+                &session,
+                text("summary"),
+                &[
+                    ("isCompactSummary", true),
+                    ("isVisibleInTranscriptOnly", true),
+                ],
+            ),
+            user_row(&session, text("second"), &[]),
+        ];
+        let mut state = state_from_messages(id, &rows);
+        assert_eq!(state.real_user_turns(), 2);
+        assert_eq!(state.virtual_user_messages.len(), 1);
+        let summary = state.history[3].clone();
+        let second = state.history[4].clone();
+        state.replace_model_context_history(vec![summary, second]);
+        assert_eq!(state.real_user_turns(), 2);
+    }
+}
+
 /// Result of [`replay_session_state`]: the rebuilt session, the UUID of the
 /// last replayed message (`None` only if zero messages were replayed — i.e.
 /// the loader returned an empty `Vec`, which is structurally rejected
@@ -136,6 +324,8 @@ impl ReplayedSession {
                 .iter()
                 .copied()
                 .collect(),
+            virtual_user_message_ids: self.state.virtual_user_messages.iter().copied().collect(),
+            compacted_user_turns: self.state.compacted_user_turns,
             model_context_excluded_message_ids: self
                 .state
                 .model_context_excluded_messages
@@ -148,6 +338,9 @@ impl ReplayedSession {
             )
             .into_iter()
             .collect(),
+            model_reminder_attachments: model_reminder_attachments_from_messages(&self.messages)
+                .into_iter()
+                .collect(),
             cumulative_dropped_tokens: self.runtime_metadata.cumulative_dropped_tokens,
             compacted: tracking.compacted,
             turn_counter: tracking.turn_counter,
@@ -156,6 +349,7 @@ impl ReplayedSession {
             consecutive_rapid_refills: tracking.consecutive_rapid_refills,
             deferred_tools: self.runtime_metadata.deferred_tools.clone(),
             prompt_snapshot: self.runtime_metadata.prompt_snapshot.clone(),
+            context_rendering_hint: self.runtime_metadata.context_rendering_hint,
         }
     }
 }
@@ -181,6 +375,8 @@ pub struct ResumeRuntimeMetadata {
     pub deferred_tools: Vec<lingxi_core::host::DeferredToolReplay>,
     /// Last valid static prompt snapshot recovered from the transcript.
     pub prompt_snapshot: Option<lingxi_core::host::PromptSnapshot>,
+    /// Hint from the latest raw prompt_snapshot, with no older-row fallback.
+    pub context_rendering_hint: Option<lingxi_core::host::instructions::InstructionRendering>,
 }
 
 /// Load + replay a session by UUID. Emits a single [`RESUMED`]
@@ -217,6 +413,8 @@ pub async fn replay_session_state(
     // generic attachments and may be off-chain when a transcript ended before
     // the assistant response. Recover from the full routed entry stream.
     runtime_metadata.prompt_snapshot = prompt_snapshot_from_messages(&transcript_entries);
+    runtime_metadata.context_rendering_hint =
+        context_rendering_hint_from_messages(&transcript_entries);
     // claude emits a SINGLE `tengu_session_resumed` on resume (no started/
     // completed pair — those names have 0 hits in the 2.1.195 binary).
     tracing::info!(
@@ -308,10 +506,20 @@ pub fn prompt_snapshot_from_messages(
         let snapshot =
             serde_json::from_value::<lingxi_core::host::PromptSnapshot>(attachment.clone()).ok()?;
         (!snapshot.system_prompt.is_empty()
-            && snapshot.system_prompt.iter().all(|part| !part.is_empty())
             && snapshot.tools.iter().all(|tool| !tool.name.is_empty()))
         .then_some(snapshot)
     })
+}
+
+pub fn context_rendering_hint_from_messages(
+    messages: &[JsonlMessage],
+) -> Option<lingxi_core::host::instructions::InstructionRendering> {
+    let attachments = messages
+        .iter()
+        .filter(|message| message.message_type == "attachment")
+        .filter_map(|message| message.extra.get("attachment").cloned())
+        .collect::<Vec<_>>();
+    lingxi_core::host::instruction_announcements::latest_snapshot_context_rendering(&attachments)
 }
 
 /// An in-progress run of consecutive per-block "assistant" JSONL rows that
@@ -405,10 +613,16 @@ fn build_state_from_jsonl(
                     .get("isMeta")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
+                if m.extra.get("isVirtual") == Some(&Value::Bool(true)) {
+                    state
+                        .virtual_user_messages
+                        .insert(MessageId::from_uuid(msg_uuid));
+                }
                 let replay_text = content_blocks
                     .iter()
                     .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.as_str()),
+                        ContentBlock::Text { text, .. }
+                        | ContentBlock::TextJsUtf16 { text, .. } => Some(text.as_str()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -591,6 +805,7 @@ fn build_state_from_jsonl(
                         content,
                         subtype: Some("compact_boundary".to_string()),
                         compact_metadata,
+                        model_fallback: None,
                         refusal_fallback: None,
                     });
                 }
@@ -611,11 +826,70 @@ fn build_state_from_jsonl(
                             .to_string(),
                         subtype: Some("scheduled_task_fire".to_string()),
                         compact_metadata: None,
+                        model_fallback: None,
                         refusal_fallback: None,
                     });
                     state
                         .model_context_excluded_messages
                         .insert(MessageId::from_uuid(msg_uuid));
+                }
+                if m.message_type == "system"
+                    && m.extra.get("subtype").and_then(serde_json::Value::as_str)
+                        == Some("model_refusal_fallback")
+                {
+                    if let Ok(mut metadata) =
+                        serde_json::from_value::<lingxi_core::types::RefusalFallbackMetadata>(
+                            serde_json::to_value(&m.extra).expect("transcript fields are JSON"),
+                        )
+                    {
+                        metadata.notice_timestamp = Some(m.timestamp.clone());
+                        state.history.push(ConversationMessage::System {
+                            id: MessageId::from_uuid(msg_uuid),
+                            content: m
+                                .extra
+                                .get("content")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .into(),
+                            subtype: Some("model_refusal_fallback".into()),
+                            compact_metadata: None,
+                            model_fallback: None,
+                            refusal_fallback: Some(metadata),
+                        });
+                    }
+                }
+                if m.message_type == "system"
+                    && m.extra.get("subtype").and_then(serde_json::Value::as_str)
+                        == Some("model_fallback")
+                {
+                    if let (
+                        Some(trigger),
+                        Some(original_model),
+                        Some(fallback_model),
+                        Some(content),
+                    ) = (
+                        m.extra.get("trigger").and_then(serde_json::Value::as_str),
+                        m.extra
+                            .get("originalModel")
+                            .and_then(serde_json::Value::as_str),
+                        m.extra
+                            .get("fallbackModel")
+                            .and_then(serde_json::Value::as_str),
+                        m.extra.get("content").and_then(serde_json::Value::as_str),
+                    ) {
+                        state.history.push(ConversationMessage::System {
+                            id: MessageId::from_uuid(msg_uuid),
+                            content: content.into(),
+                            subtype: Some("model_fallback".into()),
+                            compact_metadata: None,
+                            refusal_fallback: None,
+                            model_fallback: Some(lingxi_core::types::ModelFallbackMetadata {
+                                trigger: trigger.into(),
+                                original_model: original_model.into(),
+                                fallback_model: fallback_model.into(),
+                            }),
+                        });
+                    }
                 }
                 if let Some(active_goal) = goal_state_from_message(m) {
                     state.active_goal = active_goal;
@@ -669,7 +943,7 @@ fn restore_thinking_stripped_ranges(state: &mut SessionState, messages: &[JsonlM
                 _ => MessageId::from_uuid(Uuid::parse_str(&key).unwrap_or(uuid)),
             };
             pending = Some((key.clone(), id));
-            let thinking_count = extract_content_blocks(&message.message)
+            let thinking_count = extract_content_blocks(&message.message, false)
                 .iter()
                 .filter(|block| {
                     matches!(
@@ -747,6 +1021,25 @@ fn restore_thinking_stripped_ranges(state: &mut SessionState, messages: &[JsonlM
     }
 }
 
+/// Retain original raw attachment payloads independently of API projection.
+/// Visible history and its compact boundary decide which payloads are active;
+/// unknown attachment kinds are never recovered by parsing rendered prose.
+pub(crate) fn model_reminder_attachments_from_messages(
+    messages: &[JsonlMessage],
+) -> std::collections::HashMap<MessageId, Value> {
+    messages
+        .iter()
+        .filter_map(|message| {
+            if message.message_type != "attachment" {
+                return None;
+            }
+            let attachment = message.extra.get("attachment")?;
+            let id = Uuid::parse_str(&message.uuid).ok()?;
+            Some((MessageId::from_uuid(id), attachment.clone()))
+        })
+        .collect()
+}
+
 fn hook_attachment_message_for_api(
     message: &JsonlMessage,
     message_uuid: Uuid,
@@ -756,6 +1049,31 @@ fn hook_attachment_message_for_api(
     }
     let attachment = message.extra.get("attachment")?;
     match attachment.get("type").and_then(Value::as_str)? {
+        "file" | "compact_file_reference" => ConversationOrchestrator::file_attachment_projection(
+            MessageId::from_uuid(message_uuid),
+            attachment,
+        ),
+        "nested_memory" => ConversationOrchestrator::nested_memory_attachment_projection(
+            MessageId::from_uuid(message_uuid),
+            attachment,
+        ),
+        "instructions" | "session_context" | "context_sections" | "date" => Some(
+            crate::conversation::context_announcements_impl::context_attachment_projection(
+                MessageId::from_uuid(message_uuid),
+                attachment,
+            ),
+        ),
+        "mcp_instructions_delta" => Some(ConversationMessage::user_meta(
+            MessageId::from_uuid(message_uuid),
+            crate::prompt::mcp_instructions::render(attachment)?,
+        )),
+        "total_tokens_reminder" => Some(ConversationMessage::user_meta(
+            MessageId::from_uuid(message_uuid),
+            format!(
+                "<system-reminder>\n{}\n</system-reminder>",
+                attachment.get("text")?.as_str()?
+            ),
+        )),
         "hook_stopped_continuation" => {
             let hook_name = attachment.get("hookName")?.as_str()?;
             let reason = attachment.get("message")?.as_str()?;
@@ -800,6 +1118,34 @@ fn hook_attachment_message_for_api(
         }
         _ => None,
     }
+}
+
+/// Restore the provenance of model-visible hook attachments from their JSONL
+/// rows. The replay renderer gives the derived history message the attachment
+/// row's UUID, so the same key identifies its original text on later requests.
+fn mod_attachment_descriptors_from_messages(
+    messages: &[JsonlMessage],
+) -> std::collections::HashMap<MessageId, (String, Value)> {
+    messages
+        .iter()
+        .filter_map(|message| {
+            let uuid = Uuid::parse_str(&message.uuid).ok()?;
+            hook_attachment_message_for_api(message, uuid)?;
+            let attachment = message.extra.get("attachment")?;
+            let kind = attachment.get("type")?.as_str()?;
+            let hook_name = attachment.get("hookName").and_then(Value::as_str);
+            let origin = if kind == "hook_additional_context"
+                && matches!(hook_name, Some("prompt.submit" | "tool.call"))
+            {
+                let event = hook_name?;
+                serde_json::json!({"kind":"plugin","event":event})
+            } else {
+                let event = attachment.get("hookEvent")?.as_str()?;
+                serde_json::json!({"kind":"hook","event":event})
+            };
+            Some((MessageId::from_uuid(uuid), (kind.to_owned(), origin)))
+        })
+        .collect()
 }
 
 fn tool_result_ids(message: &JsonlMessage) -> impl Iterator<Item = &str> {
@@ -1060,23 +1406,12 @@ pub async fn replay_deferred_tools_after_resume(
     {
         let mut session = orch.session.lock().await;
         session.history.push(tool_results_msg.clone());
-        for (message, source_id) in &injected_messages {
-            session.history.push(message.clone());
-            session
-                .injected_message_sources
-                .insert(message.id(), source_id.clone());
-        }
     }
     orch.persist_message_to_jsonl(&tool_results_msg).await;
     for tool_use_id in &tool_use_ids {
         orch.flush_hook_attachments(tool_use_id).await;
     }
-    for (message, _source_id) in &injected_messages {
-        if message.is_meta() {
-            continue;
-        }
-        orch.persist_message_to_jsonl(message).await;
-    }
+    crate::turn_loop::append_tool_injected_messages(orch, injected_messages, None).await;
     Ok(())
 }
 
@@ -1207,12 +1542,18 @@ fn current_usage_from_messages(
             .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
             .and_then(|block| block.get("text"))
             .and_then(Value::as_str);
-        if matches!(first_text, Some(
-            "[Request interrupted by user]" | "[Request interrupted by user for tool use]"
-            | "No response requested."
-            | "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed."
-            | "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
-        )) { continue; }
+        if matches!(
+            first_text,
+            Some(
+                "[Request interrupted by user]"
+                    | "[Request interrupted by user for tool use]"
+                    | "No response requested."
+                    | "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed."
+                    | "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
+            )
+        ) {
+            continue;
+        }
         if let Some(usage) = message.message.get("usage").filter(|v| v.is_object()) {
             let mut usage = usage.clone();
             // Claude uses `?? 0`, including providers that explicitly send null.
@@ -1330,6 +1671,7 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
         compaction_tracking: tracking,
         deferred_tools: Vec::new(),
         prompt_snapshot: prompt_snapshot_from_messages(messages),
+        context_rendering_hint: context_rendering_hint_from_messages(messages),
     }
 }
 
@@ -1476,6 +1818,154 @@ fn transcript_has_open_plan_segment(messages: &[JsonlMessage]) -> bool {
     false
 }
 
+/// A native Peer report is meta input with one framed text block. The reader
+/// reconstructs exact units from JSON string escapes; validating that frame
+/// against its Peer body prevents a retained carrier from changing authority
+/// or supplying different model text during cold resume.
+fn restore_main_handback_content(
+    message: &JsonlMessage,
+    content: &mut [ContentBlock],
+) -> Result<(), ()> {
+    let Some(origin) = message.extra.get("origin") else {
+        return Ok(());
+    };
+    if origin.get("kind").and_then(Value::as_str) != Some("peer")
+        || origin.get("handback").and_then(Value::as_bool) != Some(true)
+    {
+        return Ok(());
+    }
+    let from = origin.get("from").and_then(Value::as_str).ok_or(())?;
+    let body = origin.get("body").and_then(Value::as_str).ok_or(())?;
+    if message.message_type != "user"
+        || message.message.get("role").and_then(Value::as_str) != Some("user")
+        || message.extra.get("isMeta").and_then(Value::as_bool) != Some(true)
+        || !origin
+            .get("senderTaskId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+        || origin.get("name").is_some_and(|name| !name.is_string())
+        || origin
+            .get("flagged")
+            .is_some_and(|flagged| flagged.as_bool() != Some(true))
+        || message
+            .extra
+            .get("isVisibleInTranscriptOnly")
+            .and_then(Value::as_bool)
+            == Some(true)
+        || message
+            .extra
+            .get("isModelContextExcluded")
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        return Err(());
+    }
+    let source_blocks = message
+        .message
+        .get("content")
+        .and_then(Value::as_array)
+        .ok_or(())?;
+    if source_blocks.len() != 1
+        || source_blocks[0].get("type").and_then(Value::as_str) != Some("text")
+    {
+        return Err(());
+    }
+    let [ContentBlock::Text { text, .. }] = content else {
+        return Err(());
+    };
+    let overrides = session::jsonl::exact_json::message_utf16_overrides(message);
+    let body_units = overrides
+        .get("/origin/body")
+        .cloned()
+        .unwrap_or_else(|| body.encode_utf16().collect());
+    let model_units = overrides
+        .get("/message/content/0/text")
+        .cloned()
+        .unwrap_or_else(|| text.encode_utf16().collect());
+    if String::from_utf16_lossy(&body_units) != body
+        || String::from_utf16_lossy(&model_units) != *text
+    {
+        return Err(());
+    }
+    // origin.body has already passed native wXe neutralization. Insert it
+    // between the native escaped sender and closing line without applying the
+    // neutralizer again.
+    let wrapper = lingxi_core::host::handback_wire::render_agent_message_utf16(from, &[]);
+    let body_start = wrapper
+        .len()
+        .checked_sub("\n</agent-message>".len())
+        .ok_or(())?;
+    let mut expected = wrapper[..body_start].to_vec();
+    expected.extend(body_units);
+    expected.extend_from_slice(&wrapper[body_start..]);
+    if expected != model_units {
+        return Err(());
+    }
+    if overrides.contains_key("/message/content/0/text") {
+        content[0] = ContentBlock::TextJsUtf16 {
+            text: text.clone(),
+            utf16_code_units: model_units,
+            citations: None,
+        };
+    }
+    Ok(())
+}
+
+fn restore_exact_history_strings(message: &JsonlMessage, content: &mut [ContentBlock]) {
+    let overrides = session::jsonl::exact_json::message_utf16_overrides(message);
+    if overrides.is_empty() {
+        return;
+    }
+    let raw = message.message.get("content");
+    let paths: Vec<_> = match raw {
+        Some(Value::String(_)) => vec!["/message/content".to_owned()],
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, block)| {
+                block["type"] != "text" || block.get("text").is_some_and(Value::is_string)
+            })
+            .map(|(index, _)| format!("/message/content/{index}"))
+            .collect(),
+        _ => return,
+    };
+    for (block, path) in content.iter_mut().zip(paths) {
+        match block {
+            ContentBlock::Text { text, citations } => {
+                let pointer = if raw.is_some_and(Value::is_string) {
+                    path
+                } else {
+                    format!("{path}/text")
+                };
+                if let Some(units) = overrides.get(&pointer).filter(|units| {
+                    String::from_utf16(units).is_err() && String::from_utf16_lossy(units) == *text
+                }) {
+                    *block = ContentBlock::TextJsUtf16 {
+                        text: text.clone(),
+                        utf16_code_units: units.clone(),
+                        citations: citations.clone(),
+                    };
+                }
+            }
+            ContentBlock::ToolResult {
+                content,
+                content_blocks,
+                ..
+            } => {
+                if let Some(units) = overrides.get(&format!("{path}/content")).filter(|units| {
+                    String::from_utf16(units).is_err()
+                        && String::from_utf16_lossy(units) == *content
+                }) {
+                    *content_blocks = Some(lingxi_core::types::js_utf16::tool_result_sidecar(
+                        units.clone(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Best-effort extraction of `content` from a JSONL `message` payload.
 ///
 /// claude-code stores `message.content` as either:
@@ -1483,16 +1973,21 @@ fn transcript_has_open_plan_segment(messages: &[JsonlMessage]) -> bool {
 /// - an array of content blocks.
 ///
 /// We accept both: a string becomes a single `ContentBlock::Text`; an array
-/// is deserialized after removing malformed text blocks. If neither shape
+/// is deserialized after removing malformed text blocks and normalizing non-text
+/// user tool-result payloads. If neither shape
 /// matches, the result is an empty `Vec` — the message is still appended
 /// so the chain is preserved, but the inner content is empty.
-fn extract_content_blocks(message: &serde_json::Value) -> Vec<ContentBlock> {
+fn extract_content_blocks(
+    message: &serde_json::Value,
+    normalize_tool_results: bool,
+) -> Vec<ContentBlock> {
     let Some(content) = message.get("content") else {
         return Vec::new();
     };
     if let Some(s) = content.as_str() {
         return vec![ContentBlock::Text {
             text: s.to_string(),
+            citations: None,
         }];
     }
     if let Some(content) = content.as_array() {
@@ -1505,7 +2000,21 @@ fn extract_content_blocks(message: &serde_json::Value) -> Vec<ContentBlock> {
                 block.get("type").and_then(Value::as_str) != Some("text")
                     || block.get("text").is_some_and(Value::is_string)
             })
-            .cloned()
+            .map(|block| {
+                let mut block = block.clone();
+                if normalize_tool_results
+                    && block.get("type").and_then(Value::as_str) == Some("tool_result")
+                {
+                    if let Some(content) = block
+                        .get("content")
+                        .filter(|value| !value.is_null() && !value.is_string() && !value.is_array())
+                    {
+                        let text = crate::tool_result_text::normalized_tool_result_text(content);
+                        block["content"] = Value::String(text);
+                    }
+                }
+                block
+            })
             .collect();
         if let Ok(blocks) = serde_json::from_value::<Vec<ContentBlock>>(Value::Array(content)) {
             return blocks;
@@ -1530,6 +2039,14 @@ impl ConversationOrchestrator {
         self.compaction_runtime
             .last_response_output_tokens
             .store(usage.output_tokens, std::sync::atomic::Ordering::Relaxed);
+        self.compaction_runtime.total_tokens_reminder_usage.store(
+            usage
+                .input_tokens
+                .saturating_add(usage.cache_read_input_tokens)
+                .saturating_add(usage.cache_creation_input_tokens)
+                .saturating_add(usage.output_tokens),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     /// Restore transcript-derived compaction state on an already-built runtime.
@@ -1545,6 +2062,7 @@ impl ConversationOrchestrator {
             .prompt_snapshot_resume
             .store(true, std::sync::atomic::Ordering::Release);
         *self.prompt_runtime.prompt_snapshot.lock().await = metadata.prompt_snapshot;
+        *self.prompt_runtime.context_rendering_hint.lock().await = metadata.context_rendering_hint;
         self.compaction_runtime
             .compaction_cumulative_dropped_tokens
             .store(
@@ -1558,6 +2076,12 @@ impl ConversationOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             post_compact_skill_attachments_from_messages(messages);
+        *self
+            .transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            model_reminder_attachments_from_messages(messages);
     }
 
     /// Restore only metadata that may live off the resumable model chain.
@@ -1568,6 +2092,8 @@ impl ConversationOrchestrator {
     /// full runtime projection on that raw stream would let preserved
     /// pre-compaction assistant rows overwrite the normalized current usage.
     pub async fn restore_resume_prompt_metadata(&self, messages: &[JsonlMessage]) {
+        *self.prompt_runtime.context_rendering_hint.lock().await =
+            context_rendering_hint_from_messages(messages);
         if let Some(snapshot) = prompt_snapshot_from_messages(messages) {
             *self.prompt_runtime.prompt_snapshot.lock().await = Some(snapshot);
         }
@@ -1577,6 +2103,28 @@ impl ConversationOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             post_compact_skill_attachments_from_messages(messages);
+        *self
+            .transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            model_reminder_attachments_from_messages(messages);
+        self.restore_mod_attachment_provenance_from_messages(messages)
+            .await;
+    }
+
+    async fn restore_mod_attachment_provenance_from_messages(&self, messages: &[JsonlMessage]) {
+        let history_ids = self
+            .session
+            .lock()
+            .await
+            .history
+            .iter()
+            .map(ConversationMessage::id)
+            .collect::<HashSet<_>>();
+        let mut descriptors = mod_attachment_descriptors_from_messages(messages);
+        descriptors.retain(|id, _| history_ids.contains(id));
+        *self.prompt_runtime.mod_persisted_attachments.lock().await = descriptors;
     }
 
     /// Construct an orchestrator pre-populated with a replayed session.
@@ -1640,6 +2188,43 @@ impl ConversationOrchestrator {
         // replayed values. Both fields are `pub(crate)` so this is allowed
         // from a sibling module in the same crate.
         orch.session = Arc::new(Mutex::new(replayed.state));
+        {
+            let mut state = orch.session.lock().await;
+            let recorded_model = replayed.messages.iter().any(|message| {
+                carries_human_turn_settings(message)
+                    && message
+                        .message
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .is_some_and(|model| {
+                            !model.is_empty() && !(model.starts_with('<') && model.ends_with('>'))
+                        })
+            });
+            if recorded_model {
+                // The assistant row selects the cold-resume model. A server
+                // notice may supply only the provider-profile companion, and
+                // only when its target matches that independently selected
+                // model. A notice written just before a crash cannot select a
+                // fallback route before any fallback assistant response.
+                if let Some(profile) =
+                    crate::query_model::server_session_serving_profile(&state.history, &state.model)
+                {
+                    state.model_profile = profile;
+                }
+            }
+            let restored = crate::query_model::restore_refusal_selection(
+                &orch,
+                recorded_model.then_some(state.model.as_str()),
+                &state.history,
+                false,
+            );
+            if !restored {
+                state.model = orch.config.model.clone();
+                state.model_profile = None;
+            }
+        }
+        orch.main_reports
+            .reset_for_builder(orch.session.lock().await.session_id);
         orch.restore_response_usage(replayed.runtime_metadata.current_usage);
         orch.sync_thinking_signature_strip_flag_to_api().await;
         orch.transcript.last_jsonl_uuid = Arc::new(Mutex::new(
@@ -1659,11 +2244,21 @@ impl ConversationOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             post_compact_skill_attachments_from_messages(&replayed.messages);
+        *orch
+            .transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            model_reminder_attachments_from_messages(&replayed.messages);
         orch.prompt_runtime
             .prompt_snapshot_resume
             .store(true, std::sync::atomic::Ordering::Release);
         *orch.prompt_runtime.prompt_snapshot.lock().await =
             replayed.runtime_metadata.prompt_snapshot.clone();
+        *orch.prompt_runtime.context_rendering_hint.lock().await =
+            replayed.runtime_metadata.context_rendering_hint;
+        orch.restore_mod_attachment_provenance_from_messages(&replayed.messages)
+            .await;
         if let Some(writer) = jsonl_writer {
             orch.transcript.jsonl_writer = Some(writer);
         }
@@ -1681,150 +2276,8 @@ impl ConversationOrchestrator {
 }
 
 #[cfg(test)]
-mod mod_session_turn_resume_tests {
-
-    #[tokio::test]
-    async fn restored_hook_attachment_keeps_origin_and_can_be_omitted_from_model_copy() {
-        use crate::test_support::{
-            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-            StaticMemoryProvider,
-        };
-
-        let session_id = Uuid::new_v4();
-        let attachment_id = Uuid::new_v4();
-        let rows = vec![hook_attachment_row(
-            session_id,
-            attachment_id,
-            serde_json::json!({
-                "type":"hook_additional_context",
-                "hookName":"SessionStart",
-                "hookEvent":"SessionStart",
-                "content":["RESTORED SECRET"]
-            }),
-        )];
-        let state = state_from_messages(session_id, &rows);
-        assert_eq!(state.history.len(), 1);
-        assert_eq!(state.history[0].id(), MessageId::from_uuid(attachment_id));
-        let descriptors = mod_attachment_descriptors_from_messages(&rows);
-        assert_eq!(
-            descriptors.get(&MessageId::from_uuid(attachment_id)),
-            Some(&(
-                "hook_additional_context".into(),
-                serde_json::json!({"kind":"hook","event":"SessionStart"})
-            ))
-        );
-
-        let dir = tempfile::tempdir().unwrap();
-        let module = dir.path().join("omit-restored.js");
-        std::fs::write(
-            &module,
-            r#"export function register(on) {
-              on('prompt.attachment', { type: 'hook_additional_context' }, ($, e, next) =>
-                e.origin.kind === 'hook' && e.origin.event === 'SessionStart'
-                  ? { text: null } : next(e));
-            }"#,
-        )
-        .unwrap();
-        let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("omit-restored", dir.path(), &module, serde_json::json!({}))
-            .await
-            .unwrap();
-        let mut registry = hooks::HookRegistry::new();
-        registry.set_mod_host(host);
-        let orch = ConversationOrchestrator::new(
-            OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(vec![])),
-            Arc::new(ToolRegistry::new()),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            dir.path().to_path_buf(),
-        )
-        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
-        *orch.session.lock().await = state;
-        orch.restore_resume_prompt_metadata(&rows).await;
-        let is_regular_user_prompt = orch.regular_user_prompt_for_model_step().await;
-        let prepared = orch
-            .prepare_turn_step(
-                crate::conversation::ModelCallPath::Batched,
-                None,
-                true,
-                is_regular_user_prompt,
-                None,
-            )
-            .await
-            .unwrap();
-        assert!(
-            prepared
-                .snapshot
-                .iter()
-                .all(|message| !message.text_content().contains("RESTORED SECRET"))
-        );
-        assert!(
-            orch.session
-                .lock()
-                .await
-                .history
-                .iter()
-                .any(|message| message.text_content().contains("RESTORED SECRET"))
-        );
-    }}
-
-fn restore_exact_history_strings(message: &JsonlMessage, content: &mut [ContentBlock]) {
-    let overrides = session::jsonl::exact_json::message_utf16_overrides(message);
-    if overrides.is_empty() {
-        return;
-    }
-    let raw = message.message.get("content");
-    let paths: Vec<_> = match raw {
-        Some(Value::String(_)) => vec!["/message/content".to_owned()],
-        Some(Value::Array(blocks)) => blocks
-            .iter()
-            .enumerate()
-            .filter(|(_, block)| {
-                block["type"] != "text" || block.get("text").is_some_and(Value::is_string)
-            })
-            .map(|(index, _)| format!("/message/content/{index}"))
-            .collect(),
-        _ => return,
-    };
-    for (block, path) in content.iter_mut().zip(paths) {
-        match block {
-            ContentBlock::Text { text, citations } => {
-                let pointer = if raw.is_some_and(Value::is_string) {
-                    path
-                } else {
-                    format!("{path}/text")
-                };
-                if let Some(units) = overrides.get(&pointer).filter(|units| {
-                    String::from_utf16(units).is_err() && String::from_utf16_lossy(units) == *text
-                }) {
-                    *block = ContentBlock::TextJsUtf16 {
-                        text: text.clone(),
-                        utf16_code_units: units.clone(),
-                        citations: citations.clone(),
-                    };
-                }
-            }
-            ContentBlock::ToolResult {
-                content,
-                content_blocks,
-                ..
-            } => {
-                if let Some(units) = overrides.get(&format!("{path}/content")).filter(|units| {
-                    String::from_utf16(units).is_err()
-                        && String::from_utf16_lossy(units) == *content
-                }) {
-                    *content_blocks = Some(lingxi_core::types::js_utf16::tool_result_sidecar(
-                        units.clone(),
-                    ));
-                }
-            }
-            _ => {}
-        }
-    }
-}
+#[path = "nested_memory_resume_287_tests.rs"]
+mod nested_memory_resume_287_tests;
 
 #[cfg(test)]
 mod exact_history_string_tests {

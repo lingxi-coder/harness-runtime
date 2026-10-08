@@ -1,169 +1,266 @@
 use super::{DefaultModelSelection, PoolSubagentSpawner};
 use crate::definition::AgentModel;
-use lingxi_core::host::subagent_spawn::{SubagentSpawnError, SubagentSpawnRequest};
+use crate::model_resolution::{
+    ModelResolutionContext, ModelResolutionError, ModelRouteFacts, ResolvedModelSelection,
+    is_relative_model_alias, resolve_user_model_selection,
+};
+use lingxi_core::host::subagent_spawn::SubagentSpawnRequest;
+
+fn trim_route_text(value: &str) -> &str {
+    lingxi_core::host::effort::trim_js_whitespace(value)
+}
 
 impl PoolSubagentSpawner {
-    pub(super) fn resolve_provider_first_party(&self, profile: Option<&str>) -> Option<bool> {
-        profile.and_then(|profile| {
-            self.provider_first_party_resolver
-                .get()
-                .and_then(|resolve| resolve(profile))
-        })
+    fn unresolved_model_context(model: &str, profile: Option<&str>) -> ModelResolutionContext {
+        ModelResolutionContext {
+            route: ModelRouteFacts {
+                model: model.to_owned(),
+                profile: profile.map(str::to_owned),
+                ..ModelRouteFacts::default()
+            },
+            ..ModelResolutionContext::default()
+        }
     }
-    pub(super) fn resolved_default_selection(&self) -> Option<DefaultModelSelection> {
+
+    pub(super) fn context_for_route(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<ModelResolutionContext, ModelResolutionError> {
+        match self.model_resolution_context_provider.get() {
+            Some(provider) => provider.context_for_route(model, profile),
+            None => Ok(Self::unresolved_model_context(model, profile)),
+        }
+    }
+
+    pub(super) fn resolved_default_selection(
+        &self,
+    ) -> Result<Option<DefaultModelSelection>, ModelResolutionError> {
+        // A live source is authoritative. If its route is temporarily
+        // unavailable, do not silently replace it with a boot-time route.
         if let Some(provider) = self.default_model_selection_provider.get() {
-            return provider().filter(|selection| !selection.model.trim().is_empty());
+            return provider().map(|selection| {
+                selection.filter(|selection| !trim_route_text(&selection.model).is_empty())
+            });
         }
-        if let Some(provider) = self.default_model_provider.get() {
-            if let Some(model) = provider() {
-                if !model.trim().is_empty() {
-                    return Some(DefaultModelSelection {
-                        model,
-                        model_profile: None,
-                        provider_first_party: self.session_provider_first_party,
-                    });
-                }
-            }
-        }
-        self.default_model
-            .clone()
-            .map(|model| DefaultModelSelection {
-                model,
-                model_profile: None,
-                provider_first_party: self.session_provider_first_party,
-            })
+
+        let model = self
+            .default_model_provider
+            .get()
+            .and_then(|provider| provider())
+            .filter(|model| !trim_route_text(model).is_empty())
+            .or_else(|| self.default_model.clone());
+        let Some(model) = model else {
+            return Ok(None);
+        };
+        let context = self.context_for_route(&model, None)?;
+        Ok(Some(DefaultModelSelection {
+            model,
+            model_profile: context.route.profile.clone(),
+            model_resolution_context: context,
+        }))
     }
-    /// The effective default parent / main-loop model at spawn time: the LIVE
-    /// source ([`Self::default_model_provider`]) when wired and returning a
-    /// non-empty value, else the boot snapshot [`Self::default_model`]. This is
-    /// the anchor for `AgentModel::Inherit` + family-alias resolution when a spawn
-    /// request carries no `parent_model_override` (claude-code `getMainLoopModel()`).
+
+    /// The default parent / main-loop model when a spawn has no explicit live
+    /// parent override. Errors are intentionally surfaced by the spawn path;
+    /// non-critical prompt renderers can use `None` if route facts are absent.
     pub(super) fn resolved_default_model(&self) -> Option<String> {
         self.resolved_default_selection()
+            .ok()
+            .flatten()
             .map(|selection| selection.model)
     }
+
     pub(super) fn effective_parent_selection(
         &self,
         request: &SubagentSpawnRequest,
-    ) -> Option<DefaultModelSelection> {
-        let live = self.resolved_default_selection();
+    ) -> Result<Option<DefaultModelSelection>, ModelResolutionError> {
         let parent_model = request
             .parent_model_override
             .as_deref()
-            .map(str::trim)
+            .map(trim_route_text)
             .filter(|model| !model.is_empty());
-        let parent_model = match parent_model {
-            Some(model) => model,
-            None => return live,
+        let Some(parent_model) = parent_model else {
+            return self.resolved_default_selection();
         };
-        // `model_profile` is backward-compatible wire storage for two distinct
-        // cases. With an explicit request.model it pins the CHILD. Without one
-        // it is the immediate PARENT's profile hint threaded by AgentTool.
-        let parent_profile = request
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-            .is_none()
-            .then(|| request.model_profile.clone())
-            .flatten();
 
-        // When the override names the live selection, reuse the whole atomic
-        // selection, including its authoritative provider classification. This
-        // handles arbitrary user profile names without interpreting them.
-        if let Some(selection) = live.filter(|selection| {
-            selection.model == parent_model
-                && parent_profile
-                    .as_ref()
-                    .is_none_or(|profile| selection.model_profile.as_ref() == Some(profile))
-        }) {
-            return Some(selection);
+        let parent_profile = request
+            .parent_model_profile_override
+            .as_deref()
+            .map(trim_route_text)
+            .filter(|profile| !profile.is_empty());
+
+        if let Some(selection) =
+            self.resolved_default_selection()
+                .ok()
+                .flatten()
+                .filter(|selection| {
+                    selection.model == parent_model
+                        && parent_profile.is_none_or(|profile| {
+                            selection.model_profile.as_deref() == Some(profile)
+                        })
+                })
+        {
+            return Ok(Some(selection));
         }
 
-        Some(DefaultModelSelection {
+        let context = self.context_for_route(parent_model, parent_profile)?;
+        Ok(Some(DefaultModelSelection {
             model: parent_model.to_string(),
-            model_profile: parent_profile.clone(),
-            provider_first_party: self
-                .resolve_provider_first_party(parent_profile.as_deref())
-                // Legacy serialized requests predate the authoritative bit. The
-                // boot session value preserves their old behavior without
-                // guessing from a profile name; every new nested path threads it.
-                .unwrap_or(self.session_provider_first_party),
-        })
+            model_profile: context.route.profile.clone(),
+            model_resolution_context: context,
+        }))
     }
-    /// The parent / main-loop model this spawn resolves `AgentModel::Inherit` +
-    /// bare family aliases against: the request's `parent_model_override` (the
-    /// LIVE session model / immediate parent model threaded by `AgentTool`,
-    /// claude-code `AgentTool.tsx:418`) when present and non-empty, else the
-    /// spawner's own [`Self::resolved_default_model`] (boot/live fallback for the
-    /// non-`AgentTool` spawn paths).
+
+    #[cfg(test)]
     pub(super) fn effective_parent_model(&self, request: &SubagentSpawnRequest) -> Option<String> {
         self.effective_parent_selection(request)
+            .ok()
+            .flatten()
             .map(|selection| selection.model)
     }
-    /// Resolve a spawn's model preference to a concrete wire id, applying the
-    /// managed `availableModels` restriction when one is wired (subagent
-    /// inherit-on-barred + plan-mode upgrade gating, binary `ble`/`RF`). Without a
-    /// restriction this is exactly [`crate::model_resolution::resolve_agent_model`]
-    /// (byte-identical legacy). Warnings are logged (the binary de-duplicates via a
-    /// process-wide `SN` set; a per-spawn `warn!` is an acceptable non-visible
-    /// divergence for a log line).
-    pub(super) fn resolve_model_pref(&self, model: &AgentModel, parent_model: &str) -> String {
+
+    pub(super) fn resolve_model_pref(
+        &self,
+        model: &AgentModel,
+        parent_model: &str,
+        context: &ModelResolutionContext,
+    ) -> Result<String, ModelResolutionError> {
         match &self.model_restriction {
             Some((enforcement, catalog)) => {
                 let restriction = crate::model_resolution::ModelRestriction {
                     enforcement,
                     catalog,
                 };
-                crate::model_resolution::resolve_agent_model_restricted(
+                crate::model_resolution::resolve_agent_model_restricted_with_context(
                     model,
                     parent_model,
                     self.permission_mode,
                     self.model_setting.as_deref(),
                     Some(restriction),
-                    &mut |m| tracing::warn!("{m}"),
+                    context,
+                    &mut |message| tracing::warn!("{message}"),
                 )
             }
-            None => crate::model_resolution::resolve_agent_model(
+            None => crate::model_resolution::resolve_agent_model_with_context(
                 model,
                 parent_model,
                 self.permission_mode,
                 self.model_setting.as_deref(),
+                context,
             ),
         }
     }
-    /// Apply the managed model allowlist to a provider-qualified concrete id
-    /// without running it through Claude-family alias or Bedrock-prefix logic.
-    /// Returns `false` when the requested provider/model was rejected and the
-    /// permitted parent model had to be inherited instead.
-    pub(super) fn resolve_provider_model_pref(
-        &self,
-        model: &str,
-        parent_model: Option<&str>,
-    ) -> Result<(String, bool), SubagentSpawnError> {
-        let barred = self
-            .model_restriction
-            .as_ref()
-            .is_some_and(|(enforcement, _)| {
-                llm_runtime::model::allowlist::model_allowed_under(enforcement, model)
-                    == Some(false)
-            });
-        if !barred {
-            return Ok((model.to_string(), true));
-        }
 
-        tracing::warn!(
-            "Subagent model \"{model}{}",
-            llm_runtime::model::allowlist::warnings::NOT_IN_ALLOWLIST_SUBAGENT
-        );
-        let Some(parent_model) = parent_model else {
-            return Err(SubagentSpawnError::Runtime(format!(
-                "subagent model {model:?} is not permitted and no parent model is available"
-            )));
+    /// Choose the effective model once, then retain the route that resolved it.
+    /// An unavailable definition default never runs before a caller override.
+    pub(super) fn resolve_child_model_selection(
+        &self,
+        preference: &AgentModel,
+        parent: Option<&DefaultModelSelection>,
+        model_profile: Option<&str>,
+    ) -> Result<Option<ResolvedModelSelection>, ModelResolutionError> {
+        let override_model = std::env::var(branding::SUBAGENT_MODEL_ENV)
+            .ok()
+            .filter(|value| !value.is_empty());
+        let selected_preference = override_model
+            .as_ref()
+            .map(|model| AgentModel::Explicit(model.clone()))
+            .unwrap_or_else(|| preference.clone());
+        let model_profile = override_model.is_none().then_some(model_profile).flatten();
+        let empty_context = ModelResolutionContext::default();
+        let context = parent
+            .map(|parent| &parent.model_resolution_context)
+            .unwrap_or(&empty_context);
+        let route_provider =
+            |model: &str, profile: Option<&str>| self.context_for_route(model, profile);
+        let inherit = || -> Result<Option<ResolvedModelSelection>, ModelResolutionError> {
+            let Some(parent) = parent else {
+                return Ok(None);
+            };
+            let model = self.resolve_model_pref(&AgentModel::Inherit, &parent.model, context)?;
+            resolve_user_model_selection(
+                &model,
+                parent.model_profile.as_deref(),
+                context,
+                &route_provider,
+            )
+            .map(Some)
         };
-        Ok((
-            self.resolve_model_pref(&AgentModel::Inherit, parent_model),
-            false,
-        ))
+        let spec = match &selected_preference {
+            AgentModel::Inherit => return inherit(),
+            AgentModel::Alias(spec) | AgentModel::Explicit(spec) => spec,
+        };
+        let bars = |model: &str| {
+            self.model_restriction
+                .as_ref()
+                .is_some_and(|(enforcement, _)| {
+                    llm_runtime::model::allowlist::model_allowed_under(enforcement, model)
+                        == Some(false)
+                })
+        };
+        let fallback = || {
+            tracing::warn!(
+                "Subagent model \"{spec}{}",
+                llm_runtime::model::allowlist::warnings::NOT_IN_ALLOWLIST_SUBAGENT
+            );
+            if parent.is_none() {
+                return Err(ModelResolutionError::RouteUnavailable {
+                    model: spec.clone(),
+                    profile: model_profile.map(str::to_owned),
+                    reason: "model is not permitted and no parent model is available".into(),
+                });
+            }
+            inherit()
+        };
+        // Bare aliases remain relative to the selected parent profile. Preserve
+        // same-tier inheritance and the managed plan-mode fallback policy.
+        if model_profile.is_none()
+            && is_relative_model_alias(spec)
+            && !crate::model_resolution::is_registered_concrete_model(spec, context)
+            && crate::model_resolution::has_relative_model_preference(spec, context)
+        {
+            if let Some(parent) = parent {
+                let model =
+                    self.resolve_model_pref(&selected_preference, &parent.model, context)?;
+                return resolve_user_model_selection(
+                    &model,
+                    parent.model_profile.as_deref(),
+                    context,
+                    &route_provider,
+                )
+                .map(Some);
+            }
+        }
+        let mut selected =
+            match resolve_user_model_selection(spec, model_profile, context, &route_provider) {
+                Ok(selected) => selected,
+                Err(_) if !is_relative_model_alias(spec) && bars(spec) => return fallback(),
+                Err(error) => return Err(error),
+            };
+        if bars(&selected.model) {
+            return fallback();
+        }
+        // Region inheritance belongs to the same Bedrock route. An explicit
+        // cross-provider selection and the environment override select their
+        // own route without carrying the parent's region prefix.
+        if override_model.is_none() {
+            if let Some(parent) =
+                parent.filter(|parent| parent.model_profile == selected.model_profile)
+            {
+                let model = self.resolve_model_pref(
+                    &AgentModel::Explicit(selected.model.clone()),
+                    &parent.model,
+                    &selected.model_resolution_context,
+                )?;
+                selected = resolve_user_model_selection(
+                    &model,
+                    selected.model_profile.as_deref(),
+                    &selected.model_resolution_context,
+                    &route_provider,
+                )?;
+            }
+        }
+        Ok(Some(selected))
     }
 }

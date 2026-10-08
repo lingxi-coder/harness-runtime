@@ -22,7 +22,9 @@
 //! [`Effect`] enum grows without needing a churn-per-variant update.
 
 use lingxi_core::host::EffectHandler;
-use lingxi_core::types::{Effect, RedactableContent, RequestId, SessionId, ToolUseId};
+use lingxi_core::types::{
+    utf16_json::Utf16JsonProjection, Effect, RedactableContent, RequestId, SessionId, ToolUseId,
+};
 
 /// Run the standard [`EffectHandler`] contract against an impl.
 ///
@@ -70,7 +72,9 @@ async fn test_send_api_request_handled<H: EffectHandler>(h: &H) {
     let _ = h
         .handle(Effect::SendApiRequest {
             request_id: RequestId::nil(),
-            request_body: serde_json::json!({ "model": "contract-test" }),
+            request_body: Utf16JsonProjection::plain(
+                serde_json::json!({ "model": "contract-test" }),
+            ),
         })
         .await;
 }

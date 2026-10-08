@@ -390,10 +390,15 @@ impl Capabilities {
 /// Serde round-trips the field; absent → empty vec (existing configs unaffected).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PricingConfig {
-    /// Whether this provider charges per token, via subscription, or is
-    /// explicitly free. Unknown is distinct from free.
-    #[serde(default, rename = "billingMode")]
-    pub billing_mode: lingxi_core::host::ModelBillingMode,
+    /// Optional provider-level billing-mode override. When absent, the actual
+    /// SDK/source profile mode is inherited; without a source profile it stays
+    /// unknown. `Some(Unknown)` is an explicit user choice and must not inherit.
+    #[serde(
+        default,
+        rename = "billingMode",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub billing_mode: Option<lingxi_core::host::ModelBillingMode>,
     /// Whether missing pricing must fail instead of returning unestimated cost.
     #[serde(default)]
     pub require_priced: bool,

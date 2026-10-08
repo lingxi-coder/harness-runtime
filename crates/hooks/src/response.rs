@@ -10,6 +10,323 @@ use lingxi_core::types::HookId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// A hook string whose display text and exact JavaScript UTF-16 code units are
+/// retained together. `display` is safe Rust UTF-8 (lone surrogates display as
+/// U+FFFD); `utf16_code_units` is authoritative for JS-compatible length,
+/// slicing, and provider/transcript serialization.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExactHookText {
+    /// Valid UTF-8 view used by logs and UI.
+    pub display: String,
+    /// Exact JS string contents in UTF-16 code units.
+    pub utf16_code_units: Vec<u16>,
+}
+
+impl ExactHookText {
+    /// Construct from an ordinary Rust string.
+    #[must_use]
+    pub fn from_text(text: impl Into<String>) -> Self {
+        let display = text.into();
+        let utf16_code_units = display.encode_utf16().collect();
+        Self {
+            display,
+            utf16_code_units,
+        }
+    }
+
+    /// Construct from exact JavaScript UTF-16 units, retaining a replacement-
+    /// character display for isolated surrogates.
+    #[must_use]
+    pub fn from_utf16(utf16_code_units: Vec<u16>) -> Self {
+        let display = String::from_utf16_lossy(&utf16_code_units);
+        Self {
+            display,
+            utf16_code_units,
+        }
+    }
+
+    /// Read a string leaf from a JSON projection, including escaped isolated
+    /// surrogates in the source JSON.
+    #[must_use]
+    pub fn from_json_projection(
+        projection: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        pointer: &str,
+    ) -> Option<Self> {
+        let display = exact_json_string_at(&projection.value, pointer)?.to_owned();
+        let utf16_code_units = projection.string_units(pointer)?;
+        Some(Self {
+            display,
+            utf16_code_units,
+        })
+    }
+
+    /// JavaScript `String.length` for this value.
+    #[must_use]
+    pub fn len_utf16(&self) -> usize {
+        self.utf16_code_units.len()
+    }
+
+    /// Whether this JS string is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.utf16_code_units.is_empty()
+    }
+
+    /// ECMAScript `String.prototype.trim()` over the JS whitespace and line
+    /// terminator set, including BOM/U+FEFF (Rust `str::trim` differs there).
+    #[must_use]
+    pub fn trim_js(&self) -> Self {
+        let start = self
+            .utf16_code_units
+            .iter()
+            .position(|unit| !is_ecmascript_trim_unit(*unit))
+            .unwrap_or(self.utf16_code_units.len());
+        let end = self
+            .utf16_code_units
+            .iter()
+            .rposition(|unit| !is_ecmascript_trim_unit(*unit))
+            .map_or(start, |index| index + 1);
+        Self::from_utf16(self.utf16_code_units[start..end].to_vec())
+    }
+
+    /// Join exact strings with a plain separator.
+    #[must_use]
+    pub fn join(values: &[Self], separator: &str) -> Self {
+        let mut result = Self::default();
+        for (index, value) in values.iter().enumerate() {
+            if index > 0 {
+                result.push_text(separator);
+            }
+            result.push(value);
+        }
+        result
+    }
+
+    /// Build a plain prefix + exact body + plain suffix string.
+    #[must_use]
+    pub fn wrapped(prefix: &str, body: &Self, suffix: &str) -> Self {
+        let mut result = Self::from_text(prefix);
+        result.push(body);
+        result.push_text(suffix);
+        result
+    }
+
+    /// Append another exact string without normalizing its code units.
+    pub fn push(&mut self, other: &Self) {
+        self.display.push_str(&other.display);
+        self.utf16_code_units
+            .extend_from_slice(&other.utf16_code_units);
+    }
+
+    /// Append ordinary text.
+    pub fn push_text(&mut self, text: &str) {
+        self.display.push_str(text);
+        self.utf16_code_units.extend(text.encode_utf16());
+    }
+
+    /// Native `re(value, cap)`: slice by JS code units and remove a trailing
+    /// high surrogate so the result is well-formed at a truncation boundary.
+    #[must_use]
+    pub fn truncate_well_formed(&self, cap: usize) -> Self {
+        if self.len_utf16() <= cap {
+            return self.clone();
+        }
+        let mut end = cap;
+        if end > 0
+            && self
+                .utf16_code_units
+                .get(end - 1)
+                .is_some_and(|unit| (0xD800..=0xDBFF).contains(unit))
+        {
+            end -= 1;
+        }
+        Self::from_utf16(self.utf16_code_units[..end].to_vec())
+    }
+
+    /// Native `ZJe(value, cap)`: use a JS-unit prefix, preferring the last
+    /// newline only when it lies past the midpoint. The returned prefix may
+    /// end in a high surrogate because native `slice` preserves that case.
+    #[must_use]
+    pub fn preview(&self, cap: usize) -> (Self, bool) {
+        if self.len_utf16() <= cap {
+            return (self.clone(), false);
+        }
+        let limit = cap.min(self.len_utf16());
+        let newline = self.utf16_code_units[..limit]
+            .iter()
+            .rposition(|unit| *unit == 0x000A);
+        let end = newline
+            .filter(|index| *index > cap / 2)
+            .unwrap_or(limit);
+        (
+            Self::from_utf16(self.utf16_code_units[..end].to_vec()),
+            true,
+        )
+    }
+
+    /// Match `TextEncoder.encodeInto`'s scalar-safe UTF-8 byte cap. Lone
+    /// surrogates are encoded as U+FFFD (three bytes), as in the browser API.
+    #[must_use]
+    pub fn truncate_utf8_bytes(&self, cap: usize) -> Self {
+        let units = &self.utf16_code_units;
+        let mut index = 0;
+        let mut written: usize = 0;
+        while index < units.len() {
+            let first = units[index];
+            let (unit_count, byte_count) = if (0xD800..=0xDBFF).contains(&first)
+                && units
+                    .get(index + 1)
+                    .is_some_and(|second| (0xDC00..=0xDFFF).contains(second))
+            {
+                (2, 4)
+            } else if (0xD800..=0xDFFF).contains(&first) {
+                (1, 3)
+            } else if first <= 0x7F {
+                (1, 1)
+            } else if first <= 0x7FF {
+                (1, 2)
+            } else {
+                (1, 3)
+            };
+            if written.saturating_add(byte_count) > cap {
+                break;
+            }
+            written += byte_count;
+            index += unit_count;
+        }
+        if index == units.len() {
+            self.clone()
+        } else {
+            Self::from_utf16(units[..index].to_vec())
+        }
+    }
+
+    /// Number of bytes `TextEncoder` writes for this JS string.
+    #[must_use]
+    pub fn encoded_utf8_len(&self) -> usize {
+        self.truncate_utf8_bytes(usize::MAX).display.len()
+    }
+
+    /// Convert to a typed root-string JSON projection without losing isolated
+    /// surrogate units.
+    #[must_use]
+    pub fn json_projection(&self) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        let mut projection = lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+            Value::String(self.display.clone()),
+        );
+        if self.utf16_code_units != self.display.encode_utf16().collect::<Vec<_>>() {
+            projection
+                .strings
+                .push(lingxi_core::types::utf16_json::Utf16JsonString {
+                    pointer: String::new(),
+                    code_units: self.utf16_code_units.clone(),
+                });
+        }
+        projection
+    }
+
+    /// Construct a conversation user message while retaining isolated
+    /// JavaScript UTF-16 code units for provider serialization.
+    #[must_use]
+    pub fn to_conversation_message(
+        &self,
+        id: lingxi_core::types::MessageId,
+        is_meta: bool,
+    ) -> lingxi_core::types::ConversationMessage {
+        let display_units: Vec<_> = self.display.encode_utf16().collect();
+        if display_units == self.utf16_code_units {
+            return if is_meta {
+                lingxi_core::types::ConversationMessage::user_meta(id, self.display.clone())
+            } else {
+                lingxi_core::types::ConversationMessage::user(id, self.display.clone())
+            };
+        }
+        lingxi_core::types::ConversationMessage::User {
+            id,
+            content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
+                text: self.display.clone(),
+                utf16_code_units: self.utf16_code_units.clone(),
+                citations: None,
+            }],
+            is_meta,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        }
+    }
+}
+
+fn exact_json_string_at<'a>(value: &'a Value, pointer: &str) -> Option<&'a str> {
+    if pointer.is_empty() {
+        return value.as_str();
+    }
+    let mut current = value;
+    for segment in pointer.strip_prefix('/')?.split('/') {
+        let segment = segment.replace("~1", "/").replace("~0", "~");
+        current = match current {
+            Value::Object(object) => object.get(&segment)?,
+            Value::Array(array) => array.get(segment.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+    current.as_str()
+}
+
+fn is_ecmascript_trim_unit(unit: u16) -> bool {
+    matches!(
+        unit,
+        0x0009
+            | 0x000A
+            | 0x000B
+            | 0x000C
+            | 0x000D
+            | 0x0020
+            | 0x00A0
+            | 0x1680
+            | 0x2000..=0x200A
+            | 0x2028
+            | 0x2029
+            | 0x202F
+            | 0x205F
+            | 0x3000
+            | 0xFEFF
+    )
+}
+
+impl serde::Serialize for ExactHookText {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if self.utf16_code_units != self.display.encode_utf16().collect::<Vec<_>>() {
+            return Err(serde::ser::Error::custom(
+                "exact hook text with isolated UTF-16 units requires Utf16JsonProjection",
+            ));
+        }
+        serializer.serialize_str(&self.display)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ExactHookText {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(Self::from_text)
+    }
+}
+
+impl From<String> for ExactHookText {
+    fn from(value: String) -> Self {
+        Self::from_text(value)
+    }
+}
+
+impl From<&str> for ExactHookText {
+    fn from(value: &str) -> Self {
+        Self::from_text(value)
+    }
+}
+
 /// SH-01 — `Pfr = 2000` (oracle 2.1.238 @ 292378095): the per-hook cap, in
 /// UTF-16 code units, applied to `hookSpecificOutput.classifierContext`.
 ///
@@ -165,13 +482,13 @@ pub struct HookResponse {
     /// attachment whose `normalizeAttachmentForAPI` returns `[]`
     /// (`utils/messages.ts:4258`). Kept DISTINCT from [`Self::additional_context`]
     /// (which IS model-facing); the two must never be merged.
-    pub system_message: Option<String>,
+    pub system_message: Option<ExactHookText>,
     /// `hookSpecificOutput.additionalContext` the hook returned (claude-code
     /// `result.additionalContext`). This IS model-facing: claude-code yields it
     /// as a `hook_additional_context` attachment whose `normalizeAttachmentForAPI`
     /// returns a `<system-reminder>` user message that reaches the model
     /// (`utils/messages.ts:4117`). DISTINCT from [`Self::system_message`].
-    pub additional_context: Option<String>,
+    pub additional_context: Option<ExactHookText>,
     /// Additional content blocks (images, files, etc.) to attach.
     pub attachments: Vec<Value>,
     /// If `true` the engine should suppress the default user-visible output
@@ -311,7 +628,7 @@ pub struct HookResponse {
     /// user prompt). Scoped to `SessionStart`. Additive default `None`; the
     /// orchestrator injects it as a (non-meta) user message at session start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub initial_user_message: Option<String>,
+    pub initial_user_message: Option<ExactHookText>,
     /// `hookSpecificOutput.reloadSkills` returned by a `SessionStart` hook
     /// (claude-code schema: `reloadSkills:S.boolean().describe("Re-scan skill and
     /// command directories")`; consumed as `if(p.reloadSkills)u=!0`). Scoped to
@@ -408,7 +725,8 @@ pub enum HookDecision {
     /// from `Approve`/`Allow` (which SKIP the prompt) and `Block` (which
     /// denies outright). The turn-loop consumer must route this through the
     /// normal ask path (`PermissionGate::check`, which delegates to the prompt
-    /// transport) rather than `check_after_hook_allow`. Unconditionally
+    /// transport) rather than a hook-allow resolution path (`honour_hook_allow`
+    /// or `check_after_hook_allow_rewritten`). Unconditionally
     /// reassigned by the `hookSpecificOutput.permissionDecision` switch, like
     /// every other case (matching `azn`'s second switch).
     Ask,
@@ -504,13 +822,13 @@ pub struct AggregateHookResult {
     /// **user/transcript-facing only** and must NOT reach the model (claude-code
     /// `hook_system_message` → `normalizeAttachmentForAPI` returns `[]`,
     /// `utils/messages.ts:4258`). Kept DISTINCT from [`Self::additional_contexts`].
-    pub system_messages: Vec<String>,
+    pub system_messages: Vec<ExactHookText>,
     /// All `additionalContext`s emitted by hooks, in execution order. These ARE
     /// model-facing: claude-code surfaces them via `hook_additional_context` as a
     /// `<system-reminder>` user message (`utils/messages.ts:4117`). The turn loop
     /// builds the PreToolUse model-facing context message from THIS field only —
     /// never from [`Self::system_messages`].
-    pub additional_contexts: Vec<String>,
+    pub additional_contexts: Vec<ExactHookText>,
     /// `true` when ANY folded hook requested *preventContinuation*
     /// (`continue: false`). For lifecycle (`Stop`) hooks this signals the
     /// turn loop to TERMINATE the agent rather than continue working — it
@@ -624,7 +942,7 @@ pub struct AggregateHookResult {
     /// $os=p.initialUserMessage`). `Some` seeds a pending initial user prompt that
     /// the orchestrator injects as a (non-meta) user message at session start.
     /// Additive default `None` → byte-identical when no hook sets it.
-    pub initial_user_message: Option<String>,
+    pub initial_user_message: Option<ExactHookText>,
     /// One transcript `attachment` payload per synchronously completed hook
     /// run, in execution order (claude-code persists exactly one for every hook
     /// that runs — 26 048 records mined from real 2.1.220 transcripts). Built by
@@ -637,11 +955,80 @@ pub struct AggregateHookResult {
     /// engine's transcript writer). Truly asynchronous completions are written
     /// through that sink after this aggregate has returned and therefore do not
     /// appear in this vector. Additive default empty.
-    pub hook_attachments: Vec<Value>,
+    pub hook_attachments: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// `true` when ANY folded `SessionStart` hook returned `reloadSkills: true`
     /// (claude-code `if(p.reloadSkills)u=!0`, OR-folded). Signals the skill/command
     /// directories should be re-scanned. NOTE: the port has no hot-reload seam yet,
     /// so this is captured (no longer dropped at parse) but its re-scan action is a
     /// documented follow-up. Additive default `false`.
     pub reload_skills: bool,
+}
+
+#[cfg(test)]
+mod exact_hook_text_tests {
+    use super::ExactHookText;
+
+    #[test]
+    fn exact_surrogate_text_cannot_be_silently_serialized_as_display() {
+        let exact = ExactHookText::from_utf16(vec![u16::from(b'x'), 0xD800]);
+        assert!(serde_json::to_string(&exact).is_err());
+
+        let exact_json = exact.json_projection().to_json_string().unwrap();
+        assert_eq!(exact_json, r#""x\ud800""#);
+    }
+
+    #[test]
+    fn native_preview_can_end_in_a_high_surrogate_but_error_cap_cannot() {
+        let mut units = vec![u16::from(b'a'); 1_999];
+        units.extend([0xD83D, 0xDE00, u16::from(b'!')]);
+        let source = ExactHookText::from_utf16(units);
+        let (preview, has_more) = source.preview(2_000);
+        assert!(has_more);
+        assert_eq!(preview.len_utf16(), 2_000);
+        assert_eq!(preview.utf16_code_units.last(), Some(&0xD83D));
+        assert_eq!(preview.display.chars().last(), Some('�'));
+        assert!(preview
+            .json_projection()
+            .to_json_string()
+            .unwrap()
+            .contains(r#"\ud83d"#));
+
+        let capped = source.truncate_well_formed(2_000);
+        assert_eq!(capped.len_utf16(), 1_999);
+        assert_eq!(capped.utf16_code_units.last(), Some(&u16::from(b'a')));
+    }
+
+    #[test]
+    fn zero_length_well_formed_cap_is_safe_at_a_surrogate_boundary() {
+        let source = ExactHookText::from_utf16(vec![0xD800]);
+        assert!(source.truncate_well_formed(0).is_empty());
+    }
+
+    #[test]
+    fn preview_prefers_only_a_newline_past_the_midpoint() {
+        let mut units = vec![u16::from(b'a'); 1_500];
+        units.push(0x000A);
+        units.extend(vec![u16::from(b'b'); 700]);
+        let source = ExactHookText::from_utf16(units);
+        let (preview, has_more) = source.preview(2_000);
+        assert!(has_more);
+        assert_eq!(preview.len_utf16(), 1_500);
+        assert_eq!(preview.utf16_code_units.last(), Some(&u16::from(b'a')));
+    }
+
+    #[test]
+    fn text_encoder_byte_cap_does_not_split_a_scalar() {
+        let emoji = ExactHookText::from_text("😀x");
+        assert!(emoji.truncate_utf8_bytes(3).utf16_code_units.is_empty());
+        assert_eq!(emoji.truncate_utf8_bytes(4).display, "😀");
+        let lone = ExactHookText::from_utf16(vec![0xD800, u16::from(b'x')]);
+        assert!(lone.truncate_utf8_bytes(2).utf16_code_units.is_empty());
+        assert_eq!(lone.truncate_utf8_bytes(3).display, "�");
+    }
+
+    #[test]
+    fn trim_matches_ecmascript_bom_and_excludes_non_whitespace() {
+        let text = ExactHookText::from_text("\u{FEFF}\u{00A0}x\u{FEFF}\u{200B}");
+        assert_eq!(text.trim_js().display, "x\u{FEFF}\u{200B}");
+    }
 }

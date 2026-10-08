@@ -15,9 +15,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use lingxi_core::host::subagent_spawn::{
-    SubagentInheritance, SubagentResult, SubagentSpawnRequest, SubagentSpawner,
-};
+#[cfg(test)]
+use lingxi_core::host::subagent_spawn::SubagentInheritance;
+use lingxi_core::host::subagent_spawn::{SubagentResult, SubagentSpawnRequest, SubagentSpawner};
 
 use crate::definition::HookDefinition;
 use crate::hook_payload::parse_response;
@@ -52,7 +52,7 @@ impl AgentExecutor {
 
     /// Execute one Agent hook.
     ///
-    /// `inherit` carries the parent's tool invoker + budget enforcer Arcs;
+    /// `ctx.inherit` carries the parent's tool invoker + budget enforcer Arcs;
     /// it MUST be the same Arc the parent orchestrator holds (the
     /// recursion-lock invariant — `Arc::ptr_eq` assertion in
     /// `lingxi-tools/tests/agent_tool_recursion_lock_test.rs` must keep
@@ -69,7 +69,7 @@ impl AgentExecutor {
         prompt_template: &str,
         payload_json: &str,
         expected_event: &'static str,
-        inherit: Option<SubagentInheritance>,
+        ctx: &crate::registry::HookContext,
         model: Option<&str>,
     ) -> AgentExecutionOutcome {
         let Some(spawner) = self.spawner.clone() else {
@@ -84,7 +84,7 @@ impl AgentExecutor {
                 signal: AgentExecutionSignal::NotWired,
             };
         };
-        let Some(inherit) = inherit else {
+        let Some(inherit) = ctx.inherit.clone() else {
             return AgentExecutionOutcome {
                 result: HookResult {
                     outcome: HookOutcome::Error,
@@ -101,11 +101,18 @@ impl AgentExecutor {
         };
 
         let req = SubagentSpawnRequest {
+            stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped,
+            agent_spawn_provenance: Default::default(),
             teammate_color: None,
-            // Hook-spawned verifier is a top-level spawn (no parent agent) ⇒ depth 0.
-            depth: 0,
-            // Top-level spawn ⇒ the spawner's own default model anchors resolution.
-            parent_model_override: None,
+            depth: ctx.agent_depth.map_or(0, |depth| depth.saturating_add(1)),
+            parent_model_override: ctx
+                .model_selection
+                .as_ref()
+                .map(|route| route.model.clone()),
+            parent_model_profile_override: ctx
+                .model_selection
+                .as_ref()
+                .and_then(|route| route.model_profile.clone()),
             forked_skill_name: None,
             forked_skill_attribution: None,
             forked_skill_effort: None,
@@ -127,7 +134,7 @@ impl AgentExecutor {
             team_name: None,
             creator_teammate_name: None,
             creator_team_name: None,
-            creator_agent_id: None,
+            creator_agent_id: ctx.agent_id,
             mode: None,
             isolation: None,
             cwd: None,
@@ -135,6 +142,7 @@ impl AgentExecutor {
             // Non-fork path: the hook executor never forks a parent
             // conversation, so the fork-subagent fields stay unset.
             fork_context_messages: None,
+            instruction_context: None,
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
@@ -147,10 +155,17 @@ impl AgentExecutor {
             max_turns_override: None,
             max_output_tokens_per_turn: None,
             max_input_bytes_per_turn: None,
-            origin_session_id: None,
+            origin_session_id: (!ctx.session_id.as_uuid().is_nil()).then_some(ctx.session_id),
             query_source_label: None,
             correlation_id: None,
             model_attempt: None,
+            handback_opt_in: false,
+            parent_permission_mode: ctx.permission_mode.clone(),
+            handback_enabled: None,
+            handback_ends_turn_enabled: None,
+            restored_handback_state: None,
+            restored_handback_history: Vec::new(),
+            restore_handback_start: None,
         };
 
         let fut = spawner.spawn(req, inherit);
@@ -306,9 +321,13 @@ mod tests {
     impl SubagentSpawner for MockSpawner {
         async fn spawn(
             &self,
-            _request: SubagentSpawnRequest,
+            request: SubagentSpawnRequest,
             _inherit: SubagentInheritance,
         ) -> Result<SubagentResult, SubagentSpawnError> {
+            assert_eq!(
+                request.stop_hook_scope,
+                lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped
+            );
             self.result
                 .lock()
                 .unwrap()
@@ -321,6 +340,7 @@ mod tests {
     async fn happy_path_completed_parses_response_json() {
         let spawner = Arc::new(MockSpawner {
             result: Mutex::new(Some(Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: lingxi_core::types::AgentId::new(),
                 content: json!(r#"{"decision":"approve"}"#),
                 usage: SubagentUsage::default(),
@@ -344,7 +364,10 @@ mod tests {
                 "vet this",
                 "{}",
                 "PreToolUse",
-                Some(dummy_inherit()),
+                &crate::registry::HookContext {
+                    inherit: Some(dummy_inherit()),
+                    ..Default::default()
+                },
                 None,
             )
             .await;
@@ -367,7 +390,10 @@ mod tests {
                 "vet",
                 "{}",
                 "PreToolUse",
-                Some(dummy_inherit()),
+                &crate::registry::HookContext {
+                    inherit: Some(dummy_inherit()),
+                    ..Default::default()
+                },
                 None,
             )
             .await;
@@ -395,7 +421,10 @@ mod tests {
                 "x",
                 "{}",
                 "PreToolUse",
-                Some(dummy_inherit()),
+                &crate::registry::HookContext {
+                    inherit: Some(dummy_inherit()),
+                    ..Default::default()
+                },
                 None,
             )
             .await;

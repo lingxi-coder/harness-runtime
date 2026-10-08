@@ -1,26 +1,26 @@
 //! tool-dispatch chokepoint (`turn_loop.rs`) after the subagent-spawning `Agent`
-//! tool (legacy alias `Task`) completes.
+//! tool completes.
 //!
 //! Parity with claude-code: `executeStopHooks(…, subagentId, …)`
 //! (`utils/hooks.ts:3653-3678`) builds `hook_event_name: 'SubagentStop'` when a
 //! subagent's query loop stops, keyed on `toolUseContext.agentId` being set. The
 //! unified stop chokepoint (`runStopHooks`/`stopHooks.ts`) runs at the natural
-//! end of the loop regardless of outcome. The `LingXi` port spawns subagents only
+//! end of completed and failed child loops; cancellation does not fire it.
+//! The `LingXi` port spawns subagents only
 //! through the registered, turn_loop-dispatched `Agent` tool, so a COMPLETED
 //! dispatch of that tool means the subagent's loop has stopped — the fire lives
 //! in `dispatch_tool_uses` immediately after the tool returns (alongside
 //! `PostToolUse`/`WorktreeCreate`). Same TIMING (subagent stopped); the
-//! documented minor divergence is that it fires at spawn-completion vs. inside
-//! the child runner (which has no hook seam).
+//! child runner owns its frontmatter hooks, while this chokepoint owns the
+//! session and plugin hooks.
 //!
 //! Scenarios:
 //! 1. A successful `Agent` dispatch fires `SubagentStop` with `status:"completed"`
 //!    and the dispatched `subagent_type` carried on the hook context's
 //!    `agent_type` (so the wire payload's `agent_type` is faithful).
-//! 2. A FAILED `Agent` dispatch STILL fires `SubagentStop` (the subagent stopped)
-//!    with `status:"failed"` — claude-code's stop chokepoint runs regardless of
-//!    outcome.
-//! 3. The legacy `Task` alias fires `SubagentStop` identically.
+//! 2. A FAILED allocated child fires `SubagentStop` with `status:"failed"` and
+//!    its real identity. Admission failures have no child lifecycle.
+//! 3. The removed `Task` name does not fire `SubagentStop`.
 //! 4. A non-Agent tool never fires `SubagentStop`.
 //! 5. A `SubagentStop` hook that itself fails does NOT break the turn
 //!    (best-effort, like the `PostToolUse`/`WorktreeCreate` arms).
@@ -90,7 +90,7 @@ impl RuntimeSpawner for UnusedRuntime {
 // ---- Tools ----
 
 /// A stand-in for the real `Agent` tool: registered under a configurable name
-/// (`"Agent"` or the legacy `"Task"` alias) so the dispatch chokepoint keys on
+/// so the dispatch chokepoint keys only on the current Agent name for
 /// it. Skips the real spawner wiring — the `SubagentStop` fire is downstream of
 /// the dispatch outcome, so a fake tool that echoes/fails is sufficient to
 /// exercise it. The real tool's success result carries `subagent_type`, but the
@@ -99,6 +99,9 @@ struct FakeAgentTool {
     name: &'static str,
     fail: bool,
 }
+
+static FAKE_AGENT_CHILD_ID: once_cell::sync::Lazy<lingxi_core::types::AgentId> =
+    once_cell::sync::Lazy::new(lingxi_core::types::AgentId::new);
 #[async_trait]
 impl Tool for FakeAgentTool {
     fn name(&self) -> &str {
@@ -155,14 +158,22 @@ impl Tool for FakeAgentTool {
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         if self.fail {
-            return Err(ToolError::Internal("Agent: subagent failed".into()));
+            return Err(ToolError::SubagentFailed {
+                agent_id: *FAKE_AGENT_CHILD_ID,
+                reason: "Agent: subagent failed".into(),
+                terminal_hooks_owned: false,
+            });
         }
         let subagent_type = input
             .get("subagent_type")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
         Ok(ToolCallResult {
-            data: json!({ "subagent_type": subagent_type, "result": "done" }),
+            data: json!({
+                "subagent_type": subagent_type,
+                "result": "done",
+                "agentId": FAKE_AGENT_CHILD_ID.as_uuid().to_string(),
+            }),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
@@ -367,7 +378,7 @@ fn two_turn_api(
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "done".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ),
@@ -403,12 +414,7 @@ async fn successful_agent_fires_subagent_stop_completed() {
     assert_eq!(seen[0].status, "completed");
     // The dispatched `subagent_type` rides on the hook context's `agent_type`.
     assert_eq!(seen[0].agent_type.as_deref(), Some("general-purpose"));
-    // A real `agent:UUID` id rode on the event (the wire schema's required field).
-    assert!(
-        seen[0].agent_id.starts_with("agent:"),
-        "agent_id must be a stringified AgentId: {:?}",
-        seen[0].agent_id
-    );
+    assert_eq!(seen[0].agent_id, FAKE_AGENT_CHILD_ID.to_string());
 }
 
 #[tokio::test]
@@ -440,11 +446,12 @@ async fn failed_agent_still_fires_subagent_stop_failed() {
         "a failed Agent dispatch must STILL fire SubagentStop: {seen:?}"
     );
     assert_eq!(seen[0].status, "failed");
+    assert_eq!(seen[0].agent_id, FAKE_AGENT_CHILD_ID.to_string());
     assert_eq!(seen[0].agent_type.as_deref(), Some("code-reviewer"));
 }
 
 #[tokio::test]
-async fn legacy_task_alias_fires_subagent_stop() {
+async fn removed_task_alias_does_not_fire_subagent_stop() {
     let tool_use_id = ToolUseId::new();
     let api = two_turn_api(
         tool_use_id,
@@ -464,12 +471,10 @@ async fn legacy_task_alias_fires_subagent_stop() {
     assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
 
     let seen = log.lock().unwrap().clone();
-    assert_eq!(
-        seen.len(),
-        1,
-        "the legacy `Task` alias must fire SubagentStop: {seen:?}"
+    assert!(
+        seen.is_empty(),
+        "removed Task name must not fire SubagentStop: {seen:?}"
     );
-    assert_eq!(seen[0].status, "completed");
 }
 
 #[tokio::test]

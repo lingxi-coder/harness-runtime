@@ -378,7 +378,7 @@ mod tests {
     /// The whole justification for moving these off `mcp__local_apps__*` was
     /// that a builtin can be content-matched, so a user can grant one app
     /// without granting every app on the device. `tool_content_key` only knew
-    /// WebFetch/Agent/Task, so `LocalAppBuild(app-a)` silently matched nothing
+    /// WebFetch/Agent, so `LocalAppBuild(app-a)` silently matched nothing
     /// and the only working grant was the tool-wide one — exactly the
     /// limitation the move was supposed to remove.
     #[tokio::test]
@@ -571,6 +571,23 @@ mod tests {
             PermissionDecision::Allow => panic!("expected Deny, got Allow"),
         }
         assert_eq!(inner.calls(), 0, "deny rule must not prompt");
+    }
+
+    #[tokio::test]
+    async fn bash_pyright_is_not_readonly_auto_allowed() {
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "must ask for non-read-only Bash".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        assert_eq!(
+            gate.check("Bash", &json!({"command":"pyright --version"})).await,
+            PermissionDecision::Deny {
+                reason: "must ask for non-read-only Bash".into(),
+            },
+            "pyright no longer belongs to Native's read-only Bash allowlist"
+        );
+        assert_eq!(inner.calls(), 1, "non-read-only Bash must reach prompt transport");
     }
 
     #[tokio::test]
@@ -796,73 +813,66 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn check_after_hook_allow_enforces_deny_rules_but_skips_prompt() {
-        // (Hooks unit 3, issue 1) A PreToolUse/PermissionRequest hook 'allow'
-        // skips the PROMPT but must NOT override rule-based deny/ask
-        // (claude-code `resolveHookPermissionDecision` +
-        // `checkRuleBasedPermissions`).
+    async fn captured_pretool_resolution(
+        gate: &PolicyPermissionGate,
+        name: &str,
+        input: &serde_json::Value,
+        ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
+    ) -> PermissionResolution {
+        gate.resolve_after_hook_allow_mod_core(name, input, ctx)
+            .await
+            .expect("captured preflight")
+            .resolution
+    }
 
-        // A deny RULE must still deny even after a hook approved the call.
-        let policy = policy_with(
+    #[tokio::test]
+    async fn pretool_allow_core_captures_deny_clean_and_allow_rules() {
+        let input = json!({});
+        let ctx = lingxi_core::host::permission_gate::PermissionCheckContext::default();
+
+        let deny = policy_with(
             r#"{ "permissions": { "deny": ["Bash"] } }"#,
             PermissionMode::Default,
         );
-        let gate =
-            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
-        assert!(
-            matches!(
-                gate.check_after_hook_allow("Bash", &serde_json::json!({}))
-                    .await,
-                PermissionDecision::Deny { .. }
-            ),
-            "a deny rule must override a hook 'allow'"
-        );
+        let deny_inner = RecordingInner::new(PermissionDecision::Allow);
+        let deny_gate = PolicyPermissionGate::new(deny, deny_inner.clone());
+        assert!(matches!(
+            captured_pretool_resolution(&deny_gate, "Bash", &input, &ctx).await,
+            PermissionResolution::Deny { .. }
+        ));
+        assert_eq!(deny_inner.calls(), 0, "preflight does not open a prompt");
 
-        // A mutating tool with NO rule would normally Ask→prompt; under a hook
-        // 'allow' the prompt is SKIPPED → Allow, and the inner transport is
-        // NEVER consulted.
-        let inner = RecordingInner::new(PermissionDecision::Deny {
-            reason: "must not prompt under hook-allow".into(),
+        let clean = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let clean_inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "must not prompt".into(),
         });
-        let policy2 = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
-        let gate2 = PolicyPermissionGate::new(policy2, inner.clone());
-        assert_eq!(
-            gate2
-                .check_after_hook_allow("Bash", &serde_json::json!({}))
-                .await,
-            PermissionDecision::Allow,
-            "hook 'allow' skips the prompt for an un-ruled mutating tool"
-        );
-        assert_eq!(
-            inner.calls(),
-            0,
-            "hook 'allow' must NOT delegate to the prompt"
-        );
+        let clean_gate = PolicyPermissionGate::new(clean, clean_inner.clone());
+        assert!(matches!(
+            captured_pretool_resolution(&clean_gate, "Bash", &input, &ctx).await,
+            PermissionResolution::Allow { .. }
+        ));
+        assert_eq!(clean_inner.calls(), 0, "a clean hook allow skips the prompt");
 
-        // An explicit allow rule → Allow.
-        let policy3 = policy_with(
+        let allowed = policy_with(
             r#"{ "permissions": { "allow": ["Bash"] } }"#,
             PermissionMode::Default,
         );
-        let gate3 =
-            PolicyPermissionGate::new(policy3, RecordingInner::new(PermissionDecision::Allow));
-        assert_eq!(
-            gate3
-                .check_after_hook_allow("Bash", &serde_json::json!({}))
-                .await,
-            PermissionDecision::Allow
+        let allowed_gate = PolicyPermissionGate::new(
+            allowed,
+            RecordingInner::new(PermissionDecision::Deny {
+                reason: "must not prompt".into(),
+            }),
         );
+        assert!(matches!(
+            captured_pretool_resolution(&allowed_gate, "Bash", &input, &ctx).await,
+            PermissionResolution::Allow { .. }
+        ));
     }
 
-    /// Default-impl gates (no rule layer) keep the prior wholesale-bypass: a hook
-    /// 'allow' → Allow.
-    /// HOOKALLOW-01 / cc 2.1.218 `lin` — a PreToolUse hook `allow` is re-checked
-    /// against the rules UNCONDITIONALLY, and an ASK RULE sends the call to the
-    /// full permission pipeline (a PROMPT), NOT a silent allow. This is the
-    /// laundering hole: previously any hook allow mapped Ask→Allow.
     #[tokio::test]
-    async fn hook_allow_is_overridden_by_an_ask_rule_and_prompts() {
+    async fn pretool_allow_ask_core_uses_the_full_permission_transport() {
+        let input = json!({});
+        let ctx = lingxi_core::host::permission_gate::PermissionCheckContext::default();
         let inner = RecordingInner::new(PermissionDecision::Deny {
             reason: "prompt said no".into(),
         });
@@ -872,53 +882,54 @@ mod tests {
         );
         let gate = PolicyPermissionGate::new(policy, inner.clone());
 
-        // NO `updatedInput` needed — `lin` re-checks unconditionally.
-        let decision = gate
-            .check_after_hook_allow("Bash", &serde_json::json!({}))
-            .await;
-        assert!(
-            matches!(decision, PermissionDecision::Deny { .. }),
-            "an ask RULE must reach the prompt (here the inner denies), not be auto-allowed"
-        );
-        assert_eq!(
-            inner.calls(),
-            1,
-            "the ask rule must DELEGATE to the full pipeline"
-        );
+        assert!(matches!(
+            captured_pretool_resolution(&gate, "Bash", &input, &ctx).await,
+            PermissionResolution::Ask
+        ));
+        assert_eq!(inner.calls(), 0, "capturing Ask does not prompt early");
+        assert!(matches!(
+            gate.ask_via_transport("Bash", &input, &ctx).await,
+            PermissionOutcome::Deny { .. }
+        ));
+        assert_eq!(inner.calls(), 1, "the full pipeline reaches the transport once");
     }
 
-    /// The mode BACKSTOP is not a rule verdict: `_pt` has no mode layer, so an
-    /// ordinary Default-mode mutating call yields NO verdict and the hook's allow
-    /// stands. Guards against the over-block that a naive `authorize` re-check
-    /// would cause (it would deny nearly every hook-rescued call).
     #[tokio::test]
-    async fn hook_allow_is_not_blocked_by_the_mode_backstop() {
+    async fn pretool_allow_core_ignores_mode_and_other_guard_asks() {
+        let ctx = lingxi_core::host::permission_gate::PermissionCheckContext::default();
+
+        let dont_ask = policy_with(r#"{ "permissions": {} }"#, PermissionMode::DontAsk);
+        let dont_ask_inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "must not prompt".into(),
+        });
+        let dont_ask_gate = PolicyPermissionGate::new(dont_ask, dont_ask_inner.clone());
+        assert!(matches!(
+            captured_pretool_resolution(&dont_ask_gate, "Bash", &json!({"command":"npm install"}), &ctx).await,
+            PermissionResolution::Allow { .. }
+        ));
+        assert_eq!(dont_ask_inner.calls(), 0);
+
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
         let inner = RecordingInner::new(PermissionDecision::Deny {
             reason: "must not prompt".into(),
         });
-        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
         let gate = PolicyPermissionGate::new(policy, inner.clone());
-
-        assert_eq!(
-            gate.check_after_hook_allow("Bash", &serde_json::json!({}))
+        let ifs_command = ["cat$", "{IFS}/etc/passwd"].concat();
+        for command in [ifs_command.as_str(), "echo x > /etc/foo"] {
+            assert!(matches!(
+                captured_pretool_resolution(
+                    &gate,
+                    "Bash",
+                    &json!({"command": command}),
+                    &ctx,
+                )
                 .await,
-            PermissionDecision::Allow,
-            "a mode-sourced ask is NOT a rule verdict — the hook allow stands"
-        );
-        assert_eq!(inner.calls(), 0, "and it must not prompt");
-
-        // Same for the rewritten (PermissionRequest) variant.
-        assert_eq!(
-            gate.check_after_hook_allow_rewritten("Bash", &serde_json::json!({}))
-                .await,
-            PermissionDecision::Allow,
-            "a rewritten hook allow is likewise not blocked by the mode backstop"
-        );
-        assert_eq!(inner.calls(), 0);
+                PermissionResolution::Allow { .. }
+            ));
+        }
+        assert_eq!(inner.calls(), 0, "Other-tagged guards do not create a rule verdict");
     }
 
-    /// cc 2.1.218 `Fxy`/`epr` — on the headless PermissionRequest surface an ask
-    /// rule becomes a HARD DENY (no prompt available), carrying the ASK's message.
     #[tokio::test]
     async fn rewritten_hook_allow_turns_an_ask_rule_into_a_hard_deny() {
         let inner = RecordingInner::new(PermissionDecision::Allow);
@@ -944,14 +955,6 @@ mod tests {
         );
     }
 
-    /// cc 2.1.218 `Fxy` STANDING allow (HOOKALLOW-01, gap218 #11) — no
-    /// `updatedInput` and the tool does not `requiresUserInteraction`, so the
-    /// oracle's re-check gate `if(a.updatedInput||e.requiresUserInteraction?.())`
-    /// is FALSE and the allow returns unchecked. An ask rule — the reason the
-    /// gate resolved `Ask` and fired the PermissionRequest hook — must NOT be
-    /// re-evaluated here, or the rescue is defeated in its primary use case.
-    /// Contrast [`rewritten_hook_allow_turns_an_ask_rule_into_a_hard_deny`] above,
-    /// which turns the SAME ask rule into a hard deny.
     #[tokio::test]
     async fn honour_hook_allow_lets_an_ask_rule_stand_without_a_re_check() {
         let inner = RecordingInner::new(PermissionDecision::Deny {
@@ -968,15 +971,8 @@ mod tests {
             PermissionDecision::Allow,
             "the standing PermissionRequest-hook allow stands over an ask rule"
         );
-        assert_eq!(
-            inner.calls(),
-            0,
-            "the standing allow must NOT delegate to the prompt transport"
-        );
+        assert_eq!(inner.calls(), 0);
 
-        // The REWRITTEN twin, on the SAME ask rule, is a hard deny — the two arms
-        // deliberately diverge (Fxy's `updatedInput || requiresUserInteraction`
-        // re-check gate).
         assert!(matches!(
             gate.check_after_hook_allow_rewritten("Bash", &serde_json::json!({}))
                 .await,
@@ -984,9 +980,8 @@ mod tests {
         ));
     }
 
-    /// Neither resolver may over-block a call the rules genuinely permit.
     #[tokio::test]
-    async fn hook_allow_paths_keep_an_explicit_allow_rule() {
+    async fn pretool_and_rewritten_paths_keep_an_explicit_allow_rule() {
         let policy = policy_with(
             r#"{ "permissions": { "allow": ["Bash"] } }"#,
             PermissionMode::Default,
@@ -997,11 +992,16 @@ mod tests {
                 reason: "must not prompt".into(),
             }),
         );
-        assert_eq!(
-            gate.check_after_hook_allow("Bash", &serde_json::json!({}))
-                .await,
-            PermissionDecision::Allow
-        );
+        assert!(matches!(
+            captured_pretool_resolution(
+                &gate,
+                "Bash",
+                &serde_json::json!({}),
+                &lingxi_core::host::permission_gate::PermissionCheckContext::default(),
+            )
+            .await,
+            PermissionResolution::Allow { .. }
+        ));
         assert_eq!(
             gate.check_after_hook_allow_rewritten("Bash", &serde_json::json!({}))
                 .await,
@@ -1009,9 +1009,8 @@ mod tests {
         );
     }
 
-    /// A DENY rule overrides a hook allow on BOTH surfaces.
     #[tokio::test]
-    async fn deny_rule_overrides_hook_allow_on_both_surfaces() {
+    async fn deny_rule_overrides_pretool_and_rewritten_hook_allow() {
         let policy = policy_with(
             r#"{ "permissions": { "deny": ["Bash"] } }"#,
             PermissionMode::Default,
@@ -1019,9 +1018,14 @@ mod tests {
         let gate =
             PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
         assert!(matches!(
-            gate.check_after_hook_allow("Bash", &serde_json::json!({}))
-                .await,
-            PermissionDecision::Deny { .. }
+            captured_pretool_resolution(
+                &gate,
+                "Bash",
+                &serde_json::json!({}),
+                &lingxi_core::host::permission_gate::PermissionCheckContext::default(),
+            )
+            .await,
+            PermissionResolution::Deny { .. }
         ));
         assert!(matches!(
             gate.check_after_hook_allow_rewritten("Bash", &serde_json::json!({}))
@@ -1030,79 +1034,18 @@ mod tests {
         ));
     }
 
-    /// REGRESSION (adversarial round 2, over-block #1): under `DontAsk` the port
-    /// rewrites a surviving ask into a MODE-tagged deny. That is a mode-tail
-    /// artefact, not a rule verdict — `_pt` never sees `dontAsk` (it lives in the
-    /// outer `$xy` wrapper), so a hook allow must still stand.
     #[tokio::test]
-    async fn dont_ask_mode_does_not_hard_deny_a_hook_allow() {
-        let inner = RecordingInner::new(PermissionDecision::Deny {
-            reason: "must not prompt".into(),
-        });
-        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::DontAsk);
-        let gate = PolicyPermissionGate::new(policy, inner.clone());
-
-        assert_eq!(
-            gate.check_after_hook_allow("Bash", &serde_json::json!({"command": "npm install"}))
-                .await,
-            PermissionDecision::Allow,
-            "DontAsk's ask→deny transform must not masquerade as a rule verdict"
-        );
-        assert_eq!(
-            gate.check_after_hook_allow_rewritten(
-                "Bash",
-                &serde_json::json!({"command": "npm install"})
-            )
-            .await,
-            PermissionDecision::Allow
-        );
-        assert_eq!(inner.calls(), 0);
-    }
-
-    /// REGRESSION (adversarial round 2, over-block #2): `_pt` reports an ask only
-    /// for an ask RULE / safetyCheck / sandboxOverride. Guard asks tagged `Other`
-    /// (path constraints, `$IFS` bash-safety, sed, PowerShell containment) are
-    /// `type:"other"` in the oracle too and `_pt` SKIPS them — so they must not
-    /// block a hook allow. Treating every non-mode ask as a verdict regressed
-    /// this (an allow-all CI hook would suddenly prompt / hard-deny).
-    #[tokio::test]
-    async fn other_tagged_guard_asks_do_not_block_a_hook_allow() {
-        let inner = RecordingInner::new(PermissionDecision::Deny {
-            reason: "must not prompt".into(),
-        });
-        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
-        let gate = PolicyPermissionGate::new(policy, inner.clone());
-
-        // `$IFS` trips the bash-safety guard ask (`Other`-tagged) on the NORMAL
-        // path; under a hook allow it must be ignored.
-        for cmd in ["cat${IFS}/etc/passwd", "echo x > /etc/foo"] {
-            let input = serde_json::json!({ "command": cmd });
-            assert_eq!(
-                gate.check_after_hook_allow("Bash", &input).await,
-                PermissionDecision::Allow,
-                "`{cmd}` is an Other-tagged guard ask — _pt skips it"
-            );
-            assert_eq!(
-                gate.check_after_hook_allow_rewritten("Bash", &input).await,
-                PermissionDecision::Allow,
-                "`{cmd}` must not hard-deny the headless rescue either"
-            );
-        }
-        assert_eq!(inner.calls(), 0, "no guard ask may reach the prompt here");
-    }
-
-    #[tokio::test]
-    async fn default_check_after_hook_allow_is_wholesale_allow() {
+    async fn default_rewritten_hook_resolver_is_clean_allow() {
         let gate = RecordingInner::new(PermissionDecision::Deny {
-            reason: "default must not be consulted".into(),
+            reason: "default must not consult check".into(),
         });
         assert_eq!(
-            gate.check_after_hook_allow("Bash", &serde_json::json!({}))
+            gate.check_after_hook_allow_rewritten("Bash", &serde_json::json!({}))
                 .await,
             PermissionDecision::Allow,
-            "a rule-less gate treats a hook 'allow' as a wholesale allow"
+            "a transport-only gate has no rule layer to recheck"
         );
-        assert_eq!(gate.calls(), 0, "default impl must not call check()");
+        assert_eq!(gate.calls(), 0);
     }
 
     // ── Plan-mode dynamic gate: check_in_plan_mode ───────────────────────────
@@ -1246,6 +1189,386 @@ mod tests {
     }
 
     // ── Deny-source substrate: resolve_detailed ──────────────────────────────
+
+    #[tokio::test]
+    async fn mod_query_reads_rules_without_prompting_or_running_classifier() {
+        let cases = [
+            (
+                r#"{ "permissions": { "allow": ["Bash"] } }"#,
+                ModToolCheckDecision::Allow,
+            ),
+            (
+                r#"{ "permissions": { "ask": ["Bash"] } }"#,
+                ModToolCheckDecision::Ask,
+            ),
+            (
+                r#"{ "permissions": { "deny": ["Bash"] } }"#,
+                ModToolCheckDecision::Deny,
+            ),
+        ];
+        for (settings, expected) in cases {
+            let inner = RecordingInner::new(PermissionDecision::Deny {
+                reason: "prompt transport must not run".into(),
+            });
+            let gate = PolicyPermissionGate::new(
+                policy_with(settings, PermissionMode::Default),
+                inner.clone(),
+            );
+            let verdict = gate
+                .check_mod_query(
+                    "Bash",
+                    &json!({"command":"git status"}),
+                    &PermissionCheckContext::default(),
+                )
+                .await
+                .expect("policy gate supports Mod queries");
+            assert_eq!(verdict.verdict.decision, expected);
+            assert_eq!(verdict.verdict.rule.as_deref(), Some("Bash"));
+            assert_eq!(inner.calls(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn mod_query_projects_the_rule_from_a_produced_nested_bash_tree() {
+        let managed_rule = crate::rule::PermissionRule {
+            value: crate::rule::PermissionRuleValue::from_rule_string("Bash(rm:*)"),
+            behavior: PermissionBehavior::Deny,
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed),
+        };
+        let policy = Arc::new(
+            PermissionPolicy::from_rules(PermissionMode::Default, [managed_rule]).with_roots(
+                FsRoots {
+                    cwd: PathBuf::from("/proj/work"),
+                    home: Some(PathBuf::from("/home/u")),
+                    lingxi_home: PathBuf::from("/home/u/.lingxi"),
+                },
+            ),
+        );
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "Mod query must not prompt".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+
+        let verdict = gate
+            .check_mod_query(
+                "Bash",
+                &json!({"command":"echo ok && rm -rf build"}),
+                &PermissionCheckContext::default(),
+            )
+            .await
+            .expect("Bash policy supports Mod queries");
+        assert_eq!(verdict.verdict.decision, ModToolCheckDecision::Deny);
+        assert_eq!(verdict.verdict.rule.as_deref(), Some("Bash(rm:*)"));
+        assert_eq!(inner.calls(), 0, "Mod projection must stay policy-only");
+    }
+
+    #[test]
+    fn mod_check_rule_walks_first_same_behavior_subcommand_rule_in_order() {
+        fn matched_result(behavior: PermissionBehavior, rule: &str) -> PermissionResult {
+            let reason = PermissionDecisionReason::MatchedRule {
+                rule: PermissionRule {
+                    value: PermissionRuleValue::from_rule_string(rule),
+                    behavior,
+                    source: PermissionRuleSource::Settings(
+                        lingxi_core::types::SettingsScope::Managed,
+                    ),
+                },
+            };
+            match behavior {
+                PermissionBehavior::Allow => PermissionResult::Allow {
+                    reason,
+                    updated_input: None,
+                    update_destination: None,
+                    metadata: PermissionMetadata::default(),
+                },
+                PermissionBehavior::Deny => PermissionResult::Deny {
+                    reason,
+                    explanation: None,
+                    metadata: PermissionMetadata::default(),
+                },
+                PermissionBehavior::Ask => PermissionResult::Ask {
+                    reason,
+                    prompt: crate::result::PermissionPrompt {
+                        title: "Allow?".into(),
+                        message: "approval required".into(),
+                        options: Vec::new(),
+                    },
+                    pending_classifier_check: None,
+                    metadata: PermissionMetadata::default(),
+                },
+            }
+        }
+
+        fn ask_with_reason(reason: PermissionDecisionReason) -> PermissionResult {
+            PermissionResult::Ask {
+                reason,
+                prompt: crate::result::PermissionPrompt {
+                    title: "Allow?".into(),
+                    message: "approval required".into(),
+                    options: Vec::new(),
+                },
+                pending_classifier_check: None,
+                metadata: PermissionMetadata::default(),
+            }
+        }
+
+        fn nested(key: &str, result: PermissionResult) -> PermissionDecisionReason {
+            PermissionDecisionReason::SubcommandResults {
+                reasons: indexmap::IndexMap::from([(key.to_string(), Box::new(result))]),
+            }
+        }
+
+        let one_level = nested(
+            "first",
+            matched_result(PermissionBehavior::Ask, "Bash(first-rule)"),
+        );
+        let two_levels = nested(
+            "outer",
+            ask_with_reason(nested(
+                "inner",
+                matched_result(PermissionBehavior::Ask, "Bash(second-level-rule)"),
+            )),
+        );
+        let three_levels = nested(
+            "outer",
+            ask_with_reason(nested(
+                "middle",
+                ask_with_reason(nested(
+                    "inner",
+                    matched_result(PermissionBehavior::Ask, "Bash(third-level-rule)"),
+                )),
+            )),
+        );
+        for (reason, expected) in [
+            (one_level, "Bash(first-rule)"),
+            (two_levels, "Bash(second-level-rule)"),
+            (three_levels, "Bash(third-level-rule)"),
+        ] {
+            assert_eq!(
+                mod_check_rule(&reason, PermissionBehavior::Ask, None).as_deref(),
+                Some(expected)
+            );
+        }
+
+        let first_match_wins = PermissionDecisionReason::SubcommandResults {
+            reasons: indexmap::IndexMap::from([
+                (
+                    "first".into(),
+                    Box::new(matched_result(PermissionBehavior::Ask, "Bash(first)")),
+                ),
+                (
+                    "second".into(),
+                    Box::new(matched_result(PermissionBehavior::Ask, "Bash(second)")),
+                ),
+            ]),
+        };
+        assert_eq!(
+            mod_check_rule(&first_match_wins, PermissionBehavior::Ask, None).as_deref(),
+            Some("Bash(first)")
+        );
+
+        let behavior_mismatch = nested(
+            "deny-child",
+            PermissionResult::Deny {
+                reason: nested(
+                    "ask-grandchild",
+                    matched_result(PermissionBehavior::Ask, "Bash(mismatched-ask)"),
+                ),
+                explanation: None,
+                metadata: PermissionMetadata::default(),
+            },
+        );
+        assert_eq!(
+            mod_check_rule(&behavior_mismatch, PermissionBehavior::Ask, None),
+            None,
+            "a child with a different behavior must not be searched"
+        );
+
+        let missing_rule = nested(
+            "mode-ask",
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::Default,
+                },
+                prompt: crate::result::PermissionPrompt {
+                    title: "Allow?".into(),
+                    message: "approval required".into(),
+                    options: Vec::new(),
+                },
+                pending_classifier_check: None,
+                metadata: PermissionMetadata::default(),
+            },
+        );
+        assert_eq!(
+            mod_check_rule(&missing_rule, PermissionBehavior::Ask, None),
+            None
+        );
+
+        let root_rule = PermissionDecisionReason::MatchedRule {
+            rule: PermissionRule {
+                value: PermissionRuleValue::from_rule_string("Bash(root-rule)"),
+                behavior: PermissionBehavior::Deny,
+                source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed),
+            },
+        };
+        assert_eq!(
+            mod_check_rule(&root_rule, PermissionBehavior::Ask, None).as_deref(),
+            Some("Bash(root-rule)"),
+            "a direct root rule has priority and mirrors Ast's direct-rule branch"
+        );
+
+        let matched_ask_rule = MatchedAskRule {
+            source: "policySettings".into(),
+            tool_name: "Bash".into(),
+            rule_content: Some("fallback".into()),
+        };
+        let no_decision_reason_rule = PermissionDecisionReason::PermissionMode {
+            mode: PermissionMode::Default,
+        };
+        assert_eq!(
+            mod_check_rule(
+                &no_decision_reason_rule,
+                PermissionBehavior::Ask,
+                Some(&matched_ask_rule),
+            )
+            .as_deref(),
+            Some("Bash(fallback)")
+        );
+        assert_eq!(
+            mod_check_rule(
+                &no_decision_reason_rule,
+                PermissionBehavior::Deny,
+                Some(&matched_ask_rule),
+            ),
+            None,
+            "matchedAskRule is only a non-deny fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_query_uses_only_an_explicit_non_deny_matched_ask_fallback() {
+        let gate = PolicyPermissionGate::new(
+            policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default),
+            RecordingInner::new(PermissionDecision::Deny {
+                reason: "prompt transport must not run".into(),
+            }),
+        );
+        let mut ctx = PermissionCheckContext::default();
+        ctx.matched_ask_rule = Some(MatchedAskRule {
+            source: "policySettings".into(),
+            tool_name: "Bash".into(),
+            rule_content: Some("nested-command".into()),
+        });
+
+        let ask = gate
+            .check_mod_query("Bash", &json!({"command":"nested-command"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(ask.verdict.decision, ModToolCheckDecision::Ask);
+        assert_eq!(ask.verdict.rule.as_deref(), Some("Bash(nested-command)"));
+
+        ctx.mode_override = Some("dontAsk".into());
+        let ask = gate
+            .check_mod_query("Bash", &json!({"command":"nested-command"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(ask.verdict.decision, ModToolCheckDecision::Ask,
+            "Native core inspection precedes z7o's DontAsk execution transform");
+        assert_eq!(ask.verdict.rule.as_deref(), Some("Bash(nested-command)"));
+
+        // An actual non-rule core denial still must not cite matchedAskRule.
+        ctx.permission_layers = vec![clamp_layer(&["Bash(git status:*)"])];
+        let deny = gate
+            .check_mod_query("Bash", &json!({"command":"nested-command"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(deny.verdict.decision, ModToolCheckDecision::Deny);
+        assert_eq!(deny.verdict.rule, None, "matchedAskRule must not decorate a deny");
+    }
+
+    #[test]
+    fn subcommand_results_serde_preserves_object_shape_and_insertion_order() {
+        let reasons = indexmap::IndexMap::from([
+            (
+                "second-key".to_string(),
+                Box::new(PermissionResult::Ask {
+                    reason: PermissionDecisionReason::PermissionMode {
+                        mode: PermissionMode::Default,
+                    },
+                    prompt: crate::result::PermissionPrompt {
+                        title: "Allow?".into(),
+                        message: "second".into(),
+                        options: Vec::new(),
+                    },
+                    pending_classifier_check: None,
+                    metadata: PermissionMetadata::default(),
+                }),
+            ),
+            (
+                "first-key".to_string(),
+                Box::new(PermissionResult::Ask {
+                    reason: PermissionDecisionReason::PermissionMode {
+                        mode: PermissionMode::Default,
+                    },
+                    prompt: crate::result::PermissionPrompt {
+                        title: "Allow?".into(),
+                        message: "first".into(),
+                        options: Vec::new(),
+                    },
+                    pending_classifier_check: None,
+                    metadata: PermissionMetadata::default(),
+                }),
+            ),
+        ]);
+        let reason = PermissionDecisionReason::SubcommandResults { reasons };
+        let serialized = serde_json::to_string(&reason).unwrap();
+        assert!(
+            serialized.find("second-key").unwrap() < serialized.find("first-key").unwrap(),
+            "the current reason object must serialize its native insertion order: {serialized}"
+        );
+        let decoded: PermissionDecisionReason = serde_json::from_str(&serialized).unwrap();
+        let PermissionDecisionReason::SubcommandResults { reasons } = decoded else {
+            panic!("subcommand results must keep their object variant");
+        };
+        assert_eq!(
+            reasons.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["second-key", "first-key"]
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_query_applies_read_only_default_without_prompting() {
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "prompt transport must not run".into(),
+        });
+        let gate = PolicyPermissionGate::new(
+            policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default),
+            inner.clone(),
+        );
+        assert_eq!(
+            gate.check_mod_query(
+                "Read",
+                &json!({"file_path":"a.md"}),
+                &PermissionCheckContext::default()
+            )
+            .await
+            .unwrap()
+            .verdict.decision,
+            ModToolCheckDecision::Allow
+        );
+        assert_eq!(
+            gate.check_mod_query(
+                "Bash",
+                &json!({"command":"touch a"}),
+                &PermissionCheckContext::default()
+            )
+            .await
+            .unwrap()
+            .verdict.decision,
+            ModToolCheckDecision::Ask
+        );
+        assert_eq!(inner.calls(), 0);
+    }
 
     #[tokio::test]
     async fn resolve_detailed_allow_rule_is_allow_without_inner() {
@@ -1680,12 +2003,11 @@ mod tests {
         );
     }
 
-    /// Review MED: a hook-allow overridden by an ASK RULE re-checks via
-    /// `check_after_hook_allow_ctx`, which must delegate to the inner transport
-    /// carrying the REAL tool_use_id (was a fresh UUID) + the serialized ask
-    /// reason — so the stdio `can_use_tool` is byte-faithful, matching `lin`.
+    /// A PreToolUse allow whose captured core is Ask continues through the
+    /// normal permission pipeline. That pipeline delegates through the current
+    /// transport API with the real tool_use_id and serialized Ask reason.
     #[tokio::test]
-    async fn hook_allow_ask_delegation_carries_tool_use_id_and_reason() {
+    async fn captured_pretool_ask_uses_current_pipeline_with_tool_use_id_and_reason() {
         let policy = policy_with(
             r#"{ "permissions": { "ask": ["Bash"] } }"#,
             PermissionMode::Default,
@@ -1698,22 +2020,23 @@ mod tests {
             tool_use_id: Some("toolu_hook_99".into()),
             ..Default::default()
         };
-        let outcome = gate
-            .check_after_hook_allow_outcome_ctx(
-                "Bash",
-                &serde_json::json!({ "command": "ls" }),
-                &ctx,
-            )
-            .await;
-        assert!(matches!(
-            outcome,
-            PermissionOutcome::Allow {
-                decision_classification: Some(
-                    lingxi_core::host::permission_gate::ToolDecisionClassification::UserTemporary
-                ),
-                ..
-            }
-        ));
+        let input = serde_json::json!({ "command": "ls" });
+        let preflight = gate
+            .resolve_after_hook_allow_mod_core("Bash", &input, &ctx)
+            .await
+            .expect("captured preflight");
+        assert!(matches!(preflight.resolution, PermissionResolution::Ask));
+        assert_eq!(
+            preflight.evaluation.as_ref().map(|evaluation| evaluation.verdict.decision),
+            Some(lingxi_core::host::permission_gate::ModToolCheckDecision::Ask),
+            "the Mod core projection preserves the Ask verdict"
+        );
+
+        // Native sends this preflight Ask through its full permission pipeline.
+        // `check_with_context` is the current pipeline entry: it evaluates the
+        // Ask and delegates to the inner transport with the enriched context.
+        let outcome = gate.check_with_context("Bash", &input, &ctx).await;
+        assert!(matches!(outcome, PermissionOutcome::Allow { .. }));
         let seen = inner
             .ctx
             .lock()
@@ -1846,7 +2169,7 @@ mod tests {
             metadata: PermissionMetadata::default(),
         };
         let reason = PermissionDecisionReason::SubcommandResults {
-            reasons: HashMap::from([
+            reasons: indexmap::IndexMap::from([
                 ("safe".into(), Box::new(safety(true))),
                 ("unsafe".into(), Box::new(safety(false))),
             ]),
@@ -3739,7 +4062,7 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
                 "type": "addRules",
                 "rules": [
                     {"toolName": "Write"},
-                    {"toolName": "Task", "ruleContent": "reviewer"}
+                    {"toolName": "Agent", "ruleContent": "reviewer"}
                 ],
                 "behavior": "deny",
                 "destination": "session"
@@ -3968,4 +4291,384 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
             "clearing the command denies must leave the settings deny standing"
         );
     }
+    #[tokio::test]
+    async fn mod_query_keeps_native_core_ask_before_dont_ask_execution_transform() {
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::DontAsk);
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "must not prompt".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy.clone(), inner.clone());
+        let verdict = gate
+            .check_mod_query(
+                "Bash",
+                &json!({"command":"curl https://x"}),
+                &PermissionCheckContext::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(verdict.verdict.decision, ModToolCheckDecision::Ask);
+        assert_eq!(
+            verdict.verdict.reason.as_deref(),
+            Some("This command requires approval")
+        );
+        assert_eq!(verdict.verdict.rule, None);
+        assert!(matches!(
+            policy.authorize("Bash", &json!({"command":"curl https://x"})),
+            PermissionResult::Deny { .. }
+        ));
+        assert_eq!(inner.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn mod_query_uses_wire_rule_message_without_changing_the_ui_prompt() {
+        let policy = policy_with(
+            r#"{ "permissions": { "ask": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "must not prompt".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy.clone(), inner.clone());
+        let verdict = gate
+            .check_mod_query(
+                "Bash",
+                &json!({"command":"npm test"}),
+                &PermissionCheckContext::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(verdict.verdict.decision, ModToolCheckDecision::Ask);
+        assert_eq!(verdict.verdict.rule.as_deref(), Some("Bash"));
+        assert_eq!(
+            verdict.verdict.reason.as_deref(),
+            Some("LingXi requested permissions to use Bash, but you haven't granted it yet.")
+        );
+        let PermissionResult::Ask { prompt, .. } =
+            policy.authorize("Bash", &json!({"command":"npm test"}))
+        else {
+            panic!("UI still asks")
+        };
+        assert!(prompt.message.starts_with("Permission rule 'Bash'"));
+        assert_eq!(inner.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn mod_query_single_readonly_bash_allow_omits_native_subcommand_reason() {
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "must not prompt".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        let verdict = gate
+            .check_mod_query(
+                "Bash",
+                &json!({"command":"echo ok"}),
+                &PermissionCheckContext::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(verdict.verdict.decision, ModToolCheckDecision::Allow);
+        assert_eq!(verdict.verdict.reason, None);
+        assert_eq!(verdict.verdict.rule, None);
+        assert_eq!(inner.calls(), 0);
+    }
+
+    #[test]
+    fn tool_check_bridge_round_trips_recursive_result_and_optional_fields() {
+        let nested = PermissionResult::Ask {
+            reason: PermissionDecisionReason::MatchedRule {
+                rule: PermissionRule {
+                    value: PermissionRuleValue::from_rule_string("Bash(rm:*)"),
+                    behavior: PermissionBehavior::Ask,
+                    source: PermissionRuleSource::Settings(
+                        lingxi_core::types::SettingsScope::Managed,
+                    ),
+                },
+            },
+            prompt: crate::result::PermissionPrompt {
+                title: "approval".into(),
+                message: "nested message".into(),
+                options: vec!["once".into(), "always".into()],
+            },
+            pending_classifier_check: None,
+            metadata: PermissionMetadata::default(),
+        };
+        let originals = [
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::MatchedRule {
+                    rule: PermissionRule {
+                        value: PermissionRuleValue::from_rule_string("Read"),
+                        behavior: PermissionBehavior::Allow,
+                        source: PermissionRuleSource::Session,
+                    },
+                },
+                updated_input: Some(json!({"file_path":"rewritten"})),
+                update_destination: Some(crate::result::PermissionUpdateDestination::UserSettings),
+                metadata: PermissionMetadata {
+                    matched_rules: vec!["Read".into()],
+                    permission_suggestions: Some(json!([{"type":"addRules"}])),
+                    blocked_path: Some("/workspace/file".into()),
+                },
+            },
+            PermissionResult::Deny {
+                reason: PermissionDecisionReason::SubcommandResults {
+                    reasons: indexmap::IndexMap::from([(
+                        "rm -rf build".into(),
+                        Box::new(nested.clone()),
+                    )]),
+                },
+                explanation: Some("nested deny".into()),
+                metadata: PermissionMetadata::default(),
+            },
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SubcommandResults {
+                    reasons: indexmap::IndexMap::from([(
+                        "curl https://example.invalid".into(),
+                        Box::new(nested),
+                    )]),
+                },
+                prompt: crate::result::PermissionPrompt {
+                    title: "compound".into(),
+                    message: "parent ask".into(),
+                    options: vec!["allow once".into()],
+                },
+                pending_classifier_check: Some(crate::result::PendingClassifierCheck {
+                    classifier: ClassifierKind::Bash,
+                    request_id: lingxi_core::types::RequestId::new(),
+                    started_at: std::time::SystemTime::UNIX_EPOCH,
+                }),
+                metadata: PermissionMetadata {
+                    matched_rules: vec!["Bash(rm:*)".into()],
+                    permission_suggestions: Some(json!([{"type":"setMode","mode":"auto"}])),
+                    blocked_path: Some("/workspace/build".into()),
+                },
+            },
+        ];
+        for original in originals {
+            let bridge = permission_result_to_core(&original);
+            let round_trip = permission_result_from_core(&bridge);
+            assert_eq!(
+                serde_json::to_value(original).unwrap(),
+                serde_json::to_value(round_trip).unwrap(),
+                "the Mod phase bridge must preserve every result field and presence"
+            );
+        }
+    }
+
+
+    #[test]
+    fn read_path_snapshot_distinguishes_inactive_and_unavailable_policy_inputs() {
+        use lingxi_core::host::permission_gate::{
+            ReadPathPolicyMatch as Match, ReadPathPolicySnapshot,
+        };
+
+        let no_policy = core_permission::NoPolicyReadPathSnapshot;
+        assert_eq!(
+            no_policy.facts(),
+            core_permission::ReadPathPolicyFacts::default()
+        );
+        assert_eq!(
+            no_policy.check_path(std::path::Path::new("/outside/file")),
+            core_permission::ReadPathPolicyCheck::default(),
+            "a transport-only gate explicitly exposes inactive predicates"
+        );
+
+        let restricted =
+            Arc::new(PermissionPolicy::new(PermissionMode::Default).with_restricted(true));
+        let restricted_gate =
+            PolicyPermissionGate::new(restricted, RecordingInner::new(PermissionDecision::Allow));
+        let restricted_snapshot = restricted_gate.read_path_policy_snapshot();
+        assert!(restricted_snapshot.facts().restricted);
+        assert_eq!(
+            restricted_snapshot
+                .check_path(std::path::Path::new("/outside/file"))
+                .held_outside,
+            Match::Unavailable,
+            "a real restricted policy without roots cannot claim either hS outcome"
+        );
+
+        let content_rules = crate::loader::permission_rules_from_settings_json(
+            r#"{ "permissions": { "deny": ["Read(//outside/**)"] } }"#,
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .unwrap();
+        let content_gate = PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                PermissionMode::Default,
+                content_rules,
+            )),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        let content_snapshot = content_gate.read_path_policy_snapshot();
+        assert!(content_snapshot.facts().read_deny_rules_active);
+        assert_eq!(
+            content_snapshot
+                .check_path(std::path::Path::new("/outside/file"))
+                .denied_by_read_rule,
+            Match::Unavailable,
+            "a path deny with no rule roots is not reported as a no-match"
+        );
+    }
+
+    #[test]
+    fn read_path_snapshot_uses_live_read_denies_and_not_ask_or_excluded_wide_denies() {
+        use lingxi_core::host::permission_gate::{
+            PermissionGate as _, ReadPathPolicyMatch as Match, ReadPathPolicySnapshot,
+        };
+
+        let ask_gate = PolicyPermissionGate::new(
+            policy_with_roots(
+                r#"{ "permissions": { "ask": ["Read(//outside/**)"] } }"#,
+                PermissionMode::Default,
+            ),
+            RecordingInner::new(PermissionDecision::Deny {
+                reason: "ask must not become a reminder deny".into(),
+            }),
+        );
+        let path = std::path::Path::new("/outside/file");
+        let (_, ask_result) =
+            ask_gate.effective_authorize("Read", &json!({"file_path":"/outside/file"}));
+        assert!(matches!(ask_result, PermissionResult::Ask { .. }));
+        let ask_check = ask_gate.read_path_policy_snapshot().check_path(path);
+        assert_eq!(ask_check.denied_by_read_rule, Match::NoMatch);
+        assert_eq!(ask_check.held_outside, Match::NoMatch);
+
+        ask_gate.apply_permission_update(&json!({
+            "type": "addRules",
+            "rules": [{"toolName":"Read", "ruleContent":"//outside/**"}],
+            "behavior": "deny",
+            "destination": "session"
+        }));
+        let live = ask_gate.read_path_policy_snapshot();
+        assert!(live.facts().read_deny_rules_active);
+        assert_eq!(live.check_path(path).denied_by_read_rule, Match::Match);
+
+        ask_gate.apply_permission_update(&json!({
+            "type": "removeRules",
+            "rules": [{"toolName":"Read", "ruleContent":"//outside/**"}],
+            "behavior": "deny",
+            "destination": "session"
+        }));
+        let after_remove = ask_gate.read_path_policy_snapshot();
+        assert!(!after_remove.facts().read_deny_rules_active);
+        assert_eq!(after_remove.check_path(path).denied_by_read_rule, Match::NoMatch);
+
+        let cli_rules = crate::loader::permission_rules_from_settings_json(
+            r#"{ "permissions": { "deny": ["Read"] } }"#,
+            PermissionRuleSource::CliArg,
+        )
+        .unwrap();
+        let cli_gate = PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                PermissionMode::Default,
+                cli_rules,
+            )),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        let cli = cli_gate.read_path_policy_snapshot();
+        assert!(!cli.facts().read_deny_rules_active);
+        assert_eq!(cli.check_path(path).denied_by_read_rule, Match::NoMatch);
+    }
+
+    #[test]
+    fn read_path_snapshot_matches_native_working_dirs_and_hie_carveouts() {
+        use crate::working_dirs::AdditionalWorkingDirs;
+        use lingxi_core::host::permission_gate::{
+            ReadPathPolicyMatch as Match, ReadPathPolicySnapshot,
+        };
+
+        let roots = FsRoots {
+            cwd: PathBuf::from("/proj"),
+            home: Some(PathBuf::from("/home/u")),
+            lingxi_home: PathBuf::from("/home/u/.lingxi"),
+        };
+        let gate_for = |restricted, block| {
+            let policy = PermissionPolicy::new(PermissionMode::Default)
+                .with_roots(roots.clone())
+                .with_restricted(restricted)
+                .with_block_reads_outside_working_directories(block)
+                .with_working_dirs(AdditionalWorkingDirs::from_sources([
+                    (
+                        vec!["/extra"],
+                        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
+                    ),
+                    (
+                        vec!["/project-only"],
+                        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
+                    ),
+                ]))
+                .with_session_read_allowances([crate::policy::SessionReadAllowance::directory(
+                    PathBuf::from("/outside/tool-results"),
+                    crate::TOOL_RESULT_READ_ALLOW_REASON,
+                )]);
+            PolicyPermissionGate::new(
+                Arc::new(policy),
+                RecordingInner::new(PermissionDecision::Allow),
+            )
+        };
+
+        let restricted = gate_for(true, false);
+        let restricted = restricted.read_path_policy_snapshot();
+        assert_eq!(restricted.check_path(std::path::Path::new("/project-only/a"))
+            .held_outside, Match::NoMatch, "restricted uses all additional working dirs");
+        assert_eq!(restricted.check_path(std::path::Path::new("/outside/tool-results/out"))
+            .held_outside, Match::NoMatch, "session read carve-outs survive restricted mode");
+        assert_eq!(restricted.check_path(std::path::Path::new("/home/u/.lingxi/skills/a"))
+            .held_outside, Match::Match, "the readBlockFence config carve-out is not active under restricted");
+
+        let blocked = gate_for(false, true);
+        let blocked = blocked.read_path_policy_snapshot();
+        assert_eq!(blocked.check_path(std::path::Path::new("/extra/a"))
+            .held_outside, Match::NoMatch, "non-project additional dirs widen readBlock working dirs");
+        assert_eq!(blocked.check_path(std::path::Path::new("/project-only/a"))
+            .held_outside, Match::Match, "projectSettings dirs are filtered from readBlock working dirs");
+        assert_eq!(blocked.check_path(std::path::Path::new("/outside/tool-results/out"))
+            .held_outside, Match::NoMatch, "tool-result allowance survives blockOutsideReads");
+        assert_eq!(blocked.check_path(std::path::Path::new("/home/u/.lingxi/skills/a"))
+            .held_outside, Match::NoMatch, "user skill config is allowed by readBlockFence");
+        assert_eq!(blocked.check_path(std::path::Path::new("/home/u/.lingxi/other"))
+            .held_outside, Match::Match, "unlisted config paths remain held outside");
+
+        let live_gate = PolicyPermissionGate::new(
+            Arc::new(
+                PermissionPolicy::new(PermissionMode::Default)
+                    .with_roots(roots.clone())
+                    .with_block_reads_outside_working_directories(true),
+            ),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        assert_eq!(
+            live_gate
+                .read_path_policy_snapshot()
+                .check_path(std::path::Path::new("/extra/file"))
+                .held_outside,
+            Match::Match
+        );
+        live_gate.apply_permission_update(&json!({
+            "type": "addDirectories",
+            "directories": ["/extra"],
+            "destination": "session"
+        }));
+        assert_eq!(
+            live_gate
+                .read_path_policy_snapshot()
+                .check_path(std::path::Path::new("/extra/file"))
+                .held_outside,
+            Match::NoMatch,
+            "the changed-file snapshot must read the live additional-dir overlay"
+        );
+        live_gate.apply_permission_update(&json!({
+            "type": "removeDirectories",
+            "directories": ["/extra"],
+            "destination": "session"
+        }));
+        assert_eq!(
+            live_gate
+                .read_path_policy_snapshot()
+                .check_path(std::path::Path::new("/extra/file"))
+                .held_outside,
+            Match::Match
+        );
+    }
+
 }

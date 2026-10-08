@@ -1,28 +1,6 @@
-//! Per-model capability registry — claude-code's `capabilities: [...]` array.
-//!
-//! The oracle's model table carries an explicit capability list per model, and
-//! consumers ask `LN(model, "<capability>")` rather than pattern-matching the
-//! model NAME. 2.1.220 @225786114-225787817:
-//!
-//! ```text
-//! claude-opus-4-8 => [effort, max_effort, xhigh_effort, adaptive_thinking,
-//!                     mid_conv_system, context_management, fast_mode, lean_prompt]
-//! claude-opus-5   => [... , lean_prompt, refusal_fallback, opus_5_prompt_bundle]
-//! claude-fable-5-1 => [... , lean_prompt, fable_5_mitigations, refusal_fallback]
-//! ```
-//!
-//! WHY THIS EXISTS. The port decided "does this model take the lean system
-//! prompt" by hardcoding a model-name list. It produced the right answer for
-//! the models that were enumerated, and the right answer for `claude-opus-5`
-//! only BY ACCIDENT — opus-5 was in neither branch and reached a fallthrough
-//! that happens to return the correct result. A name list is also wrong in the
-//! dangerous direction for anything added later: an unknown model silently
-//! inherits whatever the fallthrough does, and nothing fails.
-//!
-//! This registry is deliberately NOT a guess-from-the-name function. A model
-//! that is not listed returns `false` for every capability, which is the
-//! conservative direction: a caller asking "does this support X" gets "no"
-//! rather than a wrong "yes" derived from a substring match.
+//! Current Claude Code 2.1.287 baked model capabilities. Native model/env/served
+//! lookups are separate consumers: an absent baked capability is not an explicit
+//! negative observation. The current table preserves every capability string.
 
 /// A model capability, spelled exactly as the oracle's wire string.
 ///
@@ -73,16 +51,17 @@ impl ModelCapability {
     }
 }
 
-/// The capability list for a first-party model id, verbatim from the 2.1.220
-/// table. Unknown ids (including every third-party / non-Anthropic model)
-/// return an empty slice.
-///
-/// Matching is on the BARE model id. A caller holding a provider-qualified id
-/// (`openrouter/anthropic/claude-opus-5`) or a `-eap` / `[1m]` suffixed id must
-/// normalize before asking — see [`capabilities_for_loose`].
+/// Current native baked capability array for a canonical model id.
+/// Unknown identities have no baked observations.
 #[must_use]
 pub fn capabilities_for(model_id: &str) -> &'static [&'static str] {
     match model_id {
+        "claude-3-5-haiku" => &[],
+        "claude-haiku-4-5" => &["context_management"],
+        "claude-3-5-sonnet" => &[],
+        "claude-3-7-sonnet" => &[],
+        "claude-sonnet-4-0" => &["context_management"],
+        "claude-sonnet-4-5" => &["context_management"],
         "claude-sonnet-4-6" => &[
             "effort",
             "max_effort",
@@ -97,6 +76,23 @@ pub fn capabilities_for(model_id: &str) -> &'static [&'static str] {
             "mid_conv_system",
             "context_management",
         ],
+        "claude-sonnet-5-5" => &[
+            "effort",
+            "max_effort",
+            "xhigh_effort",
+            "adaptive_thinking",
+            "mid_conv_system",
+            "mid_conv_tool_change",
+            "context_management",
+            "rejects_disabled_thinking",
+            "per_turn_effort",
+            "lean_prompt",
+            "refusal_fallback",
+            "silent_turn_reminder",
+            "org_locked_thinking",
+        ],
+        "claude-opus-4-0" => &["context_management"],
+        "claude-opus-4-1" => &["context_management"],
         "claude-opus-4-5" => &["context_management"],
         "claude-opus-4-6" => &[
             "effort",
@@ -104,19 +100,12 @@ pub fn capabilities_for(model_id: &str) -> &'static [&'static str] {
             "adaptive_thinking",
             "context_management",
         ],
-        // Verified against the 2.1.220 catalog blob @225785080, which reads
-        // `capabilities:["effort","max_effort","xhigh_effort",
-        // "adaptive_thinking","context_management","fast_mode"]`. `fast_mode`
-        // was missing here and the omission was pinned by two tests below; the
-        // env-block prompt ("available on Opus 5/4.8/4.7.", oracle @113736244)
-        // had been telling users the opposite all along.
         "claude-opus-4-7" => &[
             "effort",
             "max_effort",
             "xhigh_effort",
             "adaptive_thinking",
             "context_management",
-            "fast_mode",
         ],
         "claude-opus-4-8" => &[
             "effort",
@@ -124,6 +113,7 @@ pub fn capabilities_for(model_id: &str) -> &'static [&'static str] {
             "xhigh_effort",
             "adaptive_thinking",
             "mid_conv_system",
+            "mid_conv_tool_change",
             "context_management",
             "fast_mode",
             "lean_prompt",
@@ -134,40 +124,103 @@ pub fn capabilities_for(model_id: &str) -> &'static [&'static str] {
             "xhigh_effort",
             "adaptive_thinking",
             "mid_conv_system",
+            "mid_conv_tool_change",
             "context_management",
+            "thinking_disabled_effort_cap",
             "fast_mode",
             "lean_prompt",
             "refusal_fallback",
             "opus_5_prompt_bundle",
         ],
-        "claude-fable-5-1" | "claude-mythos-5-1" => &[
+        "claude-opus-5-5" => &[
             "effort",
             "max_effort",
             "xhigh_effort",
             "adaptive_thinking",
             "rejects_disabled_thinking",
             "mid_conv_system",
+            "mid_conv_tool_change",
+            "per_turn_effort",
+            "per_turn_timing",
+            "context_management",
+            "fast_mode",
+            "lean_prompt",
+            "refusal_fallback",
+            "opus_5_5_prompt_bundle",
+        ],
+        "claude-fable-5" => &[
+            "effort",
+            "max_effort",
+            "xhigh_effort",
+            "adaptive_thinking",
+            "rejects_disabled_thinking",
+            "mid_conv_system",
+            "mid_conv_tool_change",
             "context_management",
             "lean_prompt",
             "fable_5_mitigations",
-            // 2.1.263 baked-in catalog: enables the default silent-turn nudge.
-            "fable_5_1_prompt_bundle",
             "refusal_fallback",
+        ],
+        "claude-fable-5-1" => &[
+            "effort",
+            "max_effort",
+            "xhigh_effort",
+            "adaptive_thinking",
+            "rejects_disabled_thinking",
+            "mid_conv_system",
+            "mid_conv_tool_change",
+            "per_turn_effort",
+            "per_turn_timing",
+            "context_management",
+            "lean_prompt",
+            "fable_5_mitigations",
+            "refusal_fallback",
+            "fable_5_1_prompt_bundle",
+        ],
+        "claude-mythos-5" => &[],
+        "claude-mythos-5-1" => &[
+            "effort",
+            "max_effort",
+            "xhigh_effort",
+            "adaptive_thinking",
+            "rejects_disabled_thinking",
+            "mid_conv_system",
+            "mid_conv_tool_change",
+            "per_turn_timing",
+            "context_management",
+            "lean_prompt",
+            "fable_5_mitigations",
+            "fable_5_1_prompt_bundle",
         ],
         _ => &[],
     }
 }
 
 const KNOWN_MODEL_IDS: &[&str] = &[
+    "claude-3-5-sonnet",
+    "claude-3-7-sonnet",
+    "claude-sonnet-4-0",
+    "claude-sonnet-4-5",
     "claude-sonnet-4-6",
+    "claude-sonnet-5-5",
+    "claude-mythos-5-1",
+    "claude-3-5-haiku",
+    "claude-haiku-4-5",
+    "claude-fable-5-1",
     "claude-sonnet-5",
+    "claude-opus-4-0",
+    "claude-opus-4-1",
     "claude-opus-4-5",
     "claude-opus-4-6",
     "claude-opus-4-7",
     "claude-opus-4-8",
+    "claude-opus-5-5",
+    "claude-mythos-5",
+    "claude-fable-5",
     "claude-opus-5",
-    "claude-fable-5-1",
-    "claude-mythos-5-1",
+    "claude-3-opus",
+    "claude-3-sonnet",
+    "claude-3-haiku",
 ];
 
 fn known_wrapper_suffix(suffix: &str) -> bool {
@@ -255,6 +308,78 @@ pub fn capabilities_for_loose(model_id: &str) -> &'static [&'static str] {
 #[must_use]
 pub fn has_capability(model_id: &str, capability: ModelCapability) -> bool {
     capabilities_for_loose(model_id).contains(&capability.as_wire())
+}
+
+/// Native AM/ny built-in wakeup mitigation with an explicit capability override.
+/// The caller supplies the selected canonical identity. Served catalog observations
+/// stay separate; an explicit false must override both catalog and Mythos fallback.
+#[must_use]
+pub fn wakeup_ends_turn(model: &str, environment: Option<&str>, served: bool) -> bool {
+    let identity = model.replace("[1m]", "").replace("[1M]", "");
+    capability_override(&identity, "fable_5_mitigations", environment).unwrap_or_else(|| {
+        served
+            || model == "claude-mythos-5"
+            || capabilities_for(&identity).contains(&"fable_5_mitigations")
+    })
+}
+
+/// Native N8r: later matching capability entries replace earlier observations.
+/// The model identity is supplied by the caller; selectors remain case-sensitive.
+#[must_use]
+pub fn capability_override(
+    model: &str,
+    capability: &str,
+    environment: Option<&str>,
+) -> Option<bool> {
+    let identity = model.replace("[1m]", "").replace("[1M]", "");
+    let mut observed = None;
+    for entry in environment.into_iter().flat_map(|value| value.split(';')) {
+        let values = if let Some((selector, values)) = entry.split_once('=') {
+            let selector = super::effort::trim_js_whitespace(selector);
+            if selector.is_empty()
+                || !selector.strip_suffix('*').map_or_else(
+                    || identity == selector,
+                    |prefix| identity.starts_with(prefix),
+                )
+            {
+                continue;
+            }
+            values
+        } else {
+            entry
+        };
+        for value in values.split(',') {
+            let value = super::effort::trim_js_whitespace(value);
+            let enabled = !value.starts_with('-');
+            if value.strip_prefix('-').unwrap_or(value) == capability {
+                observed = Some(enabled);
+            }
+        }
+    }
+    observed
+}
+
+/// Native Ry/ny with host-supplied identity, global admission and served observation.
+/// Baked absence falls through to the native raw-name check; explicit denial does not.
+#[must_use]
+pub fn fast_model_allowed(
+    model: &str,
+    canonical: &str,
+    environment: Option<&str>,
+    global: bool,
+    served: bool,
+) -> bool {
+    if !global {
+        return false;
+    }
+    if let Some(value) = capability_override(canonical, "fast_mode", environment) {
+        return value;
+    }
+    if served || capabilities_for(canonical).contains(&"fast_mode") {
+        return true;
+    }
+    let lower = model.to_lowercase();
+    lower.contains("opus-4-8") || lower.contains("opus-5")
 }
 
 /// Model-selected system-prompt family.
@@ -345,6 +470,79 @@ pub fn initialization_capabilities_for(model_id: &str) -> ModelInitializationCap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_fast_gate_matches_current_source_cases() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/model_capabilities_2_1_287.json"
+        ))
+        .unwrap();
+        for row in fixture["fastCases"].as_array().unwrap() {
+            let model = row["model"].as_str().unwrap();
+            let environment = match row["support"].as_bool() {
+                Some(true) => Some("fast_mode"),
+                Some(false) => Some("-fast_mode"),
+                None => None,
+            };
+            assert_eq!(
+                fast_model_allowed(
+                    model,
+                    model,
+                    environment,
+                    row["global"].as_bool().unwrap(),
+                    false
+                ),
+                row["expected"].as_bool().unwrap(),
+                "{row}"
+            );
+        }
+    }
+
+    #[test]
+    fn current_native_capability_table_is_exact() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/model_capabilities_2_1_287.json"
+        ))
+        .unwrap();
+        for row in fixture["models"].as_array().unwrap() {
+            let id = row["id"].as_str().unwrap();
+            let expected: Vec<_> = row["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap())
+                .collect();
+            assert_eq!(capabilities_for(id), expected, "{id}");
+            assert_eq!(
+                prompt_profile_for(id) == PromptProfile::ClaudeLean,
+                expected.contains(&"lean_prompt"),
+                "{id}"
+            );
+            assert_eq!(
+                initialization_capabilities_for(id).supports_fast_mode,
+                expected.contains(&"fast_mode"),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn current_native_wakeup_model_oracle() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/loop_model_2_1_287.json"))
+                .unwrap();
+        for row in fixture["cases"].as_array().unwrap() {
+            assert_eq!(
+                wakeup_ends_turn(
+                    row["model"].as_str().unwrap(),
+                    row["environment"].as_str(),
+                    row["served"].as_bool().unwrap()
+                ),
+                row["expected"].as_bool().unwrap(),
+                "{row}"
+            );
+        }
+    }
 
     #[test]
     fn current_lean_prompt_models_match_the_capability_table() {
@@ -448,8 +646,12 @@ mod tests {
 
     #[test]
     fn fast_mode_matches_the_table() {
-        // 2.1.220 catalog @225785080 lists `fast_mode` for opus-4-7.
-        assert!(has_capability("claude-opus-4-7", ModelCapability::FastMode));
+        // Current baked catalog and native Ry no longer admit Opus 4.7.
+        assert!(!has_capability(
+            "claude-opus-4-7",
+            ModelCapability::FastMode
+        ));
+        assert!(has_capability("claude-opus-5-5", ModelCapability::FastMode));
         assert!(has_capability("claude-opus-4-8", ModelCapability::FastMode));
         assert!(has_capability("claude-opus-5", ModelCapability::FastMode));
         // fable-5's list deliberately omits fast_mode.
@@ -491,7 +693,7 @@ mod tests {
     #[test]
     fn initialize_projection_and_request_gate_share_fast_capability() {
         for id in [
-            "claude-opus-4-7",
+            "claude-opus-5-5",
             "claude-opus-4-8",
             "claude-opus-5",
             "us.anthropic.claude-opus-5-v1:0",
@@ -502,7 +704,12 @@ mod tests {
             );
             assert!(has_capability(id, ModelCapability::FastMode), "{id}");
         }
-        for id in ["claude-sonnet-5", "claude-fable-5-1", "gpt-5.5"] {
+        for id in [
+            "claude-opus-4-7",
+            "claude-sonnet-5",
+            "claude-fable-5-1",
+            "gpt-5.5",
+        ] {
             assert!(
                 !initialization_capabilities_for(id).supports_fast_mode,
                 "{id}"

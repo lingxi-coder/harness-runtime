@@ -109,6 +109,23 @@ pub(super) fn forward_subagent_message_line(message: &serde_json::Value) -> Opti
     .ok()
 }
 
+/// Encode a nested server-fallback tombstone on the existing Agent progress
+/// channel. The orchestrator recognizes the private envelope and sends the
+/// typed tombstone through `OutputStream`, which retracts nested progress by
+/// UUID and block identity without manufacturing a tool result.
+pub(super) fn forward_subagent_tombstone_line(
+    message: &lingxi_core::host::ServerFallbackTombstoneMessage,
+    display_only: bool,
+) -> Option<String> {
+    serde_json::to_string(&serde_json::json!({
+        lingxi_core::host::subagent_spawn::FORWARD_SUBAGENT_SERVER_FALLBACK_TOMBSTONE_SENTINEL: {
+            "message": message,
+            "display_only": display_only,
+        }
+    }))
+    .ok()
+}
+
 pub(super) fn collect_tool_calls(value: &serde_json::Value, out: &mut Vec<String>) {
     match value {
         serde_json::Value::Object(map) => {

@@ -18,6 +18,7 @@
 
 pub mod artifact_gate;
 pub mod ask_user_question;
+pub mod bash_precommit;
 pub mod bash_runner;
 pub mod builtin_context;
 pub mod content_replacement;
@@ -26,6 +27,8 @@ pub mod defer;
 pub mod hosted_search;
 pub mod model_prompt_gate;
 pub mod native_schema;
+pub mod nested_memory_triggers;
+pub mod output_schema;
 pub mod progress;
 pub mod read_file_state;
 pub mod registry;

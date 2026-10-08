@@ -66,7 +66,6 @@ pub(crate) fn comma_mode_for(event_type: &HookEventType) -> bool {
 #[must_use]
 pub fn normalize_legacy_tool_name(name: &str) -> String {
     match name {
-        "Task" => "Agent",
         "KillShell" => "TaskStop",
         "AgentOutputTool" | "BashOutputTool" => "TaskOutput",
         other => other,
@@ -78,12 +77,10 @@ pub fn normalize_legacy_tool_name(name: &str) -> String {
 /// [`normalize_legacy_tool_name`], mirroring `getLegacyToolNames`
 /// (`permissionRuleParser.ts:35-41`): every legacy key whose canonical value
 /// equals `canonical_name`, in `LEGACY_TOOL_NAME_ALIASES` insertion order. Used
-/// by [`matches_pattern`]'s regex branch so a pattern like `^Task$` still
-/// matches the canonical tool `Agent`.
+/// by [`matches_pattern`]'s regex branch for the remaining non-Agent aliases.
 #[must_use]
 pub fn get_legacy_tool_names(canonical_name: &str) -> Vec<String> {
     match canonical_name {
-        "Agent" => vec!["Task".to_string()],
         "TaskStop" => vec!["KillShell".to_string()],
         "TaskOutput" => vec!["AgentOutputTool".to_string(), "BashOutputTool".to_string()],
         _ => Vec::new(),
@@ -171,8 +168,7 @@ pub fn matches_pattern_with(
     if regex.is_match(match_query) {
         return true;
     }
-    // TS: also test the query's legacy names so patterns like "^Task$" still
-    // match the canonical name (e.g. query "Agent" → legacy ["Task"]) — `rfn(e)`.
+    // Test remaining static legacy names for the query — `rfn(e)`.
     for legacy_name in get_legacy_tool_names(match_query) {
         if regex.is_match(&legacy_name) {
             return true;
@@ -416,7 +412,7 @@ mod tests {
     #[test]
     fn legacy_aliases_resolve_to_canonical() {
         // Forward map (permissionRuleParser.ts LEGACY_TOOL_NAME_ALIASES).
-        assert_eq!(normalize_legacy_tool_name("Task"), "Agent");
+        assert_eq!(normalize_legacy_tool_name("Task"), "Task");
         assert_eq!(normalize_legacy_tool_name("KillShell"), "TaskStop");
         assert_eq!(normalize_legacy_tool_name("AgentOutputTool"), "TaskOutput");
         assert_eq!(normalize_legacy_tool_name("BashOutputTool"), "TaskOutput");
@@ -424,7 +420,7 @@ mod tests {
         assert_eq!(normalize_legacy_tool_name("Write"), "Write");
         assert_eq!(normalize_legacy_tool_name("Agent"), "Agent");
         // Reverse map (insertion order matters for the two-alias TaskOutput).
-        assert_eq!(get_legacy_tool_names("Agent"), vec!["Task".to_string()]);
+        assert!(get_legacy_tool_names("Agent").is_empty());
         assert_eq!(
             get_legacy_tool_names("TaskStop"),
             vec!["KillShell".to_string()]
@@ -437,20 +433,13 @@ mod tests {
     }
 
     #[test]
-    fn legacy_matcher_resolves_to_canonical_tool() {
-        // A simple "Task" matcher now matches the canonical tool "Agent"
-        // (matcher normalizes to "Agent"; matchQuery is the canonical name).
-        assert!(matches_pattern("Agent", "Task"));
-        // Pipe lists normalize each side.
+    fn removed_agent_alias_does_not_match_canonical_tool() {
+        assert!(!matches_pattern("Agent", "Task"));
+        assert!(!matches_pattern("Agent", "^Task$"));
+        assert!(!matches_pattern("Agent", "Read|Task"));
+        assert!(matches_pattern("Task", "Task"));
+        // Unrelated tool aliases retain their existing matching behavior.
         assert!(matches_pattern("TaskStop", "KillShell|Write"));
-        // The regex branch falls back to the query's legacy names, so "^Task$"
-        // matches the canonical "Agent".
-        assert!(matches_pattern("Agent", "^Task$"));
-        // Parity: the matcher is normalized but the query is not, so a literal
-        // legacy "Task" query (a tool name that no longer exists) does NOT match
-        // a "Task" matcher — `"Task" === normalizeLegacyToolName("Task") ("Agent")`
-        // is false in TS too.
-        assert!(!matches_pattern("Task", "Task"));
     }
 
     // ── `if`-condition matcher (prepareIfConditionMatcher + per-tool) ──────────
@@ -512,12 +501,12 @@ mod tests {
     }
 
     #[test]
-    fn if_legacy_tool_name_normalizes_both_sides() {
-        // Legacy `Task` rule normalizes to canonical `Agent`; event tool `Agent`
-        // matches. (Bare tool name → tool-agreement match.)
+    fn if_removed_agent_alias_does_not_match() {
         let input = json!({ "description": "x" });
-        assert!(matches_if_condition("Task", "Agent", &input));
-        assert!(matches_if_condition("Task(*)", "Agent", &input));
+        assert!(!matches_if_condition("Task", "Agent", &input));
+        assert!(!matches_if_condition("Task(*)", "Agent", &input));
+        assert!(!matches_if_condition("Agent", "Task", &input));
+        assert!(matches_if_condition("Agent(*)", "Agent", &input));
     }
 
     #[test]

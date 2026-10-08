@@ -25,6 +25,7 @@ pub mod dispatcher;
 pub mod expand;
 pub mod markdown_loader;
 pub mod mcp_prompts;
+pub mod mod_catalog;
 pub mod model;
 pub mod parser;
 pub mod registry;
@@ -37,7 +38,8 @@ pub use argument_substitution::{
 };
 pub use describe::format_description_with_source;
 pub use dispatcher::{
-    BackgroundPromptLauncher, McpPromptResolver, RegistrySlashDispatcher, SkillInvocationObserver,
+    BackgroundPromptLauncher, McpPromptResolver, ModCommandRunInterceptor, RegistrySlashDispatcher,
+    SkillInvocationObserver,
 };
 pub use expand::{expand_markdown_command, ExpandCtx, ExpandError};
 pub use markdown_loader::{
@@ -45,6 +47,10 @@ pub use markdown_loader::{
     extract_description_from_markdown, load_command_markdown_files, load_skill_markdown_files,
     load_skill_markdown_files_with_roots, parse_command_markdown, parse_skill_command_markdown,
     project_dirs_up_to_home, MarkdownCommandFile, SkillMarkdownCommandFile,
+};
+pub use mod_catalog::{
+    record_mod_command_settlement, with_mod_command_capture, with_mod_command_context,
+    ModCommandExecutor, ModCommandQueue, ModCommandRunContext, RegistryModCommandCatalog,
 };
 pub use model::*;
 pub use parser::{parse_slash_command, ParsedSlashCommand};

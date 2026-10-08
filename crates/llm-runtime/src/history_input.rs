@@ -8,6 +8,213 @@ use lingxi_llm_client::replay::{
     has_replay_metadata, native_cited_text, ReplayContext, ReplayPolicy,
 };
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
+
+fn computer_marker(block: &ContentBlock) -> Option<(&str, &Value, &str)> {
+    let ContentBlock::ProviderContent { protocol, value } = block else {
+        return None;
+    };
+    let kind = value.get("type")?.as_str()?;
+    matches!(
+        kind,
+        "lingxi_computer_binding"
+            | "lingxi_computer_receipt"
+            | "lingxi_computer_continuation"
+            | "lingxi_computer_receipt_ack"
+            | "lingxi_computer_abandoned"
+    )
+    .then_some((kind, value, protocol))
+}
+
+fn computer_tool_ids(messages: &[Message]) -> Result<BTreeSet<String>, LlmError> {
+    let mut ids = BTreeSet::new();
+    if crate::computer::uses_auxiliary_history_projection() {
+        return Ok(ids);
+    }
+    for item in messages.iter().flat_map(|message| &message.content) {
+        if let Some(("lingxi_computer_binding", value, _)) = computer_marker(item) {
+            let mapped: Vec<String> = serde_json::from_value(
+                value
+                    .get("tool_use_ids")
+                    .ok_or_else(|| invalid("computer binding is missing tool_use_ids"))?
+                    .clone(),
+            )
+            .map_err(invalid)?;
+            if mapped.is_empty()
+                || mapped
+                    .iter()
+                    .any(|id| id.is_empty() || !ids.insert(id.clone()))
+            {
+                return Err(invalid(
+                    "computer binding has empty or duplicate synthetic tool IDs",
+                ));
+            }
+            // Validate the saved provider call even though outgoing projection never executes it.
+            let _: wire::computer::NativeComputerCall = serde_json::from_value(
+                value
+                    .get("call")
+                    .ok_or_else(|| invalid("computer binding is missing the original call"))?
+                    .clone(),
+            )
+            .map_err(invalid)?;
+        }
+    }
+    Ok(ids)
+}
+// Provider call IDs are opaque and can recur on a later response. A marker
+// only retires work in earlier messages, never a new call in its own response.
+// Keeping the latest marker index is sufficient to test that temporal boundary.
+type ComputerMarkerBoundaries = BTreeMap<String, usize>;
+
+fn marked_after(markers: &ComputerMarkerBoundaries, call_id: &str, message_index: usize) -> bool {
+    markers
+        .get(call_id)
+        .is_some_and(|index| *index > message_index)
+}
+
+fn acknowledged_computer_receipts(
+    messages: &[Message],
+) -> Result<ComputerMarkerBoundaries, LlmError> {
+    let mut ids = BTreeMap::new();
+    if crate::computer::uses_auxiliary_history_projection() {
+        return Ok(ids);
+    }
+    for (message_index, block) in messages
+        .iter()
+        .enumerate()
+        .flat_map(|(index, message)| message.content.iter().map(move |block| (index, block)))
+    {
+        if let Some(("lingxi_computer_receipt_ack", value, _)) = computer_marker(block) {
+            let calls: Vec<String> = serde_json::from_value(
+                value
+                    .get("call_ids")
+                    .ok_or_else(|| invalid("computer receipt acknowledgment is missing call_ids"))?
+                    .clone(),
+            )
+            .map_err(invalid)?;
+            if calls.is_empty() || calls.iter().any(|id| id.trim().is_empty()) {
+                return Err(invalid(
+                    "computer receipt acknowledgment requires nonempty call IDs",
+                ));
+            }
+            ids.extend(calls.into_iter().map(|id| (id, message_index)));
+        }
+    }
+    Ok(ids)
+}
+
+fn abandoned_computer_calls(messages: &[Message]) -> Result<BTreeSet<(String, String)>, LlmError> {
+    let mut ids = BTreeSet::new();
+    if crate::computer::uses_auxiliary_history_projection() {
+        return Ok(ids);
+    }
+    for block in messages.iter().flat_map(|message| &message.content) {
+        if let Some(("lingxi_computer_abandoned", value, _)) = computer_marker(block) {
+            let object = value
+                .as_object()
+                .ok_or_else(|| invalid("computer abandoned marker must be an object"))?;
+            if object.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "type" | "call_ids" | "call_identities" | "reason"
+                )
+            }) {
+                return Err(invalid(
+                    "computer abandoned marker contains unsupported fields",
+                ));
+            }
+            if value
+                .get("reason")
+                .and_then(Value::as_str)
+                .is_none_or(|reason| reason.trim().is_empty())
+            {
+                return Err(invalid(
+                    "computer abandoned marker requires a nonempty recovery reason",
+                ));
+            }
+            let calls: Vec<String> = serde_json::from_value(
+                value
+                    .get("call_ids")
+                    .ok_or_else(|| invalid("computer abandoned marker is missing call_ids"))?
+                    .clone(),
+            )
+            .map_err(invalid)?;
+            let mut unique = BTreeSet::new();
+            if calls.is_empty()
+                || calls
+                    .iter()
+                    .any(|id| id.trim().is_empty() || !unique.insert(id.clone()))
+            {
+                return Err(invalid(
+                    "computer abandoned marker requires distinct nonempty call IDs",
+                ));
+            }
+            let identities: Vec<(String, String)> = serde_json::from_value(
+                value
+                    .get("call_identities")
+                    .ok_or_else(|| {
+                        invalid("computer abandoned marker is missing scoped call identities")
+                    })?
+                    .clone(),
+            )
+            .map_err(invalid)?;
+            let scoped: BTreeSet<_> = identities.iter().cloned().collect();
+            let scoped_calls: BTreeSet<_> =
+                identities.iter().map(|(_, call)| call.clone()).collect();
+            if identities.is_empty()
+                || scoped.len() != identities.len()
+                || identities
+                    .iter()
+                    .any(|(response, call)| response.trim().is_empty() || call.trim().is_empty())
+                || scoped_calls != unique
+            {
+                return Err(invalid(
+                    "computer abandoned marker has inconsistent scoped identities",
+                ));
+            }
+            ids.extend(scoped);
+        }
+    }
+    Ok(ids)
+}
+
+fn computer_continuation_boundary(
+    messages: &[Message],
+    protocol: wire::ProtocolFamily,
+) -> Result<Option<usize>, LlmError> {
+    if !matches!(
+        protocol,
+        wire::ProtocolFamily::GeminiInteractions | wire::ProtocolFamily::OpenAiResponses
+    ) {
+        return Ok(None);
+    }
+    let Some(current) = crate::computer::current_continuation() else {
+        return Ok(None);
+    };
+    let mut boundary = None;
+    for (index, message) in messages.iter().enumerate() {
+        for block in &message.content {
+            if let Some(("lingxi_computer_continuation", value, _)) = computer_marker(block) {
+                let saved: wire::ContinuationRef = serde_json::from_value(
+                    value
+                        .get("continuation")
+                        .ok_or_else(|| {
+                            invalid("computer continuation marker is missing its reference")
+                        })?
+                        .clone(),
+                )
+                .map_err(invalid)?;
+                if saved == current {
+                    boundary = Some(index);
+                }
+            }
+        }
+    }
+    boundary
+        .map(Some)
+        .ok_or_else(|| invalid("computer continuation has no matching durable input boundary"))
+}
+
 fn invalid(error: impl std::fmt::Display) -> LlmError {
     LlmError::InvalidRequest {
         message: error.to_string(),
@@ -49,12 +256,16 @@ fn block(block: &ContentBlock) -> Result<wire::ContentBlock, LlmError> {
             protocol: serde_json::from_value(json!(protocol)).map_err(invalid)?,
             value: value.clone(),
         },
-        ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
-            wire::ContentBlock::Text {
-                text: text.clone(),
-                thought_signature: None,
-            }
+        ContentBlock::Text {
+            text, citations, ..
         }
+        | ContentBlock::TextJsUtf16 {
+            text, citations, ..
+        } => wire::ContentBlock::Text {
+            text: text.clone(),
+            thought_signature: None,
+            citations: citations.clone(),
+        },
         ContentBlock::Image { media_type, bytes } => wire::ContentBlock::Image {
             source: wire::ImageSource::Base64 {
                 media_type: media_type.clone(),
@@ -96,7 +307,11 @@ fn block(block: &ContentBlock) -> Result<wire::ContentBlock, LlmError> {
                 } else {
                     Value::String(output.to_string())
                 };
-                let mut value = json!({"type":"tool_result","tool_use_id":tool_call_id,"content":content,"is_error":is_error});
+                let mut value =
+                    json!({"type":"tool_result","tool_use_id":tool_call_id,"content":content});
+                if let Some(is_error) = is_error {
+                    value["is_error"] = json!(is_error);
+                }
                 if let Some(control) = cache_control {
                     value["cache_control"] = cache(control).wire_value();
                 }
@@ -372,6 +587,21 @@ pub(crate) fn message_content(
     )
 }
 
+pub(crate) fn canonical_message_content(
+    message: &Message,
+    family: wire::ProtocolFamily,
+) -> Result<Vec<wire::ContentBlock>, LlmError> {
+    let ids = computer_tool_ids(std::slice::from_ref(message))?;
+    let acknowledged = acknowledged_computer_receipts(std::slice::from_ref(message))?;
+    let abandoned = abandoned_computer_calls(std::slice::from_ref(message))?;
+    Ok(
+        project_message(message, family, &ids, &acknowledged, &abandoned, 0, false)?
+            .into_iter()
+            .map(|(_, block)| block)
+            .collect(),
+    )
+}
+
 pub fn history_input(
     model: &str,
     messages: &[Message],
@@ -410,6 +640,25 @@ pub fn history_input(
         if projected.is_empty() {
             continue;
         }
+        // Retain malformed UTF-16 text at a protocol-neutral message/content
+        // pointer; the SDK codec maps that source coordinate to the final
+        // provider body after it has encoded the request.
+        for (position, (original, _)) in projected.iter().enumerate() {
+            if let ContentBlock::TextJsUtf16 {
+                utf16_code_units, ..
+            } = &message.content[*original]
+            {
+                if String::from_utf16(utf16_code_units).is_err() {
+                    overrides.insert(
+                        format!(
+                            "/messages/{}/content/{position}/text",
+                            result.messages.len()
+                        ),
+                        utf16_code_units.clone(),
+                    );
+                }
+            }
+        }
         if native_family(protocol) == wire::ProtocolFamily::AnthropicMessages {
             for (position, (original, _)) in projected.iter().enumerate() {
                 let item = &message.content[*original];
@@ -435,9 +684,6 @@ pub fn history_input(
                     });
                 }
                 let exact = match item {
-                    ContentBlock::TextJsUtf16 {
-                        utf16_code_units, ..
-                    } => Some(("text", utf16_code_units.clone())),
                     ContentBlock::ToolResult { output, .. } => {
                         ::lingxi_core::types::js_utf16::tool_result_units(output)
                             .map(|units| ("content", units))
@@ -570,93 +816,6 @@ pub fn history_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn history_edge_consumes_companion_once_and_preserves_tool_metadata() {
-        let native = wire::ContentBlock::ToolUse {
-            id: wire::ToolUseId::new("call-1"),
-            name: "old".into(),
-            input: json!({}),
-            provider_id: Some("provider-1".into()),
-            caller: None,
-            toolset_name: Some("browser".into()),
-            thought_signature: None,
-        };
-        let history = vec![Message {
-            role: "assistant".into(),
-            content: vec![
-                ContentBlock::ToolCall {
-                    id: "call-1".into(),
-                    name: "updated".into(),
-                    input: json!({"url":"example"}),
-                },
-                ContentBlock::ProviderContent {
-                    protocol: "anthropic_messages".into(),
-                    value: json!({"type":"lingxi_replay_metadata","block":native}),
-                },
-            ],
-        }];
-        let (input, overrides) = history_input(
-            "model",
-            &history,
-            &[],
-            &[],
-            wire::ProtocolFamily::AnthropicMessages,
-        )
-        .unwrap();
-        assert!(overrides.is_empty());
-        assert_eq!(input.messages[0].content.len(), 1);
-        let wire::ContentBlock::ToolUse {
-            name,
-            input,
-            provider_id,
-            toolset_name,
-            ..
-        } = &input.messages[0].content[0]
-        else {
-            panic!("canonical tool use")
-        };
-        assert_eq!(name, "updated");
-        assert_eq!(input, &json!({"url":"example"}));
-        assert_eq!(provider_id.as_deref(), Some("provider-1"));
-        assert_eq!(toolset_name.as_deref(), Some("browser"));
-    }
-
-    #[test]
-    fn filtered_history_remaps_exact_strings_and_typed_cache_positions_together() {
-        let history = vec![Message {
-            role: "user".into(),
-            content: vec![
-                ContentBlock::ProviderContent {
-                    protocol: "open_ai_responses".into(),
-                    value: json!({"type":"reasoning","id":"r"}),
-                },
-                ContentBlock::TextJsUtf16 {
-                    text: "�".into(),
-                    utf16_code_units: vec![0xd800],
-                    cache_control: Some(CacheControl::Ephemeral),
-                },
-            ],
-        }];
-        let (input, overrides) = history_input(
-            "model",
-            &history,
-            &[],
-            &[],
-            wire::ProtocolFamily::AnthropicMessages,
-        )
-        .unwrap();
-        assert_eq!(input.messages[0].content.len(), 1);
-        assert!(matches!(
-            input.messages[0].content[0],
-            wire::ContentBlock::Text { .. }
-        ));
-        assert_eq!(overrides["/messages/0/content/0/text"], vec![0xd800]);
-        assert_eq!(
-            input.prompt_cache.breakpoints[0].position,
-            wire::CachePosition::Message { index: 0, block: 0 }
-        );
-    }
 
     fn encoded_body(request: &wire::ChatRequest, protocol: wire::ProtocolFamily) -> Value {
         use lingxi_llm_client::{CodecContext, EncodeRequest, RequestMode, WireCodec};
@@ -1566,225 +1725,130 @@ mod tests {
         assert!(!body.to_string().contains("old-call"));
         assert!(!body.to_string().contains("old accepted output"));
     }
-}
-use std::collections::{BTreeMap, BTreeSet};
 
-fn computer_marker(block: &ContentBlock) -> Option<(&str, &Value, &str)> {
-    let ContentBlock::ProviderContent { protocol, value } = block else {
-        return None;
-    };
-    let kind = value.get("type")?.as_str()?;
-    matches!(
-        kind,
-        "lingxi_computer_binding"
-            | "lingxi_computer_receipt"
-            | "lingxi_computer_continuation"
-            | "lingxi_computer_receipt_ack"
-            | "lingxi_computer_abandoned"
-    )
-    .then_some((kind, value, protocol))
-}
-
-fn computer_tool_ids(messages: &[Message]) -> Result<BTreeSet<String>, LlmError> {
-    let mut ids = BTreeSet::new();
-    if crate::computer::uses_auxiliary_history_projection() {
-        return Ok(ids);
-    }
-    for item in messages.iter().flat_map(|message| &message.content) {
-        if let Some(("lingxi_computer_binding", value, _)) = computer_marker(item) {
-            let mapped: Vec<String> = serde_json::from_value(
-                value
-                    .get("tool_use_ids")
-                    .ok_or_else(|| invalid("computer binding is missing tool_use_ids"))?
-                    .clone(),
-            )
-            .map_err(invalid)?;
-            if mapped.is_empty()
-                || mapped
-                    .iter()
-                    .any(|id| id.is_empty() || !ids.insert(id.clone()))
-            {
-                return Err(invalid(
-                    "computer binding has empty or duplicate synthetic tool IDs",
-                ));
-            }
-            // Validate the saved provider call even though outgoing projection never executes it.
-            let _: wire::computer::NativeComputerCall = serde_json::from_value(
-                value
-                    .get("call")
-                    .ok_or_else(|| invalid("computer binding is missing the original call"))?
-                    .clone(),
-            )
-            .map_err(invalid)?;
+    #[test]
+    fn nullable_text_citations_survive_next_request_projection() {
+        for (citations, expected) in [
+            (None, None),
+            (Some(None), Some(Value::Null)),
+            (Some(Some(json!([]))), Some(json!([]))),
+        ] {
+            let message = Message {
+                role: "user".into(),
+                content: vec![ContentBlock::Text {
+                    text: "prompt".into(),
+                    citations,
+                    cache_control: None,
+                }],
+            };
+            let content =
+                message_content(&message, wire::ProtocolFamily::AnthropicMessages).unwrap();
+            let value = serde_json::to_value(&content[0]).unwrap();
+            assert_eq!(value.get("citations"), expected.as_ref());
         }
     }
-    Ok(ids)
-}
-// Provider call IDs are opaque and can recur on a later response. A marker
-// only retires work in earlier messages, never a new call in its own response.
-// Keeping the latest marker index is sufficient to test that temporal boundary.
-type ComputerMarkerBoundaries = BTreeMap<String, usize>;
 
-fn marked_after(markers: &ComputerMarkerBoundaries, call_id: &str, message_index: usize) -> bool {
-    markers
-        .get(call_id)
-        .is_some_and(|index| *index > message_index)
-}
+    #[test]
+    fn omitted_tool_result_error_survives_next_request_projection() {
+        let result = ContentBlock::ToolResult {
+            tool_call_id: "toolu_1".into(),
+            output: json!("ok"),
+            is_error: None,
+            cache_control: None,
+            cache_reference: None,
+        };
+        let projected = block(&result).unwrap();
+        assert!(serde_json::to_value(projected)
+            .unwrap()
+            .get("is_error")
+            .is_none());
+    }
 
-fn acknowledged_computer_receipts(
-    messages: &[Message],
-) -> Result<ComputerMarkerBoundaries, LlmError> {
-    let mut ids = BTreeMap::new();
-    if crate::computer::uses_auxiliary_history_projection() {
-        return Ok(ids);
+    #[test]
+    fn history_edge_consumes_companion_once_and_preserves_tool_metadata() {
+        let native = wire::ContentBlock::ToolUse {
+            id: wire::ToolUseId::new("call-1"),
+            name: "old".into(),
+            input: json!({}),
+            provider_id: Some("provider-1".into()),
+            caller: None,
+            toolset_name: Some("browser".into()),
+            thought_signature: None,
+        };
+        let history = vec![Message {
+            role: "assistant".into(),
+            content: vec![
+                ContentBlock::ToolCall {
+                    id: "call-1".into(),
+                    name: "updated".into(),
+                    input: json!({"url":"example"}),
+                },
+                ContentBlock::ProviderContent {
+                    protocol: "anthropic_messages".into(),
+                    value: json!({"type":"lingxi_replay_metadata","block":native}),
+                },
+            ],
+        }];
+        let (input, overrides) = history_input(
+            "model",
+            &history,
+            &[],
+            &[],
+            wire::ProtocolFamily::AnthropicMessages,
+        )
+        .unwrap();
+        assert!(overrides.is_empty());
+        assert_eq!(input.messages[0].content.len(), 1);
+        let wire::ContentBlock::ToolUse {
+            name,
+            input,
+            provider_id,
+            toolset_name,
+            ..
+        } = &input.messages[0].content[0]
+        else {
+            panic!("canonical tool use")
+        };
+        assert_eq!(name, "updated");
+        assert_eq!(input, &json!({"url":"example"}));
+        assert_eq!(provider_id.as_deref(), Some("provider-1"));
+        assert_eq!(toolset_name.as_deref(), Some("browser"));
     }
-    for (message_index, block) in messages
-        .iter()
-        .enumerate()
-        .flat_map(|(index, message)| message.content.iter().map(move |block| (index, block)))
-    {
-        if let Some(("lingxi_computer_receipt_ack", value, _)) = computer_marker(block) {
-            let calls: Vec<String> = serde_json::from_value(
-                value
-                    .get("call_ids")
-                    .ok_or_else(|| invalid("computer receipt acknowledgment is missing call_ids"))?
-                    .clone(),
-            )
-            .map_err(invalid)?;
-            if calls.is_empty() || calls.iter().any(|id| id.trim().is_empty()) {
-                return Err(invalid(
-                    "computer receipt acknowledgment requires nonempty call IDs",
-                ));
-            }
-            ids.extend(calls.into_iter().map(|id| (id, message_index)));
-        }
-    }
-    Ok(ids)
-}
 
-fn abandoned_computer_calls(messages: &[Message]) -> Result<BTreeSet<(String, String)>, LlmError> {
-    let mut ids = BTreeSet::new();
-    if crate::computer::uses_auxiliary_history_projection() {
-        return Ok(ids);
+    #[test]
+    fn filtered_history_remaps_exact_strings_and_typed_cache_positions_together() {
+        let history = vec![Message {
+            role: "user".into(),
+            content: vec![
+                ContentBlock::ProviderContent {
+                    protocol: "open_ai_responses".into(),
+                    value: json!({"type":"reasoning","id":"r"}),
+                },
+                ContentBlock::TextJsUtf16 {
+                    text: "�".into(),
+                    utf16_code_units: vec![0xd800],
+                    citations: None,
+                    cache_control: Some(CacheControl::Ephemeral),
+                },
+            ],
+        }];
+        let (input, overrides) = history_input(
+            "model",
+            &history,
+            &[],
+            &[],
+            wire::ProtocolFamily::AnthropicMessages,
+        )
+        .unwrap();
+        assert_eq!(input.messages[0].content.len(), 1);
+        assert!(matches!(
+            input.messages[0].content[0],
+            wire::ContentBlock::Text { .. }
+        ));
+        assert_eq!(overrides["/messages/0/content/0/text"], vec![0xd800]);
+        assert_eq!(
+            input.prompt_cache.breakpoints[0].position,
+            wire::CachePosition::Message { index: 0, block: 0 }
+        );
     }
-    for block in messages.iter().flat_map(|message| &message.content) {
-        if let Some(("lingxi_computer_abandoned", value, _)) = computer_marker(block) {
-            let object = value
-                .as_object()
-                .ok_or_else(|| invalid("computer abandoned marker must be an object"))?;
-            if object.keys().any(|key| {
-                !matches!(
-                    key.as_str(),
-                    "type" | "call_ids" | "call_identities" | "reason"
-                )
-            }) {
-                return Err(invalid(
-                    "computer abandoned marker contains unsupported fields",
-                ));
-            }
-            if value
-                .get("reason")
-                .and_then(Value::as_str)
-                .is_none_or(|reason| reason.trim().is_empty())
-            {
-                return Err(invalid(
-                    "computer abandoned marker requires a nonempty recovery reason",
-                ));
-            }
-            let calls: Vec<String> = serde_json::from_value(
-                value
-                    .get("call_ids")
-                    .ok_or_else(|| invalid("computer abandoned marker is missing call_ids"))?
-                    .clone(),
-            )
-            .map_err(invalid)?;
-            let mut unique = BTreeSet::new();
-            if calls.is_empty()
-                || calls
-                    .iter()
-                    .any(|id| id.trim().is_empty() || !unique.insert(id.clone()))
-            {
-                return Err(invalid(
-                    "computer abandoned marker requires distinct nonempty call IDs",
-                ));
-            }
-            let identities: Vec<(String, String)> = serde_json::from_value(
-                value
-                    .get("call_identities")
-                    .ok_or_else(|| {
-                        invalid("computer abandoned marker is missing scoped call identities")
-                    })?
-                    .clone(),
-            )
-            .map_err(invalid)?;
-            let scoped: BTreeSet<_> = identities.iter().cloned().collect();
-            let scoped_calls: BTreeSet<_> =
-                identities.iter().map(|(_, call)| call.clone()).collect();
-            if identities.is_empty()
-                || scoped.len() != identities.len()
-                || identities
-                    .iter()
-                    .any(|(response, call)| response.trim().is_empty() || call.trim().is_empty())
-                || scoped_calls != unique
-            {
-                return Err(invalid(
-                    "computer abandoned marker has inconsistent scoped identities",
-                ));
-            }
-            ids.extend(scoped);
-        }
-    }
-    Ok(ids)
-}
-
-fn computer_continuation_boundary(
-    messages: &[Message],
-    protocol: wire::ProtocolFamily,
-) -> Result<Option<usize>, LlmError> {
-    if !matches!(
-        protocol,
-        wire::ProtocolFamily::GeminiInteractions | wire::ProtocolFamily::OpenAiResponses
-    ) {
-        return Ok(None);
-    }
-    let Some(current) = crate::computer::current_continuation() else {
-        return Ok(None);
-    };
-    let mut boundary = None;
-    for (index, message) in messages.iter().enumerate() {
-        for block in &message.content {
-            if let Some(("lingxi_computer_continuation", value, _)) = computer_marker(block) {
-                let saved: wire::ContinuationRef = serde_json::from_value(
-                    value
-                        .get("continuation")
-                        .ok_or_else(|| {
-                            invalid("computer continuation marker is missing its reference")
-                        })?
-                        .clone(),
-                )
-                .map_err(invalid)?;
-                if saved == current {
-                    boundary = Some(index);
-                }
-            }
-        }
-    }
-    boundary
-        .map(Some)
-        .ok_or_else(|| invalid("computer continuation has no matching durable input boundary"))
-}
-
-pub(crate) fn canonical_message_content(
-    message: &Message,
-    family: wire::ProtocolFamily,
-) -> Result<Vec<wire::ContentBlock>, LlmError> {
-    let ids = computer_tool_ids(std::slice::from_ref(message))?;
-    let acknowledged = acknowledged_computer_receipts(std::slice::from_ref(message))?;
-    let abandoned = abandoned_computer_calls(std::slice::from_ref(message))?;
-    Ok(
-        project_message(message, family, &ids, &acknowledged, &abandoned, 0, false)?
-            .into_iter()
-            .map(|(_, block)| block)
-            .collect(),
-    )
 }

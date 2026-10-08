@@ -9,7 +9,7 @@
 
 use command_api::model::BuiltinCommandHandler;
 use command_api::{CommandResult, ParsedSlashCommand};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tool_api::{BuiltinToolContext, Tool, ToolCallResult, ToolUseContext};
 
 const USAGE: &str = "Usage: /cron <schedule or action>\n\
@@ -295,7 +295,7 @@ impl DesktopCronCommandHandler {
     }
 
     async fn call_tool<T: Tool + Sync>(&self, tool: &T, input: Value) -> Result<String, String> {
-        let call_ctx = ToolUseContext::model_seed(self.ctx.default_model.clone());
+        let call_ctx = ToolUseContext::model_seed(self.ctx.default_model.clone(), None);
         tool.validate_input(&input, &call_ctx)
             .await
             .map_err(|error| error.to_string())?;

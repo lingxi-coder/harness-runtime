@@ -45,8 +45,10 @@ impl SessionMode {
 
 pub mod djb2;
 pub mod durable_writer;
+pub mod exact_json;
 pub mod journal;
 pub mod loader;
+pub mod message_identity;
 pub mod path;
 pub mod re_append;
 pub mod reader;
@@ -108,9 +110,12 @@ pub use loader::{
     search_sessions_by_custom_title, select_session_interactive, LoaderError, SessionCatalog,
     SessionMetadata,
 };
+pub use message_identity::SessionMessageIdentitySnapshot;
 pub use title::{derive_fork_name, extract_title, FORK_NAME_FALLBACK};
 
 /// Size of the head buffer for lite metadata reads — 64 KiB.
 /// Byte-locked to `claude-code/src/utils/sessionStoragePortable.ts:17`
 /// (`LITE_READ_BUF_SIZE = 65536`).
 pub const LITE_READ_BUF_SIZE: usize = 65_536;
+
+mod recovery;

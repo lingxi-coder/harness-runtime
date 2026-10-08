@@ -228,11 +228,12 @@ pub fn report_untrusted_hooks(
     );
     tracing::error!(
         "Skipping frontmatter hooks for {} '{}': the folder its definition file came from is not \
-         trusted (source: {}, trust key: {trust_key}). Run Claude Code there once and accept the \
+         trusted (source: {}, trust key: {trust_key}). Run {product} there once and accept the \
          trust dialog, or set projects[{trust_key}].hasTrustDialogAccepted: true in {config}.",
         surface.noun(),
         def.agent_type,
         crate::handle::agent_source_to_claude_str(def.source),
+        product = branding::PRODUCT_NAME,
     );
     telemetry::emit_agent_hooks_origin_untrusted(
         crate::handle::agent_source_to_claude_str(def.source),

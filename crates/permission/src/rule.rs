@@ -87,14 +87,13 @@ impl PermissionRuleValue {
 }
 
 /// Map a legacy tool name to its canonical name — 1:1 with the 2.1.195 binary
-/// `LEGACY_TOOL_NAME_ALIASES` (`aDr`), a static literal with all 12 entries
+/// `LEGACY_TOOL_NAME_ALIASES` (`aDr`), excluding the removed Agent alias
 /// (`Brief` is present unconditionally in the binary; the prior "KAIROS-gated,
 /// omitted" note was based on stale TS). Applied on parse so rules/hooks resolve
 /// to the current name.
 #[must_use]
 pub fn normalize_legacy_tool_name(name: &str) -> String {
     match name {
-        "Task" => "Agent",
         "KillShell" | "KillBash" => "TaskStop",
         "AgentOutputTool" | "BashOutputTool" | "AgentOutput" | "BashOutput" => "TaskOutput",
         "ListPeers" => "ListAgents",
@@ -279,11 +278,10 @@ impl PermissionRule {
 mod tests {
     use super::*;
 
-    // 1:1 with the binary `aDr` (LEGACY_TOOL_NAME_ALIASES) — all 12 entries.
+    // The remaining non-Agent tool aliases retain their existing semantics.
     #[test]
-    fn legacy_tool_name_aliases_match_binary() {
+    fn non_agent_legacy_tool_name_aliases_match_binary() {
         for (legacy, canonical) in [
-            ("Task", "Agent"),
             ("KillShell", "TaskStop"),
             ("KillBash", "TaskStop"),
             ("AgentOutputTool", "TaskOutput"),
@@ -478,8 +476,8 @@ mod tests {
 
     #[test]
     fn parse_normalizes_legacy_tool_names() {
-        assert_eq!(parse("Task").tool_name, "Agent");
-        assert_eq!(parse("Task(general-purpose)").tool_name, "Agent");
+        assert_eq!(parse("Task").tool_name, "Task");
+        assert_eq!(parse("Task(general-purpose)").tool_name, "Task");
         assert_eq!(parse("KillShell").tool_name, "TaskStop");
         assert_eq!(parse("AgentOutputTool").tool_name, "TaskOutput");
         assert_eq!(parse("BashOutputTool").tool_name, "TaskOutput");

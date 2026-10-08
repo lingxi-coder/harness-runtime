@@ -1,9 +1,44 @@
 use super::tool_results::persist_keep_recent_clears;
-use crate::conversation::ConversationOrchestrator;
+use crate::conversation::{
+    ConversationOrchestrator, SessionCompactCore, SessionCompactCoreOutput, SessionCompactDecision,
+};
 use crate::error::OrchestratorError;
-use lingxi_core::types::ConversationMessage;
+use hooks::attachment::HookPublicationGuard;
+use lingxi_core::types::{ConversationMessage, MessageId};
 use llm_runtime::{HistoryResponse, LlmError};
 use std::sync::Arc;
+
+/// Apply the native request-parameter envelope at the model-input boundary.
+pub(crate) fn apply_context_hint_params(
+    request: &mut llm_runtime::MessagesCreateRequest,
+    params: compaction::context_hint::ContextHintRequestParams,
+) {
+    request.opts.context_hint_beta = !params.beta.is_empty();
+    request.opts.context_hint = params
+        .body
+        .and_then(|body| body.get("context_hint").cloned());
+}
+
+/// The current native producer carries these controls independently: a hint
+/// offer does not replace an output escalation or configured model fallback.
+/// Native 2.1.287 `src_185762130.js` computes the cap at bytes 2089737..2089841,
+/// builds hint params at 2092426..2092502, and combines both at 2094773..2095445.
+/// Retry inputs retain fallback and overload state at 2120624..2120989 and
+/// 2127356..2127797. The byte ranges are half-open.
+pub(crate) fn apply_main_request_options(
+    request: &mut llm_runtime::MessagesCreateRequest,
+    max_tokens_override: Option<u32>,
+    hint_params: Option<compaction::context_hint::ContextHintRequestParams>,
+    fallback_models: Option<&str>,
+) {
+    request.opts.max_output_tokens = max_tokens_override;
+    if let Some(params) = hint_params {
+        apply_context_hint_params(request, params);
+    }
+    request.opts.fallback = fallback_models
+        .map(llm_runtime::FallbackPolicy::from_models_csv)
+        .unwrap_or(llm_runtime::FallbackPolicy::Disabled);
+}
 
 /// Outcome of [`call_api_with_ptl_recovery`]: either a successful
 /// `HistoryResponse`, or a signal that the prompt-too-long reactive recovery
@@ -11,7 +46,12 @@ use std::sync::Arc;
 /// [`PROMPT_TOO_LONG_ERROR_MESSAGE`].
 pub(crate) enum PtlCallOutcome {
     /// The API call (or a retry after truncation/compaction) succeeded.
-    Response(Box<HistoryResponse>),
+    Response {
+        response: Box<HistoryResponse>,
+        /// The exact successful physical request's messages. Recovery can
+        /// rewrite or compact them; tools must not reread later session state.
+        request_history: Vec<ConversationMessage>,
+    },
     /// The PTL retry budget + reactive-compact fallback were all exhausted.
     /// End the turn with terminal reason `"prompt_too_long"` (the REACTIVE
     /// exhaustion path, `query.ts:1175`).
@@ -43,10 +83,11 @@ pub(crate) enum PtlCallOutcome {
 /// failed compactor surfaces `PromptTooLong` without deleting prior messages.
 pub(crate) async fn call_api_with_ptl_recovery(
     orch: &ConversationOrchestrator,
-    system: Option<&str>,
+    system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+    skip_global_cache_for_system_prompt: bool,
     model: &str,
     profile: Option<&str>,
-    history_snapshot: Vec<ConversationMessage>,
+    mut history_snapshot: Vec<ConversationMessage>,
     outgoing_history_rewriter: Option<Arc<dyn crate::conversation::OutgoingHistoryRewriter>>,
     tools: Vec<serde_json::Value>,
     max_tokens_override: Option<u32>,
@@ -64,16 +105,27 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // a retry; recomputing returns `None` and the reminder is lost for the rest
     // of the session. Re-appended below wherever the request is rebuilt from
     // raw `session.history`.
-    turn_reminders: &[ConversationMessage],
+    mut turn_reminders: Vec<ConversationMessage>,
+    guarded_async_hook_reminders: &mut Vec<(MessageId, Arc<dyn HookPublicationGuard>)>,
+    context_announcements: &crate::conversation::PreparedContextAnnouncements,
     // Exact originating-session accounting authority captured before the
     // first provider dispatch. Explicit recovery calls reuse it rather than
     // resolving whichever session happens to be active later.
     cost_scope: Option<&cost::CostSessionScope>,
 ) -> Result<PtlCallOutcome, OrchestratorError> {
+    crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+        &mut history_snapshot,
+        &mut turn_reminders,
+        guarded_async_hook_reminders,
+    );
     orch.sync_thinking_signature_strip_flag_to_api().await;
     // A first request after resume may overflow before any successful call
     // has populated the summary fork's cache-safe slot.
-    orch.save_cache_safe_params(system, model, &tools).await;
+    let display_system = system.map(
+        lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::display_text,
+    );
+    orch.save_cache_safe_params(display_system.as_deref(), model, &tools)
+        .await;
     // SC-04: the compaction-failure detail is per-CALL state (the oracle reads
     // it off THIS iteration's `precomputeOutcome`), so clear any leftover before
     // the preempt — a failure recorded for an earlier call must never colour
@@ -83,6 +135,12 @@ pub(crate) async fn call_api_with_ptl_recovery(
         .lock()
         .await
         .last_compact_failure_detail = None;
+
+    crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+        &mut history_snapshot,
+        &mut turn_reminders,
+        guarded_async_hook_reminders,
+    );
 
     // (1) Blocking-limit preempt. Context collapse bypasses this proactive
     // guard so a real overflow can first drain its staged summaries. When the
@@ -172,13 +230,6 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // reminder counts as delivered.
     orch.commit_date_change_reminder();
 
-    // (2) Initial call. When an Opus-fallback model is configured, route the
-    // primary request through the fallback-aware seam. In Task 6, `LlmError`
-    // has no `FallbackTriggered` variant — fallback becomes adapter-internal.
-    // The `messages_create_with_fallback` seam still passes the fallback hint to
-    // `ProviderApiAdapter`, which handles the 529-triggered switch internally.
-    // With NO fallback configured the plain `messages_create` seam is taken,
-    // byte-identical to before — locked turn-loop fixtures are unaffected.
     // Context-hint negotiation (oracle `e1y`): offer the server a compact we
     // could perform, and act on a 422/424 asking us to. `None` unless BOTH the
     // route allows first-party betas and the controller's own env gate is on —
@@ -193,9 +244,6 @@ pub(crate) async fn call_api_with_ptl_recovery(
         orch.config.include_first_party_betas,
         "repl_main_thread",
     );
-    let hint_params = hint_controller
-        .as_mut()
-        .and_then(|c| c.build_request_params(&history_snapshot));
 
     if let Some(scope) = cost_scope {
         scope.preflight().await.map_err(|error| {
@@ -256,7 +304,10 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 observation.observe(&resp.usage);
                 let _ = observation.finish();
             }
-            return Ok(PtlCallOutcome::Response(Box::new(resp)));
+            return Ok(PtlCallOutcome::Response {
+                response: Box::new(resp),
+                request_history,
+            });
         }
         Err(LlmError::ContextOverflow { token_gap }) => token_gap,
         Err(other) => {
@@ -301,6 +352,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         let mut s = orch.session.lock().await;
                         s.replace_model_context_history(edits.messages.clone());
                     }
+                    orch.expect_prompt_cache_rebuild().await;
                     let mut retry = orch
                         .rewrite_outgoing_history(retry_raw, outgoing_history_rewriter.as_ref())
                         .await?;
@@ -308,7 +360,10 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         &mut retry,
                         deferred_tools_reminder.as_ref(),
                         date_change_reminder.as_ref(),
-                        turn_reminders,
+                        &mut turn_reminders,
+                        guarded_async_hook_reminders,
+                        context_announcements,
+                        false,
                     )
                     .await;
                     if let Some(scope) = cost_scope {
@@ -318,6 +373,41 @@ pub(crate) async fn call_api_with_ptl_recovery(
                             ))
                         })?;
                     }
+                    crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+                        &mut retry,
+                        &mut turn_reminders,
+                        guarded_async_hook_reminders,
+                    );
+                    let retry_hint_params = c.build_request_params(&retry);
+                    let mut request = llm_runtime::MessagesCreateRequest::new(
+                        model,
+                        profile,
+                        system.cloned(),
+                        retry,
+                        tools.clone(),
+                    );
+                    request.opts.skip_global_cache_for_system_prompt =
+                        skip_global_cache_for_system_prompt;
+                    request.opts.query_source = Some(
+                        crate::config::sanitize_query_source(&orch.config.query_source).to_string(),
+                    );
+                    apply_main_request_options(
+                        &mut request,
+                        max_tokens_override,
+                        retry_hint_params,
+                        orch.config.fallback_model.as_deref(),
+                    );
+                    crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+                        &mut request.messages,
+                        &mut turn_reminders,
+                        guarded_async_hook_reminders,
+                    );
+                    request.opts.request_dispatch_admission =
+                        crate::prompt::async_hook_response::request_dispatch_admission(
+                            &request.messages,
+                            guarded_async_hook_reminders,
+                        );
+                    let request_history = request.messages.clone();
                     return match orch
                         .model_runtime
                         .prompt_cache_capture
@@ -331,7 +421,10 @@ pub(crate) async fn call_api_with_ptl_recovery(
                                 observation.observe(&resp.usage);
                                 let _ = observation.finish();
                             }
-                            Ok(PtlCallOutcome::Response(Box::new(resp)))
+                            Ok(PtlCallOutcome::Response {
+                                response: Box::new(resp),
+                                request_history,
+                            })
                         }
                         Err(e) => Err(e.into()),
                     };
@@ -365,7 +458,10 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     &mut retry,
                     deferred_tools_reminder.as_ref(),
                     date_change_reminder.as_ref(),
-                    turn_reminders,
+                    &mut turn_reminders,
+                    guarded_async_hook_reminders,
+                    context_announcements,
+                    false,
                 )
                 .await;
                 if let Some(scope) = cost_scope {
@@ -423,7 +519,10 @@ pub(crate) async fn call_api_with_ptl_recovery(
                             observation.observe(&resp.usage);
                             let _ = observation.finish();
                         }
-                        return Ok(PtlCallOutcome::Response(Box::new(resp)));
+                        return Ok(PtlCallOutcome::Response {
+                            response: Box::new(resp),
+                            request_history,
+                        });
                     }
                     Err(LlmError::ContextOverflow { .. }) => {}
                     Err(other) => return Err(other.into()),
@@ -437,13 +536,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // (4) Reactive-compact fallback: one full compact, then retry once more.
     if let Some(compactor) = orch.compaction_runtime.compaction.clone() {
         let snapshot = orch.session.lock().await.model_context_history();
-        let messages_before = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
-        let bytes_before: u64 = snapshot
-            .iter()
-            .map(lingxi_core::types::text_byte_size)
-            .sum();
-        // Capture the boundary's preTokens before the summary consumes the snapshot.
-        let pre_tokens_estimate = compaction::grouping::estimate_tokens_for_range(&snapshot);
+        let original_snapshot = snapshot.clone();
         // hooks compaction lifecycle: PreCompact fires before the reactive
         // summary pass. The reactive 413/PTL fallback is part of the automatic
         // recovery pipeline, so the trigger is `auto` (TS treats reactive
@@ -464,28 +557,94 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 .await;
             return Ok(PtlCallOutcome::PromptTooLong);
         }
-        // API duration = the summarizer pass only; `compact_started` (above,
-        // pre-hooks) is the boundary durationMs clock. Folding hook wall-time
-        // into `record_compaction_usage` would inflate /cost's API duration.
-        orch.output.emit_compaction_phase("summarizing").await;
+        // Cost preflight precedes any core call. The Mod may skip without
+        // calling next(e); only the callback below starts the summarizer.
         let reactive_cost_scope = orch.compaction_cost_scope().await.map_err(|error| {
             OrchestratorError::Internal(format!(
                 "reactive compaction cost preflight failed: {error}"
             ))
         })?;
-        let api_started = std::time::Instant::now();
-        let compact_result = {
-            let mut tracking = orch.compaction_runtime.compaction_tracking.lock().await;
-            compactor
-                .process_reactive_tracked(
-                    snapshot,
-                    &mut tracking,
-                    pre_compact.additional_instructions.as_deref(),
-                    (token_gap > 0).then_some(token_gap),
-                )
+        let tracking = Arc::new(tokio::sync::Mutex::new(
+            orch.compaction_runtime
+                .compaction_tracking
+                .lock()
                 .await
+                .clone(),
+        ));
+        let core_error = Arc::new(tokio::sync::Mutex::new(None));
+        let compact_for_core = compactor.clone();
+        let tracking_for_core = tracking.clone();
+        let error_for_core = core_error.clone();
+        let phase_output = orch.output.clone();
+        let core: SessionCompactCore = Arc::new(move |source_messages, instructions| {
+            let compactor = compact_for_core.clone();
+            let tracking = tracking_for_core.clone();
+            let core_error = error_for_core.clone();
+            let output = phase_output.clone();
+            Box::pin(async move {
+                output.emit_compaction_phase("summarizing").await;
+                let api_started = std::time::Instant::now();
+                let result = {
+                    let mut tracking = tracking.lock().await;
+                    compactor
+                        .process_reactive_tracked(
+                            source_messages.clone(),
+                            &mut tracking,
+                            instructions.as_deref(),
+                            (token_gap > 0).then_some(token_gap),
+                        )
+                        .await
+                };
+                match result {
+                    Ok(result) => Ok(SessionCompactCoreOutput::new(
+                        result,
+                        source_messages,
+                        api_started.elapsed(),
+                    )),
+                    Err(error) => {
+                        *core_error.lock().await = Some(error.clone());
+                        Err(hooks::mods::ModError::Native(error.to_string()))
+                    }
+                }
+            })
+        });
+        let compacted = orch
+            .dispatch_session_compact_mods(
+                "auto",
+                snapshot,
+                pre_compact.additional_instructions.as_deref(),
+                core,
+            )
+            .await;
+        *orch.compaction_runtime.compaction_tracking.lock().await = tracking.lock().await.clone();
+        let (compact_result, compact_duration, source_messages) = match compacted {
+            Ok(SessionCompactDecision::Continue {
+                result,
+                source_messages,
+                api_duration,
+                ..
+            }) => (Ok(result), api_duration, source_messages),
+            Ok(SessionCompactDecision::Skip { reason, .. }) => {
+                tracing::warn!(%reason, "Reactive compact skipped by session.compact Mod");
+                orch.output.emit_compaction_finished(Some(&reason)).await;
+                return Ok(PtlCallOutcome::PromptTooLong);
+            }
+            Err(error) => {
+                let error =
+                    core_error.lock().await.take().unwrap_or_else(|| {
+                        compaction::CompactionError::Internal(error.to_string())
+                    });
+                (Err(error), std::time::Duration::ZERO, original_snapshot)
+            }
         };
-        let compact_duration = api_started.elapsed();
+        // A Mod may rewrite the source rows before next(e). Boundary facts
+        // describe the rows that the real compactor received.
+        let messages_before = u32::try_from(source_messages.len()).unwrap_or(u32::MAX);
+        let bytes_before: u64 = source_messages
+            .iter()
+            .map(lingxi_core::types::text_byte_size)
+            .sum();
+        let pre_tokens_estimate = compaction::grouping::estimate_tokens_for_range(&source_messages);
         // A successful summarizer response is owned before the failure-detail,
         // telemetry, or output awaits below.
         let compact_cost_receipt = compact_result.as_ref().ok().and_then(|result| {
@@ -567,7 +726,10 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     &mut history,
                     deferred_tools_reminder.as_ref(),
                     date_change_reminder.as_ref(),
-                    turn_reminders,
+                    &mut turn_reminders,
+                    guarded_async_hook_reminders,
+                    context_announcements,
+                    true,
                 )
                 .await;
                 if let Some(scope) = cost_scope {
@@ -577,6 +739,41 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         ))
                     })?;
                 }
+                crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+                    &mut history,
+                    &mut turn_reminders,
+                    guarded_async_hook_reminders,
+                );
+                let retry_hint_params = hint_controller
+                    .as_mut()
+                    .and_then(|controller| controller.build_request_params(&history));
+                let mut request = llm_runtime::MessagesCreateRequest::new(
+                    model,
+                    profile,
+                    system.cloned(),
+                    history,
+                    tools,
+                );
+                request.opts.query_source = Some(
+                    crate::config::sanitize_query_source(&orch.config.query_source).to_string(),
+                );
+                apply_main_request_options(
+                    &mut request,
+                    max_tokens_override,
+                    retry_hint_params,
+                    orch.config.fallback_model.as_deref(),
+                );
+                crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+                    &mut request.messages,
+                    &mut turn_reminders,
+                    guarded_async_hook_reminders,
+                );
+                request.opts.request_dispatch_admission =
+                    crate::prompt::async_hook_response::request_dispatch_admission(
+                        &request.messages,
+                        guarded_async_hook_reminders,
+                    );
+                let request_history = request.messages.clone();
                 match orch
                     .model_runtime
                     .prompt_cache_capture
@@ -590,7 +787,10 @@ pub(crate) async fn call_api_with_ptl_recovery(
                             observation.observe(&resp.usage);
                             let _ = observation.finish();
                         }
-                        return Ok(PtlCallOutcome::Response(Box::new(resp)));
+                        return Ok(PtlCallOutcome::Response {
+                            response: Box::new(resp),
+                            request_history,
+                        });
                     }
                     Err(LlmError::ContextOverflow { .. }) => {}
                     Err(other) => return Err(other.into()),
@@ -602,76 +802,4 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // Still over the limit after truncation + one reactive compact: surface the
     // byte-exact prompt-too-long message and end the turn (no hard error).
     Ok(PtlCallOutcome::PromptTooLong)
-}
-
-/// Port of the Opus-fallback re-issue (claude-code `query.ts:894-948`'s
-/// `catch (FallbackTriggeredError)` arm). Only reachable when
-/// `config.fallback_model.is_some()` (see [`call_api_with_ptl_recovery`]):
-///
-/// 1. (i) switch `session.model` to `fallback_model` (TS `currentModel =
-///    fallbackModel`); the conversation continues on it.
-/// 2. (ii) clear in-flight accumulators — STRUCTURAL no-op: history is appended
-///    only after success (see [`execute_one_turn_with_recovery_tracked`]).
-/// 3. (iii) surface a `warning` on the output stream (TS `createSystemMessage`,
-///    same channel as [`surface_prompt_too_long`]) — not pushed to history, as
-///    a `role:"system"` entry is rejected by the API.
-/// 4. (iv) emit `tengu_model_fallback_triggered` via `tracing` (INLINE name, not
-///    a locked const, so the event-name fixture lock holds).
-/// 5. (v) re-issue ONE round-trip with `fallback_model = None` (non-Opus → 529
-///    gate closed → cannot recurse; TS `continue` re-enters once).
-///
-/// Bounded divergences: TS also sets `mainLoopModel`, but `main_loop_model`
-/// derives from immutable `config.model`; TS's `ant`-gated `stripSignatureBlocks`
-/// is unported (no protected-thinking replay).
-///
-/// NOTE: Task 5 dead code — `FallbackTriggered` interception was removed; this is
-/// business logic until then.
-#[allow(dead_code)]
-pub(super) async fn reissue_after_model_fallback(
-    orch: &ConversationOrchestrator,
-    system: Option<&str>,
-    original_model: &str,
-    fallback_model: String,
-    tools: Vec<serde_json::Value>,
-) -> Result<HistoryResponse, LlmError> {
-    // (i) Switch the working/session model to the fallback.
-    {
-        let mut s = orch.session.lock().await;
-        s.model.clone_from(&fallback_model);
-    }
-
-    // (ii) Clear in-flight accumulators — structural no-op here (see doc above).
-
-    // (iii) Surface the user-visible warning (byte-shaped on the TS intent;
-    // includes both model names).
-    let warning = format!("Switched to {fallback_model} due to high demand for {original_model}");
-    orch.output.emit_text(&warning).await;
-
-    // (iv) Success-path analytics — inline event name (NOT a locked const).
-    tracing::info!(
-        event = "tengu_model_fallback_triggered",
-        original_model = %original_model,
-        fallback_model = %fallback_model,
-        entrypoint = "cli",
-    );
-
-    // (v) Re-issue ONE round-trip against the fallback model. Re-snapshot the
-    // current history (unchanged by steps i–iv). `fallback_model = None` keeps
-    // the 529 gate closed → no recursion.
-    let history = {
-        let s = orch.session.lock().await;
-        s.model_context_history()
-    };
-    orch.api
-        .messages_create_with_fallback(
-            &fallback_model,
-            None, // fallback model has no associated profile
-            system,
-            history,
-            tools,
-            None,
-            orch.config.is_subscriber,
-            orch.config.is_enterprise,
-        )
-        .await
 }

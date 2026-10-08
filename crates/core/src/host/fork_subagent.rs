@@ -14,8 +14,8 @@
 //!   the recursion guard, and CANNOT depend on the `agent` engine crate (cycle).
 //! - `agent` (the spawner / runner) consults the consts.
 //!
-//! This mirrors why `subagent_spawn.rs` hosts `format_agent_line` +
-//! `should_inject_agent_list_in_messages`. The synthetic `FORK_AGENT`
+//! This mirrors why `subagent_spawn.rs` hosts `format_agent_line`.
+//! The synthetic `FORK_AGENT`
 //! `AgentDefinition` itself lives in `agent::builtins` (it needs the
 //! `AgentDefinition`/`AgentToolPolicy` types); it is resolved on the fork path
 //! by `PoolSubagentSpawner::lookup_definition` and is NOT registered in the
@@ -52,7 +52,7 @@ const FORK_PLACEHOLDER_RESULT: &str = "Fork started — processing in background
 /// - else `"default"` (enabled)
 /// `SPe()` is `JDd() !== "disabled"`.
 ///
-/// Port env is `LINGXI_FORK_SUBAGENT` with a `CLAUDE_CODE_FORK_SUBAGENT` alias.
+/// The product gate reads only `LINGXI_FORK_SUBAGENT`.
 /// `is_coordinator` / `is_non_interactive` are passed in because the leaf
 /// `core::host` crate cannot read `CoordinatorMode` / the session — mirroring
 /// `isCoordinatorMode()` + `getIsNonInteractiveSession()`.
@@ -76,9 +76,7 @@ pub fn is_fork_subagent_enabled(is_coordinator: bool, is_non_interactive: bool) 
 }
 
 fn fork_subagent_env() -> Option<String> {
-    std::env::var("LINGXI_FORK_SUBAGENT")
-        .ok()
-        .or_else(|| std::env::var("CLAUDE_CODE_FORK_SUBAGENT").ok())
+    std::env::var("LINGXI_FORK_SUBAGENT").ok()
 }
 
 /// Recursion guard (claude `forkSubagent.ts:78-89`).
@@ -93,7 +91,7 @@ pub fn is_in_fork_child(messages: &[ConversationMessage]) -> bool {
     let open_tag = format!("<{FORK_BOILERPLATE_TAG}>");
     messages.iter().any(|m| match m {
         ConversationMessage::User { content, .. } => content.iter().any(|b| match b {
-            ContentBlock::Text { text } => text.contains(&open_tag),
+            ContentBlock::Text { text, .. } => text.contains(&open_tag),
             _ => false,
         }),
         _ => false,
@@ -195,7 +193,7 @@ pub fn build_forked_messages(
         return vec![ConversationMessage::User {
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
-                text: build_child_message(directive),
+                text: build_child_message(directive), citations: None,
             }],
             is_meta: false,
             is_compact_summary: false,
@@ -210,13 +208,13 @@ pub fn build_forked_messages(
         content.push(ContentBlock::ToolResult {
             tool_use_id: (*id).clone(),
             content: FORK_PLACEHOLDER_RESULT.to_string(),
-            is_error: false,
+            is_error: Some(false),
             provider_tool_use_id: (*provider_id).clone(),
             content_blocks: None,
         });
     }
     content.push(ContentBlock::Text {
-        text: build_child_message(directive),
+        text: build_child_message(directive), citations: None,
     });
 
     vec![
@@ -231,6 +229,37 @@ pub fn build_forked_messages(
     ]
 }
 
+/// Preserve the parent's full history before the dispatching assistant, then
+/// append the cloned assistant and placeholder-results/directive tail.
+/// Claude Code 2.1.286 passes these as `forkContextMessages: e.messages` and
+/// `promptMessages: ICr(prompt, assistant)` to Lv; our runner has already
+/// appended that assistant, so it must be replaced by its cloned fork tail.
+#[must_use]
+pub fn build_forked_context(
+    directive: &str,
+    messages: &[ConversationMessage],
+) -> Vec<ConversationMessage> {
+    let index = messages
+        .iter()
+        .rposition(|message| matches!(message, ConversationMessage::Assistant { .. }))
+        .filter(|index| {
+            *index + 1 == messages.len()
+                && matches!(&messages[*index], ConversationMessage::Assistant { content, .. }
+                    if content.iter().any(|block| matches!(block, ContentBlock::ToolUse { .. })))
+        });
+    let Some(index) = index else {
+        let mut prefix = messages.to_vec();
+        prefix.push(ConversationMessage::user(
+            MessageId::new(),
+            build_child_message(directive),
+        ));
+        return prefix;
+    };
+    let mut prefix = messages[..index].to_vec();
+    prefix.extend(build_forked_messages(directive, &messages[index]));
+    prefix
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +269,24 @@ mod tests {
 
     /// `LINGXI_FORK_SUBAGENT` is process-global; serialize the gate tests.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn fork_context_keeps_completed_assistant_and_later_lazy_policy() {
+        let messages = vec![
+            ConversationMessage::user(MessageId::new(), "parent task".into()),
+            ConversationMessage::Assistant {
+                id: MessageId::new(),
+                content: vec![ContentBlock::Text {
+                    text: "completed parent answer".into(), citations: None,
+                }],
+                stop_reason: Some("end_turn".into()),
+            },
+            ConversationMessage::user_meta(MessageId::new(), "lazy instruction policy".into()),
+        ];
+        let fork = build_forked_context("child task", &messages);
+        assert_eq!(&fork[..messages.len()], messages.as_slice());
+        assert_eq!(fork.len(), messages.len() + 1);
+    }
 
     #[test]
     fn consts_are_byte_exact_vs_claude() {
@@ -255,11 +302,35 @@ mod tests {
         assert!(FORK_PLACEHOLDER_RESULT.contains('\u{2014}'));
     }
 
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let previous = std::env::var_os(key);
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
     fn fork_gate_on_by_default_when_interactive() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("LINGXI_FORK_SUBAGENT");
-        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
+        let _env = EnvGuard::set("LINGXI_FORK_SUBAGENT", None);
         assert!(
             is_fork_subagent_enabled(false, false),
             "2.1.232 default ON for interactive non-coordinator"
@@ -269,15 +340,12 @@ mod tests {
             "unset + headless ⇒ OFF"
         );
         assert!(!is_fork_subagent_enabled(true, false), "coordinator ⇒ OFF");
-        std::env::remove_var("LINGXI_FORK_SUBAGENT");
-        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
     }
 
     #[test]
     fn fork_gate_explicit_true_wins_over_headless() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
-        std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
+        let _env = EnvGuard::set("LINGXI_FORK_SUBAGENT", Some("1"));
         assert!(
             is_fork_subagent_enabled(false, false),
             "truthy + interactive + non-coordinator ⇒ ON"
@@ -287,16 +355,26 @@ mod tests {
             "explicit env true skips the headless disable (Krb env arm)"
         );
         assert!(!is_fork_subagent_enabled(true, false), "coordinator ⇒ OFF");
-        std::env::remove_var("LINGXI_FORK_SUBAGENT");
     }
 
     #[test]
     fn fork_gate_off_when_env_falsy() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("CLAUDE_CODE_FORK_SUBAGENT");
-        std::env::set_var("LINGXI_FORK_SUBAGENT", "false");
+        let _env = EnvGuard::set("LINGXI_FORK_SUBAGENT", Some("false"));
         assert!(!is_fork_subagent_enabled(false, false), "falsy ⇒ OFF");
-        std::env::remove_var("LINGXI_FORK_SUBAGENT");
+    }
+
+    #[test]
+    fn fork_gate_ignores_legacy_claude_environment() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::set("LINGXI_FORK_SUBAGENT", None);
+        for value in ["0", "false", "1", "true"] {
+            let _legacy = EnvGuard::set("CLAUDE_CODE_FORK_SUBAGENT", Some(value));
+            assert!(is_fork_subagent_enabled(false, false));
+            assert!(!is_fork_subagent_enabled(false, true));
+            assert!(!is_fork_subagent_enabled(true, false));
+            assert!(!is_fork_subagent_enabled(true, true));
+        }
     }
 
     #[test]
@@ -333,7 +411,7 @@ Your directive: Fix the bug in foo.rs";
         let child = ConversationMessage::User {
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
-                text: build_child_message("do it"),
+                text: build_child_message("do it"), citations: None,
             }],
             is_meta: false,
             is_compact_summary: false,
@@ -349,7 +427,7 @@ Your directive: Fix the bug in foo.rs";
         let asst = ConversationMessage::Assistant {
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
-                text: "<fork-boilerplate>".into(),
+                text: "<fork-boilerplate>".into(), citations: None,
             }],
             stop_reason: None,
         };
@@ -375,7 +453,7 @@ Your directive: Fix the bug in foo.rs";
                     signature: None,
                 },
                 ContentBlock::Text {
-                    text: "I'll run two commands".into(),
+                    text: "I'll run two commands".into(), citations: None,
                 },
                 tu("ls", Some("toolu_a")),
                 tu("pwd", Some("toolu_b")),
@@ -415,14 +493,14 @@ Your directive: Fix the bug in foo.rs";
                             ..
                         } => {
                             assert_eq!(c, "Fork started — processing in background");
-                            assert!(!is_error);
+                            assert!(!is_error.unwrap_or(false));
                             assert_eq!(provider_tool_use_id.as_deref(), Some(prov));
                         }
                         other => panic!("expected ToolResult, got {other:?}"),
                     }
                 }
                 match &content[2] {
-                    ContentBlock::Text { text } => {
+                    ContentBlock::Text { text, .. } => {
                         assert!(text.starts_with("<fork-boilerplate>"));
                         assert!(text.ends_with("Your directive: Do the thing"));
                     }
@@ -438,7 +516,7 @@ Your directive: Fix the bug in foo.rs";
         let assistant = ConversationMessage::Assistant {
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
-                text: "no tools here".into(),
+                text: "no tools here".into(), citations: None,
             }],
             stop_reason: Some("end_turn".into()),
         };
@@ -448,7 +526,7 @@ Your directive: Fix the bug in foo.rs";
             ConversationMessage::User { content, .. } => {
                 assert_eq!(content.len(), 1);
                 match &content[0] {
-                    ContentBlock::Text { text } => {
+                    ContentBlock::Text { text, .. } => {
                         assert!(text.starts_with("<fork-boilerplate>"));
                         assert!(text.ends_with("Your directive: Just answer"));
                     }

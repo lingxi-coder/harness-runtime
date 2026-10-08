@@ -37,20 +37,12 @@
 //!   accepted-divergences ledger; do NOT re-add for byte parity.
 //! - **`color` / `background`**: now exist as `AgentDefinition` fields (parsed
 //!   from frontmatter / JSON by [`crate::catalog`]); built-ins leave them at
-//!   their defaults here (`color` is assigned at display time). `omitLingxiMd`
-//!   / `criticalSystemReminder` remain context-trimming flags with no field /
-//!   runner consumer today — not ported.
-//! - **`model` resolution (wired for the spawn path)**: the spawner resolves
-//!   these model values to a concrete wire id at spawn time via
-//!   [`crate::model_resolution::resolve_agent_model`] (`Inherit` → parent /
-//!   main-loop model; bare family alias `haiku` / `sonnet` / `opus` → concrete
-//!   `claude-*` id, or the parent's exact id when same-tier), so built-in spawns
-//!   run against a live provider. The configs here stay authored as
-//!   `Inherit` / `Alias(...)` — resolution happens at the seam, not here. The
-//!   smaller remaining deferrals (env override, boot-snapshot vs live `/model`,
-//!   Bedrock region, `opusplan`, nested-spawn parent, and the separate
-//!   `in_process_teammate` path which still passes its model raw) are documented
-//!   in [`crate::model_resolution`].
+//!   their defaults here (`color` is assigned at display time).
+//!   `omitInstructions` controls subagent instruction inheritance.
+//! - **`model` resolution**: the spawn seam resolves the definition against
+//!   the host's provider catalog and carries the model and provider profile
+//!   together. Built-ins inherit the current session selection; catalog aliases
+//!   are resolved within the selected profile.
 //! - **One-shot only**: this spawn path always sets `persistent: false`, so the
 //!   reference's `ONE_SHOT_BUILTIN_AGENT_TYPES` (Explore / Plan) vs continuable
 //!   distinction has no behavioral surface here — every spawn is one-shot.
@@ -65,7 +57,6 @@ use std::path::{Path, PathBuf};
 /// effectively unbounded; the Rust runner requires a finite `u32`, so we use a
 /// high value matching `parse_agent_markdown`'s custom-agent default.
 pub const BUILTIN_AGENT_MAX_TURNS: u32 = 100;
-const LINGXI_DOT_DIR: &str = ".lingxi";
 
 /// Tools the read-only built-ins (Explore, Plan) must NOT have,
 /// mirroring claude-code's `disallowedTools` for those agents.
@@ -290,7 +281,7 @@ pub fn web_fetch_policy_allowed() -> bool {
 #[must_use]
 pub fn web_fetch_agent_enabled() -> bool {
     let feature_flag = std::env::var("LINGXI_WEB_FETCH_AGENT").ok();
-    let simple = std::env::var("LINGXI_SIMPLE").ok();
+    let simple = std::env::var(branding::SIMPLE_ENV).ok();
     web_fetch_agent_enabled_from(feature_flag.as_deref(), simple.as_deref())
 }
 
@@ -315,9 +306,8 @@ pub fn web_fetch_agent_enabled_from(feature_flag: Option<&str>, simple: Option<&
 /// claude `Hlr` (@287975578) — the built-in `web-fetch` [`AgentDefinition`].
 ///
 /// `tools:[cm]` (WebFetch only), `source:"built-in"`, `model:"inherit"`,
-/// `color:"blue"`. `omitClaudeMd:!0` has NO field on the port's
-/// [`AgentDefinition`] and is a documented residual (adding it would touch 48
-/// struct literals for a flag with no consumer seam in the port).
+/// `color:"blue"`. The definition uses the ordinary instruction inheritance
+/// policy configured on [`AgentDefinition`].
 #[must_use]
 pub fn web_fetch_agent_definition() -> AgentDefinition {
     // `def` always sets `color: None`; `Hlr` declares `color:"blue"`.
@@ -420,6 +410,7 @@ pub fn workflow_subagent_disallowed() -> Vec<String> {
 #[must_use]
 pub fn workflow_subagent_definition() -> AgentDefinition {
     AgentDefinition {
+        omit_instructions: false,
         cache_ttl: None,
         agent_type: WORKFLOW_SUBAGENT_TYPE.to_string(),
         when_to_use: "Internal subagent for workflow script orchestration.".to_string(),
@@ -447,6 +438,7 @@ pub fn workflow_subagent_definition() -> AgentDefinition {
         initial_prompt: None,
         color: None,
         observer: None,
+        offer_provider: None,
     }
 }
 
@@ -460,11 +452,8 @@ struct BuiltinPromptContext {
 }
 
 fn builtin_prompt_context() -> BuiltinPromptContext {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("~"));
-    let settings_path = home.join(LINGXI_DOT_DIR).join("settings.json");
+    let settings_path = lingxi_core::settings::loader::user_settings_path()
+        .unwrap_or_else(|| branding::config_home(Path::new("~"), None).join("settings.json"));
     let settings_json = std::fs::read_to_string(&settings_path)
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
@@ -547,7 +536,7 @@ fn dynamic_statusline_setup_prompt() -> String {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "not exported".to_string());
     format!(
-        "You are a status line setup agent for Claude Code. Convert the user's shell prompt or described preference into a Claude Code `statusLine` configuration and write it to {}, preserving existing settings. If the settings path is a symlink, update the target. Return a concise summary of what you changed and any helper script you created.\n\n\
+        "You are a status line setup agent for {product}. Convert the user's shell prompt or described preference into a {product} `statusLine` configuration and write it to {}, preserving existing settings. If the settings path is a symlink, update the target. Return a concise summary of what you changed and any helper script you created.\n\n\
 Host context:\n\
 - Shell: {}\n\
 - Terminal: {}\n\
@@ -559,6 +548,7 @@ Prefer a minimal, robust status line for the detected shell and terminal. Preser
         ctx.terminal,
         configured_statusline(ctx.settings_json.as_ref()),
         ps1,
+        product = branding::PRODUCT_NAME,
     )
 }
 
@@ -571,6 +561,7 @@ fn def(
     system_prompt: &str,
 ) -> AgentDefinition {
     AgentDefinition {
+        omit_instructions: false,
         cache_ttl: None,
         agent_type: agent_type.to_string(),
         when_to_use: when_to_use.to_string(),
@@ -600,6 +591,7 @@ fn def(
         initial_prompt: None,
         color: None,
         observer: None,
+        offer_provider: None,
     }
 }
 
@@ -620,34 +612,22 @@ fn def(
 /// divergence (see module docs). The oracle registers `workflow-subagent` via
 /// the workflow path rather than `builtInAgents`; the port keeps it here as
 /// its resolution registry.
-/// claude `d8()` (@1520340) — `!a.CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS`,
-/// latched once per host. `cre()` pushes `Explore` and `Plan` only behind it
-/// (`if(d8())n.push(b0,$Ee)`), so a deployment that sets the kill-switch has a
-/// roster — and a model-facing catalog — without those two entries. The port
-/// registered them unconditionally.
+/// Whether Explore and Plan are included in the agent catalog.
+/// `LINGXI_DISABLE_EXPLORE_PLAN_AGENTS` withdraws both entries.
 #[must_use]
 pub fn explore_plan_agents_enabled() -> bool {
     !lingxi_core::host::env::is_env_truthy(
-        std::env::var("LINGXI_DISABLE_EXPLORE_PLAN_AGENTS")
-            .or_else(|_| std::env::var("CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS"))
+        std::env::var(branding::DISABLE_EXPLORE_PLAN_AGENTS_ENV)
             .ok()
             .as_deref(),
     )
 }
 
-/// claude `Ir()` — `CLAUDE_CODE_SAFE_MODE` truthy, or the `--safe-mode` flag.
-/// `cre()` registers `statusline-setup` only when it is FALSE
-/// (`if(!Ir())n.push(xnn)`): safe mode exists to keep the session from writing
-/// executable configuration, and that agent's entire job is to write a
-/// `statusLine` command into settings.
+/// Whether `LINGXI_SAFE_MODE` is enabled. Safe mode withdraws the statusline
+/// setup agent because its purpose is to write executable configuration.
 #[must_use]
 pub fn safe_mode_enabled() -> bool {
-    lingxi_core::host::env::is_env_truthy(
-        std::env::var("LINGXI_SAFE_MODE")
-            .or_else(|_| std::env::var("CLAUDE_CODE_SAFE_MODE"))
-            .ok()
-            .as_deref(),
-    )
+    lingxi_core::host::env::is_env_truthy(std::env::var("LINGXI_SAFE_MODE").ok().as_deref())
 }
 
 #[must_use]
@@ -678,17 +658,15 @@ pub fn builtin_agent_definitions_with_gates(
     include_explore_plan: bool,
     safe_mode: bool,
 ) -> Vec<AgentDefinition> {
-    let mut defs = vec![
-        def(
-            "general-purpose",
-            "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you.",
-            AgentToolPolicy::All {
-                use_exact_tools: false,
-            },
-            AgentModel::Inherit,
-            GENERAL_PURPOSE_PROMPT,
-        ),
-    ];
+    let mut defs = vec![def(
+        "general-purpose",
+        "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you.",
+        AgentToolPolicy::All {
+            use_exact_tools: false,
+        },
+        AgentModel::Inherit,
+        GENERAL_PURPOSE_PROMPT,
+    )];
     // `if(!Ir())n.push(xnn)` — safe mode withdraws the statusline-setup agent.
     if !safe_mode {
         defs.push({
@@ -698,9 +676,12 @@ pub fn builtin_agent_definitions_with_gates(
             // so set it explicitly here.
             let mut d = def(
                 "statusline-setup",
-                "Use this agent to configure the user's Claude Code status line setting.",
+                &format!(
+                    "Use this agent to configure the user's {} status line setting.",
+                    branding::PRODUCT_NAME
+                ),
                 AgentToolPolicy::Explicit(vec!["Read".to_string(), "Edit".to_string()]),
-                AgentModel::Alias("sonnet".to_string()),
+                AgentModel::Inherit,
                 &dynamic_statusline_setup_prompt(),
             );
             d.color = Some("orange".to_string());
@@ -777,6 +758,7 @@ pub fn builtin_agent_definitions_with_gates(
 #[must_use]
 pub fn fork_agent_definition() -> AgentDefinition {
     AgentDefinition {
+        omit_instructions: false,
         cache_ttl: None,
         agent_type: lingxi_core::host::fork_subagent::FORK_SUBAGENT_TYPE.to_string(),
         when_to_use:
@@ -807,6 +789,7 @@ pub fn fork_agent_definition() -> AgentDefinition {
         initial_prompt: None,
         color: None,
         observer: None,
+        offer_provider: None,
     }
 }
 
@@ -818,6 +801,7 @@ pub fn fork_agent_definition() -> AgentDefinition {
 #[must_use]
 pub fn fusion_panel_definition() -> AgentDefinition {
     AgentDefinition {
+        omit_instructions: false,
         cache_ttl: None,
         agent_type: lingxi_core::host::FUSION_PANEL_TYPE.to_string(),
         when_to_use:
@@ -863,6 +847,7 @@ For file evidence, set locator to the workspace-relative path (optionally with :
         initial_prompt: None,
         color: None,
         observer: None,
+        offer_provider: None,
     }
 }
 
@@ -960,9 +945,11 @@ mod tests {
             panic!("explicit allow-list expected");
         };
         assert_eq!(tools, &["Read", "Grep", "Glob"]);
-        assert!(!builtin_agent_definitions_gated(true)
-            .iter()
-            .any(|d| d.agent_type == def.agent_type));
+        assert!(
+            !builtin_agent_definitions_gated(true)
+                .iter()
+                .any(|d| d.agent_type == def.agent_type)
+        );
         assert!(def.system_prompt.unwrap().contains("untrusted"));
     }
 
@@ -984,9 +971,11 @@ mod tests {
         let prompt = def.system_prompt.unwrap();
         assert!(prompt.contains("git commit"));
         assert!(prompt.contains("current directory"));
-        assert!(!builtin_agent_definitions_gated(true)
-            .iter()
-            .any(|d| d.agent_type == def.agent_type));
+        assert!(
+            !builtin_agent_definitions_gated(true)
+                .iter()
+                .any(|d| d.agent_type == def.agent_type)
+        );
     }
 
     #[test]
@@ -1055,7 +1044,7 @@ mod tests {
         assert!(matches!(find(&defs, "Explore").model, AgentModel::Inherit));
         assert!(matches!(
             &find(&defs, "statusline-setup").model,
-            AgentModel::Alias(m) if m == "sonnet"
+            AgentModel::Inherit
         ));
     }
 
@@ -1111,9 +1100,11 @@ mod tests {
         assert!(matches!(p.model, AgentModel::Inherit));
         assert!(matches!(p.permission_mode, AgentPermissionMode::Bubble));
         assert!(p.system_prompt.is_some());
-        assert!(!builtin_agent_definitions()
-            .iter()
-            .any(|d| d.agent_type == "fusion-panel"));
+        assert!(
+            !builtin_agent_definitions()
+                .iter()
+                .any(|d| d.agent_type == "fusion-panel")
+        );
     }
 
     /// claude `vyt()` @287981417 `if(xgi())t.push(Hlr)` — the sixth built-in is
@@ -1168,15 +1159,19 @@ mod tests {
         assert!(d.when_to_use.starts_with(
             "Use this to fetch and read web pages / URLs when you do not have a direct WebFetch tool of your own (if you do, just call it)."
         ));
-        assert!(d
-            .when_to_use
-            .contains("this session's `tool-results` directory"));
-        assert!(d
-            .when_to_use
-            .contains("send follow-up questions about pages it has already read via SendMessage"));
-        assert!(d
-            .when_to_use
-            .ends_with("use `gh` or an authenticated MCP tool for those."));
+        assert!(
+            d.when_to_use
+                .contains("this session's `tool-results` directory")
+        );
+        assert!(
+            d.when_to_use.contains(
+                "send follow-up questions about pages it has already read via SendMessage"
+            )
+        );
+        assert!(
+            d.when_to_use
+                .ends_with("use `gh` or an authenticated MCP tool for those.")
+        );
         let p = d.system_prompt.as_deref().unwrap();
         assert!(p.starts_with("You are a web-reading specialist for LingXi."));
         assert!(p.contains("inside <fetched-web-content> tags rather than a summary"));
@@ -1238,6 +1233,34 @@ mod tests {
             let prompt = find(&defs, ty).system_prompt.as_deref().unwrap();
             assert!(prompt.contains("registered shell tool"));
         }
+    }
+
+    #[test]
+    fn statusline_setup_uses_config_override_and_preserves_provider_selection() {
+        struct RestoreConfigDir(Option<std::ffi::OsString>);
+        impl Drop for RestoreConfigDir {
+            fn drop(&mut self) {
+                if let Some(value) = self.0.take() {
+                    std::env::set_var(branding::CONFIG_DIR_ENV, value);
+                } else {
+                    std::env::remove_var(branding::CONFIG_DIR_ENV);
+                }
+            }
+        }
+        let _restore = RestoreConfigDir(std::env::var_os(branding::CONFIG_DIR_ENV));
+        let config = tempfile::tempdir().unwrap();
+        let settings = config.path().join("settings.json");
+        std::fs::write(&settings, r#"{"statusLine":{"command":"custom-status"}}"#).unwrap();
+        std::env::set_var(branding::CONFIG_DIR_ENV, config.path());
+        let defs = builtin_agent_definitions_with_gates(false, true, false);
+        let statusline = find(&defs, "statusline-setup");
+        assert!(matches!(statusline.model, AgentModel::Inherit));
+        let prompt = statusline.system_prompt.as_deref().unwrap();
+        assert!(prompt.contains(&settings.display().to_string()));
+        assert!(prompt.contains("custom-status"));
+        assert!(prompt.contains(branding::PRODUCT_NAME));
+        assert!(statusline.when_to_use.contains(branding::PRODUCT_NAME));
+        assert!(!prompt.contains("Claude Code"));
     }
 
     #[test]

@@ -3,9 +3,9 @@
 //! Claude Code's current public surface exposes `--permission-mode auto` and the
 //! `auto-mode` inspection command. This module keeps the same local boundary:
 //! the permission crate owns classifier semantics, while hosts only consume the
-//! resulting allow/deny/pass verdict. The implementation is deterministic and
-//! offline: it applies the shipped auto-mode policy categories to the tool call
-//! shape instead of starting an LLM request from the permission layer.
+//! resulting allow/deny/pass verdict. Local tool-shape helpers are deterministic;
+//! the session-owned binding executes the model classifier. Classifier-only
+//! reports require that binding and cannot use a local helper as approval.
 
 pub use crate::result::ClassifierKind;
 
@@ -26,6 +26,20 @@ pub trait LoopPermissionClassifier: Send + Sync {
         host_context: &[crate::host_context::HostContextRecord],
         deny_rules: &[String],
     ) -> AutoModeClassifierVerdict;
+
+    /// Review a classifier-only report using the dispatching child's actual
+    /// transcript and the tool's native action, preserving failure metadata.
+    ///
+    /// `None` means this binding did not run the classifier. A saved allow,
+    /// offline table, or completed-work handoff verdict cannot stand in for it.
+    async fn classify_report(
+        &self,
+        request: &lingxi_core::host::permission_gate::ClassifierOnlyReviewRequest,
+        deny_rules: &[String],
+    ) -> Option<lingxi_core::host::handback::ReportReview> {
+        let _ = (request, deny_rules);
+        None
+    }
 
     /// Review a finished subagent's work before its parent acts on it — `EZe`,
     /// the classifier's second consumer.
@@ -160,7 +174,7 @@ pub fn classify_tool_call(tool_name: &str, input: &Value) -> AutoModeClassifierV
         // It does not establish the child permissions (the deprecated `mode` input
         // is ignored). Let the contextual classifier or user prompt decide; never
         // infer either approval or denial from words inside the task description.
-        "Agent" | "Task" => AutoModeClassifierVerdict::Pass {
+        "Agent" => AutoModeClassifierVerdict::Pass {
             reason: "Subagent request needs transcript-aware approval".to_string(),
         },
         _ => AutoModeClassifierVerdict::Pass {

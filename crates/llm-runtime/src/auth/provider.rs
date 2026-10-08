@@ -35,6 +35,26 @@ impl CredentialScope {
     }
 }
 
+/// Redacted source of the selected credential. This contains no key material.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub enum CredentialSource {
+    /// The route does not use a credential, or its selected source is absent.
+    None,
+    /// This provider cannot establish its source without executing authentication.
+    #[default]
+    Unknown,
+    /// The exact environment variable selected by the credential resolver.
+    Environment { variable: String },
+    /// A credential in the host's persistent or process-local credential store.
+    Stored,
+    /// An explicitly supplied host configuration value.
+    Configured,
+    /// The configured API-key helper, without executing or refreshing it.
+    ApiKeyHelper,
+    /// An existing OAuth credential, without refreshing its token.
+    OAuth,
+}
+
 /// Secret material loaded by a credential provider.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Credential {
@@ -42,6 +62,13 @@ pub enum Credential {
     ApiKey(String),
     /// Bearer or OAuth access token.
     BearerToken(String),
+    /// Anthropic OAuth material and its granted scopes, captured together.
+    AnthropicOAuth {
+        /// Current access token.
+        access_token: String,
+        /// Scopes granted for this token, not subscription/account roles.
+        scopes: Vec<String>,
+    },
     /// ChatGPT-account OAuth: bearer access token plus the `ChatGPT-Account-ID`
     /// header (and `FedRAMP` flag). Served by the openai-oauth credential provider.
     ChatGptOAuth {
@@ -79,6 +106,11 @@ impl fmt::Debug for Credential {
                 .debug_tuple("BearerToken")
                 .field(&"[REDACTED]")
                 .finish(),
+            Self::AnthropicOAuth { scopes, .. } => formatter
+                .debug_struct("AnthropicOAuth")
+                .field("access_token", &"[REDACTED]")
+                .field("scopes", scopes)
+                .finish(),
             Self::ChatGptOAuth {
                 account_id,
                 fedramp,
@@ -99,16 +131,70 @@ impl fmt::Debug for Credential {
     }
 }
 
+/// Current first-party status sources, independent of the model's auth strategy.
+/// Credentials retain their redacted Debug representation. The OAuth scope is
+/// its actual refresh target, which may differ from the model credential id.
+#[derive(Debug, Default, Clone)]
+pub struct AnthropicAuthSnapshot {
+    pub oauth: Option<(CredentialScope, Credential)>,
+    pub api_key: Option<Credential>,
+}
+impl AnthropicAuthSnapshot {
+    #[must_use]
+    pub fn from_credential(scope: CredentialScope, credential: Credential) -> Self {
+        match credential {
+            credential @ Credential::AnthropicOAuth { .. } => Self {
+                oauth: Some((scope, credential)),
+                api_key: None,
+            },
+            credential @ Credential::ApiKey(_) => Self {
+                oauth: None,
+                api_key: Some(credential),
+            },
+            _ => Self::default(),
+        }
+    }
+}
+
 /// Loads credentials for a provider/profile scope.
 ///
 /// `load` is async so implementations can refresh expiring material
 /// (e.g. OAuth) inside the lookup.
 pub trait CredentialProvider: fmt::Debug + Send + Sync {
+    /// Inspect the scoped credential source without helper execution, token
+    /// exchange, refresh or network requests. Unsupported providers return
+    /// `Unknown`; this is distinct from proving that no credential exists.
+    fn source<'a>(
+        &'a self,
+        _scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<CredentialSource, LlmError>> {
+        Box::pin(async { Ok(CredentialSource::Unknown) })
+    }
+
     /// Load credential material for a scope.
     fn load<'a>(
         &'a self,
         scope: &'a CredentialScope,
     ) -> BoxFuture<'a, Result<Credential, LlmError>>;
+
+    /// Read independent first-party OAuth and cached/static API-key sources.
+    /// No helper execution, token exchange or expiry-driven refresh is allowed.
+    fn anthropic_auth_snapshot<'a>(
+        &'a self,
+        _scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<AnthropicAuthSnapshot, LlmError>> {
+        Box::pin(async { Ok(AnthropicAuthSnapshot::default()) })
+    }
+
+    /// Refresh rejected credential material when this source supports renewal.
+    /// `None` means this source has no refresh capability.
+    fn refresh<'a>(
+        &'a self,
+        _scope: &'a CredentialScope,
+        _rejected: &'a Credential,
+    ) -> BoxFuture<'a, Result<Option<Credential>, LlmError>> {
+        Box::pin(async { Ok(None) })
+    }
 }
 
 /// Credential provider backed by one static credential.
@@ -126,6 +212,25 @@ impl StaticCredentialProvider {
 }
 
 impl CredentialProvider for StaticCredentialProvider {
+    fn source<'a>(
+        &'a self,
+        _scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<CredentialSource, LlmError>> {
+        Box::pin(async { Ok(CredentialSource::Configured) })
+    }
+
+    fn anthropic_auth_snapshot<'a>(
+        &'a self,
+        scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<AnthropicAuthSnapshot, LlmError>> {
+        Box::pin(async move {
+            Ok(if scope.provider_id == ProviderId::AnthropicFirstParty {
+                AnthropicAuthSnapshot::from_credential(scope.clone(), self.credential.clone())
+            } else {
+                AnthropicAuthSnapshot::default()
+            })
+        })
+    }
     fn load<'a>(
         &'a self,
         _scope: &'a CredentialScope,
@@ -152,6 +257,41 @@ impl EnvCredentialProvider {
 }
 
 impl CredentialProvider for EnvCredentialProvider {
+    fn source<'a>(
+        &'a self,
+        _scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<CredentialSource, LlmError>> {
+        Box::pin(async move {
+            Ok(if std::env::var(&self.variable_name).is_ok() {
+                CredentialSource::Environment {
+                    variable: self.variable_name.clone(),
+                }
+            } else {
+                CredentialSource::None
+            })
+        })
+    }
+
+    fn anthropic_auth_snapshot<'a>(
+        &'a self,
+        scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<AnthropicAuthSnapshot, LlmError>> {
+        Box::pin(async move {
+            Ok(if scope.provider_id == ProviderId::AnthropicFirstParty {
+                std::env::var(&self.variable_name).ok().map_or_else(
+                    AnthropicAuthSnapshot::default,
+                    |key| {
+                        AnthropicAuthSnapshot::from_credential(
+                            scope.clone(),
+                            Credential::ApiKey(key),
+                        )
+                    },
+                )
+            } else {
+                AnthropicAuthSnapshot::default()
+            })
+        })
+    }
     fn load<'a>(
         &'a self,
         _scope: &'a CredentialScope,
@@ -219,6 +359,30 @@ impl fmt::Debug for CopilotExchangeCredentialProvider {
 }
 
 impl CredentialProvider for CopilotExchangeCredentialProvider {
+    fn source<'a>(
+        &'a self,
+        scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<CredentialSource, LlmError>> {
+        self.inner.source(scope)
+    }
+
+    fn anthropic_auth_snapshot<'a>(
+        &'a self,
+        scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<AnthropicAuthSnapshot, LlmError>> {
+        self.inner.anthropic_auth_snapshot(scope)
+    }
+    fn refresh<'a>(
+        &'a self,
+        scope: &'a CredentialScope,
+        rejected: &'a Credential,
+    ) -> BoxFuture<'a, Result<Option<Credential>, LlmError>> {
+        if scope.credential_id.as_deref() == Some(self.credential_id.as_str()) {
+            Box::pin(async { Ok(None) })
+        } else {
+            self.inner.refresh(scope, rejected)
+        }
+    }
     fn load<'a>(
         &'a self,
         scope: &'a CredentialScope,

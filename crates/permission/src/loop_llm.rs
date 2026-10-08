@@ -195,10 +195,108 @@ pub struct Reply {
 pub enum QueryError {
     /// The classifier could not be reached: HTTP error, timeout, no session.
     Unavailable(String),
+    /// Structured provider failure retained for classifier-only report notes.
+    UnavailableDetails {
+        /// Safe provider diagnostic for ordinary tool permission copy.
+        message: String,
+        /// Actual provider status when the transport retained one.
+        http_status: Option<u16>,
+        /// Typed transport failure code, without parsing the diagnostic text.
+        error_kind: Option<String>,
+    },
     /// The request exceeded the classifier model's context window
     /// (`Yn.transcriptTooLong`). Retrying is futile until the conversation is
     /// shorter.
     TranscriptTooLong,
+}
+
+/// Why a real classifier request failed to produce a verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClassifierFailure {
+    /// A safety safeguard refused classification.
+    Refused,
+    /// A physical query failed, preserving its provider metadata.
+    Unavailable {
+        http_status: Option<u16>,
+        error_kind: Option<String>,
+    },
+    /// The child's transcript exceeds the selected model's context window.
+    TranscriptTooLong,
+    /// The final reply did not contain a usable classifier verdict.
+    Unparseable {
+        /// The stage whose final reply could not be parsed.
+        stage: &'static str,
+        /// Actual provider stop reason, kept separately from rendered copy.
+        stop_reason: String,
+    },
+}
+
+/// Classifier output before ordinary permission handling lowers failure kinds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetailedClassification {
+    /// Selected classifier model.
+    pub model: String,
+    /// Existing tool-permission projection.
+    pub verdict: AutoModeClassifierVerdict,
+    /// Typed failure information for classifier-only report handling.
+    pub failure: Option<ClassifierFailure>,
+}
+
+fn classified(
+    transport: &dyn Transport,
+    verdict: AutoModeClassifierVerdict,
+    failure: Option<ClassifierFailure>,
+) -> DetailedClassification {
+    DetailedClassification {
+        model: transport.model().to_string(),
+        verdict,
+        failure,
+    }
+}
+
+fn query_failed(
+    transport: &dyn Transport,
+    tool_name: &str,
+    error: QueryError,
+) -> DetailedClassification {
+    match error {
+        QueryError::TranscriptTooLong => classified(
+            transport,
+            AutoModeClassifierVerdict::TranscriptTooLong,
+            Some(ClassifierFailure::TranscriptTooLong),
+        ),
+        QueryError::Unavailable(message) => classified(
+            transport,
+            unreachable_classifier(tool_name, transport.model(), &message),
+            Some(ClassifierFailure::Unavailable {
+                http_status: None,
+                error_kind: None,
+            }),
+        ),
+        QueryError::UnavailableDetails {
+            message: _,
+            http_status,
+            error_kind,
+        } => {
+            let detail = match error_kind.as_deref() {
+                Some(
+                    "wall_clock_timeout" | "connection_timeout" | "server_call_unavailable_timeout",
+                ) => " (timed out)",
+                _ => "",
+            };
+            classified(
+                transport,
+                AutoModeClassifierVerdict::NoVerdict {
+                    reason: UNAVAILABLE_REASON.into(),
+                    message: unavailable_message(tool_name, transport.model(), detail),
+                },
+                Some(ClassifierFailure::Unavailable {
+                    http_status,
+                    error_kind,
+                }),
+            )
+        }
+    }
 }
 
 /// Injectable physical query boundary for production and deterministic tests.
@@ -262,7 +360,11 @@ async fn stage(transport: &dyn Transport, request: Query) -> Result<Reply, Query
         Ok(reply)
     })
     .await
-    .map_err(|_| QueryError::Unavailable("classifier timed out".to_string()))?
+    .map_err(|_| QueryError::UnavailableDetails {
+        message: "classifier timed out".to_string(),
+        http_status: None,
+        error_kind: Some("wall_clock_timeout".to_string()),
+    })?
 }
 
 /// LVo's default `both` arm: fast allow returns; all other results get review.
@@ -274,6 +376,17 @@ pub async fn classify(
     tool_name: &str,
     transcript_blocks: Vec<String>,
 ) -> AutoModeClassifierVerdict {
+    classify_detailed(transport, tool_name, transcript_blocks)
+        .await
+        .verdict
+}
+
+/// Run the same two-stage model classifier while retaining typed failures.
+pub async fn classify_detailed(
+    transport: &dyn Transport,
+    tool_name: &str,
+    transcript_blocks: Vec<String>,
+) -> DetailedClassification {
     let mut fast = transcript_blocks.clone();
     fast.push(FAST_SUFFIX.into());
     let fast = stage(
@@ -290,16 +403,17 @@ pub async fn classify(
     .await;
     let fast = match fast {
         Ok(reply) => reply,
-        Err(QueryError::TranscriptTooLong) => return AutoModeClassifierVerdict::TranscriptTooLong,
-        Err(QueryError::Unavailable(error)) => {
-            return unreachable_classifier(tool_name, transport.model(), &error)
-        }
+        Err(error) => return query_failed(transport, tool_name, error),
     };
     if parse_block(&fast.text) == Some(false) {
-        return AutoModeClassifierVerdict::Allow {
-            score: 1.0,
-            reason: "Allowed by fast classifier".into(),
-        };
+        return classified(
+            transport,
+            AutoModeClassifierVerdict::Allow {
+                score: 1.0,
+                reason: "Allowed by fast classifier".into(),
+            },
+            None,
+        );
     }
     let mut thinking = transcript_blocks;
     thinking.push(THINKING_SUFFIX.into());
@@ -317,12 +431,9 @@ pub async fn classify(
     .await
     {
         Ok(reply) => reply,
-        Err(QueryError::TranscriptTooLong) => return AutoModeClassifierVerdict::TranscriptTooLong,
-        Err(QueryError::Unavailable(error)) => {
-            return unreachable_classifier(tool_name, transport.model(), &error)
-        }
+        Err(error) => return query_failed(transport, tool_name, error),
     };
-    match parse_block(&reply.text) {
+    let verdict = match parse_block(&reply.text) {
         Some(false) => AutoModeClassifierVerdict::Allow {
             score: 1.0,
             reason: reason(&reply.text).unwrap_or_else(|| "No reason provided".into()),
@@ -336,13 +447,29 @@ pub async fn classify(
         // A refusal with no verdict behind it is `refusedBySafeguard`: it
         // reacts to earlier conversation content, not to this action, so it is
         // exempt from the denial counter.
-        None if reply.stop_reason == "refusal" => AutoModeClassifierVerdict::NoVerdict {
-            reason: REFUSED.into(),
-            message: refused_message(REFUSED),
-        },
+        None if reply.stop_reason == "refusal" => {
+            return classified(
+                transport,
+                AutoModeClassifierVerdict::NoVerdict {
+                    reason: REFUSED.into(),
+                    message: refused_message(REFUSED),
+                },
+                Some(ClassifierFailure::Refused),
+            )
+        }
         // Everything else is a parse failure, which upstream blocks and counts.
-        None => denied(UNAVAILABLE.into()),
-    }
+        None => {
+            return classified(
+                transport,
+                denied(UNAVAILABLE.into()),
+                Some(ClassifierFailure::Unparseable {
+                    stage: "stage 2",
+                    stop_reason: reply.stop_reason,
+                }),
+            )
+        }
+    };
+    classified(transport, verdict, None)
 }
 
 fn denied(reason: String) -> AutoModeClassifierVerdict {
@@ -457,6 +584,71 @@ mod tests {
             requests: Mutex::new(vec![]),
             error: Mutex::new(None),
         }
+    }
+
+    #[tokio::test]
+    async fn report_parser_failure_retains_its_failure_kind_before_deny_projection() {
+        let transport = mock(&["", ""]);
+        let result =
+            classify_detailed(&transport, "SubagentHandback", vec!["actual action".into()]).await;
+        assert!(matches!(
+            result.verdict,
+            AutoModeClassifierVerdict::Deny { .. }
+        ));
+        assert_eq!(
+            result.failure,
+            Some(ClassifierFailure::Unparseable {
+                stage: "stage 2",
+                stop_reason: "end_turn".into(),
+            })
+        );
+        let review = crate::handback_review::report_review(result);
+        assert!(
+            matches!(review, Some(lingxi_core::host::handback::ReportReview::Unavailable {
+            failure_kind: Some(kind), ..
+        }) if kind == "unparseable")
+        );
+        assert_eq!(transport.requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn report_refusal_is_typed_without_matching_rendered_reason() {
+        let transport = Mock {
+            replies: Mutex::new(
+                vec![
+                    Reply {
+                        text: String::new(),
+                        stop_reason: "refusal".into(),
+                    };
+                    2
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            requests: Mutex::new(Vec::new()),
+            error: Mutex::new(None),
+        };
+        let result =
+            classify_detailed(&transport, "SubagentHandback", vec!["actual action".into()]).await;
+        assert_eq!(result.failure, Some(ClassifierFailure::Refused));
+        assert_eq!(
+            crate::handback_review::report_review(result),
+            Some(lingxi_core::host::handback::ReportReview::Refused)
+        );
+    }
+
+    #[tokio::test]
+    async fn report_context_limit_is_an_availability_note() {
+        let transport = mock(&[]);
+        *transport.error.lock().unwrap() = Some(QueryError::TranscriptTooLong);
+        let result = classify_detailed(&transport, "SubagentHandback", vec![]).await;
+        assert_eq!(result.failure, Some(ClassifierFailure::TranscriptTooLong));
+        let review = crate::handback_review::report_review(result);
+        assert!(
+            matches!(review, Some(lingxi_core::host::handback::ReportReview::Unavailable {
+            failure_kind: Some(kind), ..
+        }) if kind == "transcript_too_long")
+        );
     }
     #[tokio::test]
     async fn fast_allow_makes_one_real_query() {

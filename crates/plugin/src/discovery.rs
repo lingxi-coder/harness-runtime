@@ -3173,7 +3173,7 @@ async fn detect_components(
     // `readdir()` calls with no subdirectory recursion.
     let default_themes = glob_ext_flat(&plugin_dir.join("themes"), "json").await;
     let default_workflows = glob_ext_flat(&plugin_dir.join("workflows"), "js").await;
-    let default_hooks = load_standard_hooks(plugin_dir).await;
+    let standard_hooks = load_standard_hooks(plugin_dir).await;
     let default_mcp_servers = if skip_mcp_discovery {
         HashMap::new()
     } else {
@@ -3216,7 +3216,7 @@ async fn detect_components(
         Some(paths) => resolve_ext_declared_paths(plugin_dir, paths.clone(), "js").await,
         None => default_workflows,
     };
-    let mut hooks = default_hooks;
+    let mut hooks = standard_hooks.hooks;
     hooks.extend(load_declared_hooks(plugin_dir, parsed.hooks.clone()).await);
     let mut mcp_servers = default_mcp_servers;
     if !skip_mcp_discovery {
@@ -3255,6 +3255,7 @@ async fn detect_components(
         binaries,
         monitors,
         hooks,
+        mod_module: standard_hooks.mod_module,
         hooks_declared,
         mcp_servers,
         mcp_servers_declared,
@@ -4078,26 +4079,28 @@ struct RawHooksFile {
 /// [`HookSource::Plugin`] — see [`RawHooksFile`] for the wrapper shape and
 /// the `hooks`/`modules` constraints enforced here.
 ///
-/// A `modules` entry is recognized and validated (the 1-entry cap; the
-/// "hooks or modules, or both" requirement) but NOT executed: running the
-/// JS module it names needs a JS-module-execution subsystem this crate does
-/// not have, so its declared hooks are simply never registered (a warning
-/// names the module path so this is not a silent gap for whoever authored
-/// the plugin).
-async fn load_standard_hooks(plugin_dir: &Path) -> Vec<hooks::HookDefinition> {
+#[derive(Default)]
+struct StandardHooksComponents {
+    hooks: Vec<hooks::HookDefinition>,
+    mod_module: Option<PathBuf>,
+}
+
+/// Resolve both the declarative hooks and the programmatic module. A bad
+/// wrapper rejects both halves, matching Claude Code 2.1.287.
+async fn load_standard_hooks(plugin_dir: &Path) -> StandardHooksComponents {
     let path = plugin_dir.join("hooks").join("hooks.json");
     let Some(path) = canonical_regular_path_under(plugin_dir, &path) else {
-        return Vec::new();
+        return StandardHooksComponents::default();
     };
     let Ok(raw) = tokio::fs::read_to_string(&path).await else {
-        return Vec::new();
+        return StandardHooksComponents::default();
     };
     let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw.as_str());
     let wrapper: RawHooksFile = match serde_json::from_str(raw) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "skipping malformed hooks.json");
-            return Vec::new();
+            return StandardHooksComponents::default();
         }
     };
     let module_count = wrapper.modules.as_ref().map_or(0, Vec::len);
@@ -4107,7 +4110,7 @@ async fn load_standard_hooks(plugin_dir: &Path) -> Vec<hooks::HookDefinition> {
             "skipping hooks.json: `modules` names one hooks module per plugin; \
              a second entry is refused"
         );
-        return Vec::new();
+        return StandardHooksComponents::default();
     }
     if wrapper.hooks.is_none() && module_count == 0 {
         tracing::warn!(
@@ -4115,21 +4118,40 @@ async fn load_standard_hooks(plugin_dir: &Path) -> Vec<hooks::HookDefinition> {
             "skipping hooks.json: must have `hooks` (the hook matchers) or `modules` \
              (hooks modules), or both"
         );
-        return Vec::new();
+        return StandardHooksComponents::default();
     }
-    if let Some(module_path) = wrapper.modules.as_ref().and_then(|m| m.first()) {
-        tracing::warn!(
-            path = %path.display(),
-            module = %module_path,
-            "hooks.json declares a `modules` hooks module, but this engine cannot execute \
-             hooks modules yet — its programmatically-registered hooks will not run"
-        );
+    let mod_module = wrapper
+        .modules
+        .as_ref()
+        .and_then(|modules| modules.first())
+        .and_then(|raw| {
+            let relative = Path::new(raw);
+            if relative.is_absolute() {
+                return None;
+            }
+            let candidate = path.parent()?.join(relative);
+            let resolved = canonical_regular_path_under(plugin_dir, &candidate)?;
+            let resolved = std::fs::canonicalize(resolved).ok()?;
+            matches!(
+                resolved.extension().and_then(|ext| ext.to_str()),
+                Some("js" | "mjs" | "cjs" | "jsx" | "ts" | "mts" | "cts" | "tsx")
+            )
+            .then_some(resolved)
+        });
+    if wrapper
+        .modules
+        .as_ref()
+        .is_some_and(|modules| !modules.is_empty())
+        && mod_module.is_none()
+    {
+        tracing::warn!(path = %path.display(), "skipping invalid hooks module path");
+        return StandardHooksComponents::default();
     }
-    let Some(inner) = wrapper.hooks else {
-        return Vec::new();
-    };
-    // The file wraps the settings-shaped hooks under a `hooks` key.
-    parse_hooks_value(&serde_json::json!({ "hooks": inner }), &path)
+    let hooks = wrapper.hooks.map_or_else(Vec::new, |inner| {
+        // The file wraps the settings-shaped hooks under a `hooks` key.
+        parse_hooks_value(&serde_json::json!({ "hooks": inner }), &path)
+    });
+    StandardHooksComponents { hooks, mod_module }
 }
 
 fn parse_hooks_value(value: &Value, path: &Path) -> Vec<hooks::HookDefinition> {
@@ -5912,7 +5934,7 @@ mod tests {
         )
         .unwrap();
 
-        let hooks = load_standard_hooks(plugin).await;
+        let hooks = load_standard_hooks(plugin).await.hooks;
         assert_eq!(
             hooks.len(),
             1,
@@ -6371,7 +6393,7 @@ mod tests {
     // ---------- §14 row 2: hooks.json `modules` ----------
 
     #[tokio::test]
-    async fn hooks_json_with_only_modules_and_no_hooks_is_accepted_but_registers_nothing() {
+    async fn hooks_json_with_only_modules_and_no_hooks_resolves_module() {
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
         fs::create_dir_all(plugin.join("hooks")).unwrap();
@@ -6380,12 +6402,58 @@ mod tests {
             r#"{"modules": ["./register.js"]}"#,
         )
         .unwrap();
-        let hooks = load_standard_hooks(plugin).await;
-        assert!(
-            hooks.is_empty(),
-            "a modules-only hooks.json has no declarative hooks to register (the module \
-             itself is not executed by this engine), got {hooks:?}"
+        fs::write(
+            plugin.join("hooks/register.js"),
+            "export function register(on) {}",
+        )
+        .unwrap();
+        let components = load_standard_hooks(plugin).await;
+        assert!(components.hooks.is_empty());
+        assert_eq!(
+            components.mod_module,
+            Some(fs::canonicalize(plugin.join("hooks/register.js")).unwrap())
         );
+    }
+
+    #[tokio::test]
+    async fn hooks_module_paths_follow_287_relative_and_extension_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plugin");
+        fs::create_dir_all(plugin.join("hooks")).unwrap();
+        fs::write(
+            plugin.join("register.ts"),
+            "export function register(on) {}",
+        )
+        .unwrap();
+        fs::write(
+            plugin.join("hooks/hooks.json"),
+            r#"{"modules":["../register.ts"]}"#,
+        )
+        .unwrap();
+        let found = load_standard_hooks(&plugin).await;
+        assert_eq!(
+            found.mod_module,
+            Some(fs::canonicalize(plugin.join("register.ts")).unwrap())
+        );
+
+        fs::write(
+            plugin.join("hooks/hooks.json"),
+            r#"{"modules":["../../outside.js"]}"#,
+        )
+        .unwrap();
+        assert!(load_standard_hooks(&plugin).await.mod_module.is_none());
+
+        fs::write(
+            plugin.join("hooks/register.txt"),
+            "export function register(on) {}",
+        )
+        .unwrap();
+        fs::write(
+            plugin.join("hooks/hooks.json"),
+            r#"{"modules":["./register.txt"]}"#,
+        )
+        .unwrap();
+        assert!(load_standard_hooks(&plugin).await.mod_module.is_none());
     }
 
     #[tokio::test]
@@ -6399,7 +6467,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            load_standard_hooks(plugin).await.is_empty(),
+            load_standard_hooks(plugin).await.hooks.is_empty(),
             "oracle: \"a second entry is refused\" — a 2-entry `modules` array must not load"
         );
     }
@@ -6415,7 +6483,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            load_standard_hooks(plugin).await.is_empty(),
+            load_standard_hooks(plugin).await.hooks.is_empty(),
             "oracle: hooks.json must have `hooks` or `modules`, or both"
         );
     }
@@ -6434,7 +6502,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            load_standard_hooks(plugin).await.is_empty(),
+            load_standard_hooks(plugin).await.hooks.is_empty(),
             "a 2-entry `modules` array must refuse the WHOLE hooks.json, even a valid \
              declarative `hooks` half — an unvalidated port would keep parsing `hooks` \
              and ignore the modules-count violation entirely"
@@ -6454,7 +6522,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let hooks = load_standard_hooks(plugin).await;
+        let hooks = load_standard_hooks(plugin).await.hooks;
         assert_eq!(
             hooks.len(),
             1,

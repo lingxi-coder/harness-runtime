@@ -11,6 +11,9 @@ mod invoked_skill_lifecycle_tests;
 #[path = "conversation/tests/session_memory_background_tests.rs"]
 mod session_memory_background_tests;
 
+#[path = "conversation/tests/mod_model_fork_tests.rs"]
+mod mod_model_fork_tests;
+
 #[cfg(test)]
 #[path = "conversation/tests/prompt_snapshot_tests.rs"]
 mod prompt_snapshot_tests;
@@ -72,12 +75,27 @@ mod turn_recovery_tests;
 mod output_style_reminder_tests;
 
 // ============================================================================
-// R-P1c/R-P1d: the leading `additionalContext` (`# claudeMd` / `# userEmail` /
+// R-P1c/R-P1d: the leading `additionalContext` (`# instructions` / `# userEmail` /
 // `# currentDate`) meta message — byte-lock against claude-code `A6n`.
 // ============================================================================
 #[cfg(test)]
 #[path = "conversation/tests/additional_context_tests.rs"]
 mod additional_context_tests;
+
+#[path = "conversation/tests/turn_complete_queue_tests.rs"]
+mod turn_complete_queue_tests;
+
+#[path = "conversation/tests/session_measure_tests.rs"]
+mod session_measure_tests;
+
+#[path = "conversation/tests/session_usage_tests.rs"]
+mod session_usage_tests;
+
+#[path = "conversation/tests/session_append_tests.rs"]
+mod session_append_tests;
+
+#[path = "conversation/tests/mod_session_receive_tests.rs"]
+mod mod_session_receive_tests;
 
 // ============================================================================
 // SKILLEXEC.3 (model scope): a tool's `context_modifier` switches the session's
@@ -127,12 +145,8 @@ mod skill_listing_reminder_tests;
 // ── `agent_listing_delta`: per-turn, transient agent catalog reminder ─────────
 //
 // Proves [`ConversationOrchestrator::agent_listing_reminder_message`]:
-// - GATE OFF (default): always `None`, and the inline `AgentTool` prompt is
-//   unchanged (asserted in `tool-agent` — here we just confirm the orchestrator
-//   side stays silent).
-// - GATE ON (`LINGXI_AGENT_LIST_IN_MESSAGES=1`, guarded by a process-wide
-//   lock): turn-0 full listing + "Available agent types for the Agent tool:"
-//   header; a later turn with no new types ⇒ `None`; a newly-added type ⇒ a
+// - Turn-0 full listing + "Available agent types for the Agent tool:"
+//   header; a later turn with no new types => `None`; a newly-added type => a
 //   delta with the "New agent types are now available…" header and ONLY the new
 //   line. Also gated on the `Agent` tool's presence + a wired catalog.
 #[cfg(test)]
@@ -144,7 +158,7 @@ mod agent_listing_reminder_tests;
 // Mirrors the `skill_listing_reminder_tests` template: a `StaticMemoryProvider`
 // fixture supplies conditional (`paths:`-gated) `MemoryFile`s, the touched-file
 // set is seeded directly into the shared `read_state_map`, and
-// `conditional_rules_reminder_message` is asserted to inject the matching rule
+// `nested_memory_reminder_messages` is asserted to inject the matching rule
 // once (with sent-tracking dedup) and skip non-matching / already-sent rules.
 #[cfg(test)]
 #[path = "conversation/tests/new_diagnostics_reminder_tests.rs"]
@@ -319,3 +333,6 @@ mod scheduled_turn_tests;
 
 #[path = "conversation/tests/turn_admission_cancel_tests.rs"]
 mod turn_admission_cancel_tests;
+
+#[path = "conversation/tests/nested_memory_287_lifecycle_tests.rs"]
+mod nested_memory_287_lifecycle_tests;

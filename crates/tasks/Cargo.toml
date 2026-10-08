@@ -27,10 +27,11 @@ task-store = { path = "../task-store" }
 tracing.workspace = true
 
 [dev-dependencies]
+tool-api = { path = "../tool-api" }
 test-harness = { path = "../test-harness" }
 llm-runtime = { path = "../llm-runtime" }
 tempfile = "3.13"
-tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread", "test-util"] }
 # DEV-only: enables `scope::tests::app_id_grammar_agrees_with_local_apps_ids`,
 # a real cross-crate agreement test against `local_apps::ids::is_valid_app_id`
 # (the grammar `scope.rs` otherwise mirrors from a copied corpus -- see that

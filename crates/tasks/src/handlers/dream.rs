@@ -297,6 +297,15 @@ impl Task for DreamHandler {
         //    `context_paths` has no source on the variant, so an empty vec is
         //    passed.
         let request = SubagentSpawnRequest {
+            stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped,
+            agent_spawn_provenance: Default::default(),
+            handback_opt_in: false,
+            parent_permission_mode: None,
+            handback_enabled: None,
+            handback_ends_turn_enabled: None,
+            restored_handback_state: None,
+            restored_handback_history: Vec::new(),
+            restore_handback_start: None,
             teammate_color: None,
             subagent_type: DREAM_SUBAGENT_TYPE.to_string(),
             prompt: build_consolidation_prompt(&prompt),
@@ -321,6 +330,7 @@ impl Task for DreamHandler {
             worktree: None,
             // Non-fork synchronous spawn.
             fork_context_messages: None,
+            instruction_context: None,
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
@@ -334,6 +344,7 @@ impl Task for DreamHandler {
             origin_session_id: None,
             // Top-level spawn ⇒ the spawner's own default model anchors resolution.
             parent_model_override: None,
+            parent_model_profile_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
             forked_skill_effort: None,
@@ -652,6 +663,7 @@ mod tests {
             match canned {
                 Some(CannedResult::Completed(content, total_tokens)) => {
                     Ok(SubagentResult::Completed {
+                        handback: None,
                         agent_id: lingxi_core::types::AgentId::new(),
                         content,
                         usage: SubagentUsage {

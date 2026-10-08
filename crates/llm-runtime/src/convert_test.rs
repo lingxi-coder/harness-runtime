@@ -15,6 +15,7 @@ mod tests {
             id: MessageId::new(),
             content: vec![ProtoBlock::Text {
                 text: "hello".to_string(),
+                citations: None,
             }],
             is_meta: false,
             is_compact_summary: false,
@@ -25,7 +26,7 @@ mod tests {
         assert_eq!(result[0].role, "user");
         assert!(matches!(
             &result[0].content[0],
-            LlmBlock::Text { text, cache_control: None } if text == "hello"
+            LlmBlock::Text { text, cache_control: None, ..} if text == "hello"
         ));
     }
 
@@ -81,7 +82,7 @@ mod tests {
             content: vec![ProtoBlock::ToolResult {
                 tool_use_id: ToolUseId::from("toolu_01ABCDEF"),
                 content: "file content".to_string(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
@@ -105,7 +106,7 @@ mod tests {
             content: vec![ProtoBlock::ToolResult {
                 tool_use_id,
                 content: "file content".to_string(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
@@ -116,7 +117,7 @@ mod tests {
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
             &result[0].content[0],
-            LlmBlock::ToolResult { tool_call_id, output, is_error: false, cache_control: None, cache_reference: None }
+            LlmBlock::ToolResult { tool_call_id, output, is_error: Some(false), cache_control: None, cache_reference: None }
                 if tool_call_id == &tool_call_id_str && output == &Value::String("file content".to_string())
         ));
     }
@@ -128,7 +129,7 @@ mod tests {
             content: vec![ProtoBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
                 content: "boom".to_string(),
-                is_error: true,
+                is_error: Some(true),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
@@ -139,7 +140,10 @@ mod tests {
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
             &result[0].content[0],
-            LlmBlock::ToolResult { is_error: true, .. }
+            LlmBlock::ToolResult {
+                is_error: Some(true),
+                ..
+            }
         ));
     }
 
@@ -238,6 +242,7 @@ mod tests {
         let LlmBlock::Text {
             text,
             cache_control,
+            ..
         } = &result[0].content[0]
         else {
             panic!("media analysis should become text");
@@ -324,6 +329,7 @@ mod tests {
             content: vec![
                 ProtoBlock::Text {
                     text: "sure".to_string(),
+                    citations: None,
                 },
                 ProtoBlock::ToolUse {
                     id,
@@ -382,6 +388,7 @@ mod tests {
             content: "you are a helpful assistant".to_string(),
             subtype: None,
             compact_metadata: None,
+            model_fallback: None,
             refusal_fallback: None,
         };
         let err = to_llm_messages(vec![msg]).unwrap_err();
@@ -394,6 +401,7 @@ mod tests {
             id: MessageId::new(),
             content: vec![ProtoBlock::Text {
                 text: "hi".to_string(),
+                citations: None,
             }],
             is_meta: false,
             is_compact_summary: false,
@@ -403,6 +411,7 @@ mod tests {
             id: MessageId::new(),
             content: vec![ProtoBlock::Text {
                 text: "hello".to_string(),
+                citations: None,
             }],
             stop_reason: Some("end_turn".to_string()),
         };
@@ -499,6 +508,7 @@ mod tests {
             id,
             content: vec![ProtoBlock::Text {
                 text: text.to_string(),
+                citations: None,
             }],
             is_meta: false,
             is_compact_summary: false,
@@ -511,6 +521,7 @@ mod tests {
             id: MessageId::new(),
             content: vec![ProtoBlock::Text {
                 text: text.to_string(),
+                citations: None,
             }],
             stop_reason: None,
         }
@@ -520,7 +531,7 @@ mod tests {
         blocks
             .iter()
             .map(|b| match b {
-                ProtoBlock::Text { text } => text.as_str(),
+                ProtoBlock::Text { text, .. } => text.as_str(),
                 _ => panic!("expected text block"),
             })
             .collect()
@@ -563,8 +574,9 @@ mod tests {
             ConversationMessage::System {
                 id: MessageId::new(),
                 content: "Conversation compacted".to_string(),
-                subtype: None,
+                subtype: Some("compact_boundary".to_string()),
                 compact_metadata: None,
+                model_fallback: None,
                 refusal_fallback: None,
             },
             user(post_boundary_id, "summary"),
@@ -576,6 +588,41 @@ mod tests {
                 assert_eq!(text_of(content), vec!["summary"]);
             }
             other => panic!("expected post-boundary User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ordinary_system_compaction_text_does_not_truncate_model_history() {
+        for notice in [
+            "Conversation compacted",
+            "Conversation compacted: ordinary system notice",
+        ] {
+            let before = MessageId::new();
+            let after = MessageId::new();
+            let normalized = normalize_messages_for_api(vec![
+                user(before, "before notice"),
+                assistant("answer before notice"),
+                ConversationMessage::System {
+                    id: MessageId::new(),
+                    content: notice.to_string(),
+                    subtype: None,
+                    compact_metadata: None,
+                    model_fallback: None,
+                    refusal_fallback: None,
+                },
+                user(after, "after notice"),
+            ]);
+            assert_eq!(normalized.len(), 3, "ordinary text is not a boundary");
+            assert_eq!(normalized[0].id(), before);
+            assert_eq!(normalized[2].id(), after);
+            let wire = serde_json::to_string(&to_llm_messages(normalized).unwrap()).unwrap();
+            assert!(wire.contains("before notice"));
+            assert!(wire.contains("answer before notice"));
+            assert!(wire.contains("after notice"));
+            assert!(
+                !wire.contains(notice),
+                "system notices remain transcript-only"
+            );
         }
     }
 
@@ -612,16 +659,18 @@ mod tests {
             ConversationMessage::System {
                 id: MessageId::new(),
                 content: "Conversation compacted".to_string(),
-                subtype: None,
+                subtype: Some("compact_boundary".to_string()),
                 compact_metadata: None,
+                model_fallback: None,
                 refusal_fallback: None,
             },
             user(MessageId::new(), "first summary"),
             ConversationMessage::System {
                 id: MessageId::new(),
                 content: "Conversation compacted".to_string(),
-                subtype: None,
+                subtype: Some("compact_boundary".to_string()),
                 compact_metadata: None,
+                model_fallback: None,
                 refusal_fallback: None,
             },
             user(MessageId::new(), "latest summary"),
@@ -705,7 +754,7 @@ mod tests {
         ProtoBlock::ToolResult {
             tool_use_id: ToolUseId::new(),
             content: content.to_string(),
-            is_error: false,
+            is_error: Some(false),
             provider_tool_use_id: None,
             content_blocks: None,
         }
@@ -754,6 +803,7 @@ mod tests {
                 id,
                 vec![ProtoBlock::Text {
                     text: "hi".to_string(),
+                    citations: None,
                 }],
             ),
             user_blocks(
@@ -762,6 +812,7 @@ mod tests {
                     tool_result("r"),
                     ProtoBlock::Text {
                         text: "after".to_string(),
+                        citations: None,
                     },
                 ],
             ),
@@ -807,6 +858,7 @@ mod tests {
                     tool_result("tr1"),
                     ProtoBlock::Text {
                         text: "X".to_string(),
+                        citations: None,
                     },
                 ],
             ),
@@ -816,6 +868,7 @@ mod tests {
                     tool_result("tr2"),
                     ProtoBlock::Text {
                         text: "Y".to_string(),
+                        citations: None,
                     },
                 ],
             ),
@@ -853,6 +906,7 @@ mod tests {
                 id,
                 vec![ProtoBlock::Text {
                     text: "a".to_string(),
+                    citations: None,
                 }],
             ),
             user_blocks(MessageId::new(), vec![tool_result("r")]),
@@ -882,7 +936,7 @@ mod tests {
         ProtoBlock::ToolResult {
             tool_use_id: ToolUseId::from(id),
             content: "ok".into(),
-            is_error: false,
+            is_error: Some(false),
             provider_tool_use_id: None,
             content_blocks: None,
         }
@@ -908,7 +962,10 @@ mod tests {
     #[test]
     fn pairing_clean_turn_is_noop() {
         let out = ensure_tool_result_pairing(vec![
-            usr_blocks(vec![ProtoBlock::Text { text: "go".into() }]),
+            usr_blocks(vec![ProtoBlock::Text {
+                text: "go".into(),
+                citations: None,
+            }]),
             asst_blocks(vec![tu("toolu_a")]),
             usr_blocks(vec![tr("toolu_a")]),
         ]);
@@ -927,6 +984,7 @@ mod tests {
             asst_blocks(vec![tu("toolu_x")]),
             usr_blocks(vec![ProtoBlock::Text {
                 text: "next".into(),
+                citations: None,
             }]),
         ]);
         let ConversationMessage::User { content, .. } = &out[1] else {
@@ -940,7 +998,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(tool_use_id.as_str(), "toolu_x");
-                assert!(*is_error);
+                assert!(is_error.unwrap_or(false));
                 assert_eq!(content, "[Tool result missing due to internal error]");
             }
             other => panic!("expected synthetic tool_result, got {other:?}"),
@@ -976,7 +1034,7 @@ mod tests {
         let ConversationMessage::User { content, .. } = &out[0] else {
             panic!("expected user");
         };
-        assert!(matches!(&content[0], ProtoBlock::Text { text }
+        assert!(matches!(&content[0], ProtoBlock::Text { text, ..}
             if text == "[Orphaned tool result removed due to conversation resume]"));
     }
 
@@ -990,7 +1048,10 @@ mod tests {
         let out = normalize_messages_for_api(vec![
             ConversationMessage::Assistant {
                 id: first,
-                content: vec![ProtoBlock::Text { text: "hi".into() }],
+                content: vec![ProtoBlock::Text {
+                    text: "hi".into(),
+                    citations: None,
+                }],
                 stop_reason: None,
             },
             asst_blocks(vec![tu("toolu_a")]),
@@ -1011,9 +1072,15 @@ mod tests {
     #[test]
     fn tool_result_user_separates_assistant_turns_no_merge() {
         let out = normalize_messages_for_api(vec![
-            asst_blocks(vec![ProtoBlock::Text { text: "t1".into() }]),
+            asst_blocks(vec![ProtoBlock::Text {
+                text: "t1".into(),
+                citations: None,
+            }]),
             usr_blocks(vec![tr("toolu_a")]),
-            asst_blocks(vec![ProtoBlock::Text { text: "t2".into() }]),
+            asst_blocks(vec![ProtoBlock::Text {
+                text: "t2".into(),
+                citations: None,
+            }]),
         ]);
         assert_eq!(out.len(), 3);
         assert!(matches!(out[0], ConversationMessage::Assistant { .. }));
@@ -1026,7 +1093,10 @@ mod tests {
     #[test]
     fn advisor_and_connector_stripped_redacted_and_server_kept() {
         let out = normalize_messages_for_api(vec![asst_blocks(vec![
-            ProtoBlock::Text { text: "x".into() },
+            ProtoBlock::Text {
+                text: "x".into(),
+                citations: None,
+            },
             ProtoBlock::RedactedThinking { data: "op".into() },
             ProtoBlock::ServerToolUse {
                 id: "s1".into(),
@@ -1056,7 +1126,7 @@ mod tests {
         usr_blocks(vec![ProtoBlock::ToolResult {
             tool_use_id: ToolUseId::from("toolu_search"),
             content: String::new(),
-            is_error: false,
+            is_error: Some(false),
             provider_tool_use_id: None,
             content_blocks: Some(
                 names
@@ -1121,12 +1191,48 @@ mod tests {
         );
         assert!(matches!(
             &content[1],
-            ProtoBlock::Text { text } if text == "Tool loaded."
+            ProtoBlock::Text { text, ..} if text == "Tool loaded."
         ));
     }
 
     #[test]
-    fn historical_tool_reference_aliases_validate_against_canonical_tools() {
+    fn current_tool_aliases_exclude_removed_agent_and_output_aliases() {
+        let oracle: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/tool_aliases_2_1_287.json"))
+                .unwrap();
+        assert_eq!(oracle["aliases"].as_object().unwrap().len(), 8);
+        let cases = oracle["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 19);
+        for case in cases {
+            let input = case["input"].as_str().unwrap();
+            // Preserve the native oracle; Task-to-Agent compatibility is excluded
+            // from the current product contract at this import boundary.
+            if input == "Task" {
+                continue;
+            }
+            let expected = case["expected"].as_str().unwrap();
+            let available = std::collections::HashSet::from([expected.to_owned()]);
+            let out = normalize_messages_for_api_with_tool_search(
+                vec![tool_reference_result(&[input])],
+                true,
+                Some(&available),
+            );
+            let ConversationMessage::User { content, .. } = &out[0] else {
+                panic!("expected user")
+            };
+            let ProtoBlock::ToolResult {
+                content_blocks: Some(blocks),
+                ..
+            } = &content[0]
+            else {
+                panic!("expected tool result")
+            };
+            assert_eq!(
+                blocks,
+                &[serde_json::json!({"type":"tool_reference", "tool_name":input})],
+                "native mapped {input} to {expected}"
+            );
+        }
         let available = std::collections::HashSet::from([
             "Agent".to_string(),
             "TaskStop".to_string(),
@@ -1153,6 +1259,65 @@ mod tests {
         else {
             panic!("expected structured tool result")
         };
-        assert_eq!(blocks.len(), 4, "legacy references must not be stripped");
+        assert_eq!(
+            blocks,
+            &[
+                serde_json::json!({"type":"tool_reference","tool_name":"KillShell"}),
+                serde_json::json!({"type":"tool_reference","tool_name":"Brief"}),
+            ],
+            "removed Task and BashOutputTool aliases must not authorize current references"
+        );
+    }
+
+    #[test]
+    fn request_sources_exclude_rows_before_compact_boundary() {
+        let discarded_id = MessageId::new();
+        let current_id = MessageId::new();
+        let messages = ConversationMessagesWithSources::new(vec![
+            user(discarded_id, "discarded before compaction"),
+            ConversationMessage::System {
+                id: MessageId::new(),
+                content: "Conversation compacted".to_string(),
+                subtype: Some("compact_boundary".to_string()),
+                compact_metadata: None,
+                model_fallback: None,
+                refusal_fallback: None,
+            },
+            user(current_id, "current summary"),
+        ]);
+        let normalized = normalize_messages_for_api_with_tool_search_and_sources(messages, true, None);
+        let paired = ensure_tool_result_pairing_with_sources(normalized);
+        let sources = paired.contributing_message_ids();
+        assert!(!sources.contains(&discarded_id));
+        assert!(sources.contains(&current_id));
+    }
+
+    #[test]
+    fn request_sources_follow_blocks_removed_after_user_merge() {
+        let discarded_id = MessageId::new();
+        let retained_id = MessageId::new();
+        let merged = normalize_messages_for_api_with_tool_search_and_sources(
+            ConversationMessagesWithSources::new(vec![
+                ConversationMessage::User {
+                    id: discarded_id,
+                    content: vec![tr("toolu_orphan")],
+                    is_meta: true,
+                    is_compact_summary: false,
+                    is_visible_in_transcript_only: false,
+                },
+                user(retained_id, "ordinary user content"),
+            ]),
+            true,
+            None,
+        );
+        let paired = ensure_tool_result_pairing_with_sources(merged);
+        let sources = paired.contributing_message_ids();
+        assert!(!sources.contains(&discarded_id));
+        assert!(sources.contains(&retained_id));
+        assert!(matches!(
+            &paired.messages[0],
+            ConversationMessage::User { content, .. }
+                if text_of(content).contains(&"ordinary user content")
+        ));
     }
 }

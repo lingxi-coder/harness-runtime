@@ -1,5 +1,8 @@
 //! LINGXI.md file reader. Skips any file that is not regular or exceeds
-//! [`MEMORY_FILE_BYTE_LIMIT`] (4 MiB on bytes), matching claude-code.
+//! [`MEMORY_FILE_BYTE_LIMIT`] (4 MiB on bytes), matching claude-code. The
+//! `agents-md` Mod reads its selected `AGENTS.md` instruction files through
+//! `fs.ancestors`; those files bypass the memory-file byte cap, while their
+//! imported files and ordinary LINGXI.md files keep it.
 //!
 //! Beyond the raw [`load_file`] reader this module also ports the
 //! claude-code `@import` / `@include` expansion and the per-file body
@@ -7,36 +10,17 @@
 //! orchestrator can splice referenced files into the memory block exactly
 //! the way the TS reference does. See [`expand_memory_file`].
 //!
-//! ⚠️ CORRECTION — the paragraph below was wrong, and wrong in the direction
-//! that stops someone reinstating a real behaviour. It claimed claude-code
-//! applies "no size check" and that any byte cap was `LingXi`-invented. The
-//! 2.1.220 BINARY says otherwise: `Eds` (@230805636) routes every memory file
-//! through `EG` (@229022173) —
-//! `let o=await e.stat(t); if(!o.isFile()||o.size>r) return n?.(o),null;` —
-//! with `r = ELu = 4194304` (4 MiB, @230811638, declared in the same run as
-//! the `gn_ = 40000` this crate already cites). A non-regular or oversized
-//! file is SKIPPED, logged as
-//! `[CLAUDE.md] skipping {path}: not a regular file or exceeds {N} byte limit`,
-//! and reported once as `file_skipped_special_or_oversize`.
+//! The hash-pinned 2.1.286 binary's `Hot` (@184390402) calls `l0`
+//! (@177773337) with `T7 = 4194304`. `l0` stats first, skips a non-regular
+//! file or `stat.size > T7`, then reads with `encoding: "utf8"`. Invalid UTF-8
+//! is replaced with U+FFFD; it does not make the file unreadable. The native
+//! backend path, `QDn` (@184389863), applies the same limit to `totalBytes`
+//! and decodes the returned byte view with `Buffer.toString("utf8")`.
 //!
-//! The old claim cited `claudemd.ts:424-437` — LEAKED TS, which this repo has
-//! repeatedly found stale against the shipped binary. Treat the binary as the
-//! oracle here.
-//!
-//! PORTED: [`load_file`] stats first and returns
-//! [`LoaderError::FileTooLarge`] for a non-regular file or one over the limit,
-//! which every caller already treats as "no memory file here" — the oracle's
-//! `null`. [`report_skipped_memory_file`] then carries the skip line and the
-//! one-shot report, matching how the oracle splits `EG` (stat only) from `Eds`
-//! (message + report).
-//!
-//! The report is `Ne("context_claude_md_load","file_skipped_special_or_oversize")`,
-//! and `Ne` is thin — `M("tengu_feature_sad",{feature_name, error_code})`
-//! (@226537274) — so only that one call is ported here. `Ne`/`be`/`pe` also
-//! cover `context_mcp`, `context_git_detect`, `context_management` and the
-//! sibling `read_eacces` / `read_failed` / `load_threw` reasons on this very
-//! path; that context-load health family is otherwise UNPORTED and is a
-//! separate unit of work.
+//! [`load_file`] keeps the same pre-read stat guard and lossy decoding.
+//! [`report_skipped_memory_file`] carries `Hot`'s skip line and one-shot
+//! `file_skipped_special_or_oversize` report. Other read errors remain soft
+//! skips; the native read-error health family is outside this loader's port.
 //!
 //! Separately from the skip cap, claude-code surfaces a non-blocking warning
 //! list for files over
@@ -58,9 +42,10 @@ use thiserror::Error;
 pub struct LoadedFile {
     /// Absolute path the file was loaded from.
     pub path: PathBuf,
-    /// File body (post-cap, secrets NOT yet redacted at this layer).
+    /// UTF-8 decoded body, replacing malformed byte sequences with U+FFFD.
+    /// Secrets are not yet redacted at this layer.
     pub body: String,
-    /// File size in bytes at the time of load (pre-redaction).
+    /// Number of raw bytes read, before UTF-8 replacement or redaction.
     pub size_bytes: u64,
 }
 
@@ -74,7 +59,7 @@ pub enum LoaderError {
     /// into one `null` return (`!o.isFile() || o.size > r`) and every caller
     /// treats them identically: there is no memory file to read here.
     ///
-    /// Produced by [`load_file`] again as of the `ELu` port; the memdir scanner
+    /// Produced by [`load_file`]'s `T7` guard; the memdir scanner
     /// keeps its own [`crate::MAX_MEMORY_FILE_SIZE`] cap and the `/memory` TUI
     /// dialog's match arm is unchanged.
     #[error("file too large: {bytes} bytes at {path}")]
@@ -86,11 +71,11 @@ pub enum LoaderError {
         /// Which half of `!o.isFile() || o.size > r` rejected the path.
         ///
         /// Both halves skip the file identically, but the oracle SUPPRESSES its
-        /// one-shot report for a directory (`if(!CLu && !o)` with
-        /// `o = stat.isDirectory()`), so the caller needs to tell them apart.
+        /// one-shot report for a directory (`if(!b.skip && !h)` in `Hot`,
+        /// with `h = stat.isDirectory()`), so the caller distinguishes them.
         /// Carried here rather than re-`stat`ing at the report site, mirroring
         /// the oracle's `n?.(o)` callback, which hands the same stat straight
-        /// back to `Eds`.
+        /// back to `Hot`.
         is_directory: bool,
     },
 }
@@ -126,29 +111,32 @@ const CONTEXT_CLAUDE_MD_LOAD_FEATURE: &str = "context_claude_md_load";
 /// `error_code` reported when a memory file is skipped as special or oversized.
 const FILE_SKIPPED_SPECIAL_OR_OVERSIZE: &str = "file_skipped_special_or_oversize";
 
-/// claude-code `ELu` (2.1.220 binary offset 230811638, declared in the same run
-/// as the `gn_ = 40000` this crate cites elsewhere): the byte ceiling above
-/// which a memory file is SKIPPED rather than read.
+/// claude-code 2.1.286 `T7` (@184387135): the byte ceiling above which a
+/// memory file is skipped rather than read.
 pub const MEMORY_FILE_BYTE_LIMIT: u64 = 4_194_304;
+
+/// Leaf name in the upstream `agents-md` Mod's `AGENTS_NAMES` list. The other
+/// listed spelling is `.claude/AGENTS.md`, which has the same leaf name.
+const AGENTS_FILE_NAME: &str = "AGENTS.md";
 
 /// Load one LINGXI.md (or local override) file, skipping it when it is not a
 /// regular file or exceeds [`MEMORY_FILE_BYTE_LIMIT`].
 ///
-/// Ports claude-code `EG` (2.1.220 binary offset 229022173):
-/// `let o=await e.stat(t); if(!o.isFile()||o.size>r) return n?.(o),null;`
-/// called from `Eds` (@230805636) with `r = ELu`. Note `size > r` — a file
-/// EXACTLY at the limit still loads.
+/// Ports claude-code 2.1.286 `l0` (@177773337), called from `Hot`
+/// (@184390402) with `r = T7`. Its stat guard uses `size > r`: a file exactly
+/// at the limit still loads. Reading with `encoding: "utf8"` replaces
+/// malformed UTF-8 rather than rejecting the file, as does `QDn`'s backend
+/// `Buffer.toString("utf8")` path.
 ///
-/// The size is taken from `stat`, not from the decoded string: the oracle
-/// tests the on-disk byte count BEFORE reading, so a file is skipped without
-/// ever being loaded into memory. Reading first and measuring after would both
-/// defeat the point and mis-measure, since `read_to_string` rejects non-UTF-8
-/// before any length is known.
+/// The guard uses the stat byte count before reading. The returned local
+/// [`LoadedFile::size_bytes`] records the raw bytes actually read; it is not a
+/// native memory-info wire field. U+FFFD can occupy more UTF-8 bytes than the
+/// malformed input, so the decoded string length cannot supply this value.
 ///
 /// # Errors
 ///
 /// - [`LoaderError::Io`] for filesystem errors (missing, unreadable,
-///   permissions, non-UTF-8).
+///   permissions).
 /// - [`LoaderError::FileTooLarge`] for a non-regular file or one over the
 ///   limit — the caller treats both as "no memory file here", matching the
 ///   oracle's `null` return.
@@ -156,18 +144,30 @@ pub fn load_file(
     path: &Path,
     _bus: Option<&Arc<telemetry::AnalyticsBus>>,
 ) -> Result<LoadedFile, LoaderError> {
+    load_file_with_byte_limit(path, Some(MEMORY_FILE_BYTE_LIMIT))
+}
+
+/// Load a regular UTF-8 file, optionally enforcing a byte ceiling.
+///
+/// `None` is used only for the root `AGENTS.md` path selected by the upstream
+/// Mod's `AGENTS_NAMES` (`AGENTS.md` or `.claude/AGENTS.md`). Its nested Read
+/// frame is not subject to the CLAUDE.md/LINGXI.md memory cap. Imported files
+/// are expanded through the ordinary capped path.
+fn load_file_with_byte_limit(
+    path: &Path,
+    byte_limit: Option<u64>,
+) -> Result<LoadedFile, LoaderError> {
     let meta = std::fs::metadata(path).map_err(|e| LoaderError::Io(e.to_string()))?;
-    if !meta.is_file() || meta.len() > MEMORY_FILE_BYTE_LIMIT {
+    if !meta.is_file() || byte_limit.is_some_and(|limit| meta.len() > limit) {
         return Err(LoaderError::FileTooLarge {
             path: path.to_path_buf(),
             bytes: meta.len(),
             is_directory: meta.is_dir(),
         });
     }
-    let body = std::fs::read_to_string(path).map_err(|e| LoaderError::Io(e.to_string()))?;
-    // `len()` of the UTF-8 string is the byte size we just read; avoids a
-    // second `metadata` syscall and is exact for the bytes loaded.
-    let size_bytes = body.len() as u64;
+    let bytes = std::fs::read(path).map_err(|e| LoaderError::Io(e.to_string()))?;
+    let size_bytes = bytes.len() as u64;
+    let body = String::from_utf8_lossy(&bytes).into_owned();
     Ok(LoadedFile {
         path: path.to_path_buf(),
         body,
@@ -177,12 +177,12 @@ pub fn load_file(
 
 /// Render the skip line claude-code logs for every skipped memory file.
 ///
-/// Byte-verbatim to `Eds`'s template (@230805636) apart from the file name:
-/// ``[CLAUDE.md] skipping ${e}: not a regular file or exceeds ${ELu} byte limit``.
+/// Byte-verbatim to 2.1.286 `Hot`'s template (@184390402) apart from the name:
+/// ``[CLAUDE.md] skipping ${e}: not a regular file or exceeds ${T7} byte limit``.
 /// `CLAUDE.md` → `LINGXI.md` is the established rebrand for human-readable text
 /// in this crate (`format_large_memory_file_status_row` does the same to "Large
 /// CLAUDE.md will impact performance"); the limit is interpolated as the raw
-/// number, exactly as `${ELu}` renders.
+/// number, exactly as `${T7}` renders.
 fn skip_log_line(path: &Path) -> String {
     format!(
         "[LINGXI.md] skipping {}: not a regular file or exceeds {MEMORY_FILE_BYTE_LIMIT} byte limit",
@@ -192,11 +192,11 @@ fn skip_log_line(path: &Path) -> String {
 
 /// Claim the process-wide one-shot report slot for a skipped memory file.
 ///
-/// Ports the guard in `Eds`'s skip branch: `if(!CLu && !o) CLu=!0, Ne(…)`.
+/// Ports 2.1.286 `Hot`'s skip guard: `if(!b.skip && !h) b.skip=!0, p(…)`.
 /// Two details that are easy to get wrong and are pinned by tests:
 ///
 /// - A directory returns `false` WITHOUT claiming the slot. The oracle only
-///   assigns `CLu` inside the `!o` arm, so a directory seen first still leaves
+///   assigns `b.skip` inside the `!h` arm, so a directory seen first still leaves
 ///   the report available for a genuine oversize skip later.
 /// - Every skip after the first returns `false` — the log line repeats, the
 ///   report does not.
@@ -212,16 +212,14 @@ fn take_skip_report_slot(slot: &std::sync::atomic::AtomicBool, is_directory: boo
         .is_ok()
 }
 
-/// `CLu` — the process-wide one-shot guard for the skip report.
+/// The process-wide one-shot guard for the skip report (`Rwe().skip`).
 static SKIP_REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Log, and at most once per process report, a memory file skipped by
 /// [`load_file`]'s stat guard.
 ///
-/// Ports the `i===null` branch of `Eds` (@230805636). The log fires on EVERY
-/// skip at DEBUG (`w`'s default level is `debug` — `function w(e,{level:t}=
-/// {level:"debug"})` @225937669); the `tengu_feature_sad` report fires at most
-/// once and never for a directory.
+/// Ports the `g===null` branch of 2.1.286 `Hot` (@184390402). The log fires on
+/// every skip; the report fires at most once and never for a directory.
 pub fn report_skipped_memory_file(path: &Path, is_directory: bool) {
     tracing::debug!("{}", skip_log_line(path));
     if take_skip_report_slot(&SKIP_REPORTED, is_directory) {
@@ -298,6 +296,8 @@ pub const MAX_INCLUDE_DEPTH: usize = 5;
 pub struct MemoryEntry {
     /// The path this entry was loaded from (as passed in — display form).
     pub path: PathBuf,
+    /// The file whose `@` directive loaded this entry; absent for a discovered root.
+    pub parent: Option<PathBuf>,
     /// Sanitised body (frontmatter + block HTML comments removed).
     pub body: String,
     /// Glob patterns from the `paths:` frontmatter key (claudemd.ts:254-279
@@ -305,18 +305,18 @@ pub struct MemoryEntry {
     /// match-all `**` dropped. `None` means the rule applies unconditionally;
     /// `Some(_)` marks a CONDITIONAL rule that must NOT be eagerly injected.
     pub globs: Option<Vec<String>>,
-    /// The file's RAW on-disk text, byte-verbatim (claude-code `rawContent`).
+    /// The file's unmodified UTF-8 decoded text (claude-code `rawContent`).
     ///
-    /// [`load_file`] returns `std::fs::read_to_string` output unmodified, so
-    /// this IS the disk text — no trim, no newline normalization, frontmatter
-    /// and HTML comments still present.
+    /// [`load_file`] replaces malformed byte sequences with U+FFFD, matching
+    /// native `readFile(..., {encoding: "utf8"})`. No trim or newline
+    /// normalization is applied; frontmatter and HTML comments remain.
     ///
     /// The seeded read-state entry uses this (not [`Self::body`], which the
     /// memory-block renderer later `.trim()`s) so a `Read` of the file can be
-    /// compared against the bytes on disk.
+    /// compared against a UTF-8 decoded read of the file.
     pub raw_content: String,
-    /// claude-code `contentDiffersFromDisk` — `bn_` @230803364 computes it as
-    /// `let p = d !== e`: an EXACT string compare of the stripped body `d`
+    /// claude-code 2.1.286 `contentDiffersFromDisk` — `$ot` (@184388419)
+    /// computes `let _e = he !== e`: an exact compare of the stripped body
     /// against the raw disk text `e`, with **no trim**.
     ///
     /// `false` for an ordinary LINGXI.md (no frontmatter, no HTML comments —
@@ -459,13 +459,13 @@ pub fn discover_external_include_paths_with_excluder(
 /// - `depth`: 0 for a top-level LINGXI.md.
 ///
 /// Missing / unreadable files are silently ignored — the oracle throws out of
-/// `EG` into `Eds`'s catch, which reports through a different (unported) family
+/// `l0` into `Hot`'s catch, which reports through a different (unported) family
 /// and prints no skip line.
 ///
 /// CORRECTED: the tail of this doc read "There is no size cap — files are read
 /// whole", citing `claudemd.ts:433-436`. There IS a cap. A file rejected by
 /// [`load_file`]'s stat guard is skipped AND announced via
-/// [`report_skipped_memory_file`]; this function is the port's `Eds`, so the
+/// [`report_skipped_memory_file`]; this function supplies `Hot`'s behavior, so the
 /// message and the one-shot report belong here rather than in the reader.
 #[must_use]
 pub fn expand_memory_file<S: std::hash::BuildHasher>(
@@ -501,6 +501,31 @@ pub fn expand_memory_file_with_excluder<S: std::hash::BuildHasher>(
     tier: LingxiMdTier,
     excluder: Option<&LingxiMdExcluder>,
 ) -> Vec<MemoryEntry> {
+    expand_memory_file_inner(
+        path,
+        processed,
+        include_external,
+        cwd,
+        home,
+        depth,
+        tier,
+        excluder,
+        is_agents_instruction_file(path),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expand_memory_file_inner<S: std::hash::BuildHasher>(
+    path: &Path,
+    processed: &mut HashSet<PathBuf, S>,
+    include_external: bool,
+    cwd: &Path,
+    home: Option<&Path>,
+    depth: usize,
+    tier: LingxiMdTier,
+    excluder: Option<&LingxiMdExcluder>,
+    allow_large_agents_root: bool,
+) -> Vec<MemoryEntry> {
     if is_memory_path_excluded(path, tier, excluder) {
         return Vec::new();
     }
@@ -510,42 +535,47 @@ pub fn expand_memory_file_with_excluder<S: std::hash::BuildHasher>(
     }
 
     // Read; a stat-guard skip is logged + reported here rather than inside
-    // `load_file`, matching the oracle's split: `EG` only stats and returns
-    // `null`, and its caller `Eds` owns the message and the one-shot report.
+    // `load_file`, matching the oracle's split: `l0` guards the stat and returns
+    // `null`, and its caller `Hot` owns the message and the one-shot report.
     //
     // Only THIS site reports. `discover_external_include_paths` re-walks the
     // same files to build the startup approval dialog's target list; it is a
-    // port-side pre-scan with no `Eds` counterpart, so logging there too would
+    // port-side pre-scan with no `Hot` counterpart, so logging there too would
     // double every skip line for one user-visible event.
-    let loaded = match load_file(path, None) {
+    let loaded = match if allow_large_agents_root {
+        load_file_with_byte_limit(path, None)
+    } else {
+        load_file(path, None)
+    } {
         Ok(loaded) => loaded,
         Err(LoaderError::FileTooLarge { is_directory, .. }) => {
             report_skipped_memory_file(path, is_directory);
             return Vec::new();
         }
-        // ENOENT / perms / non-UTF-8: the oracle throws out of `EG` into
-        // `Eds`'s catch, which routes to `wn_` (a different report family:
+        // ENOENT / perms: the oracle throws out of `l0` into
+        // `Hot`'s catch, which routes to a different report family:
         // `read_eacces` / `read_failed`) and never prints the skip line.
         Err(_) => return Vec::new(),
     };
 
     let parsed = parse_memory_content(&loaded.body, path, home);
     // claudemd.ts:652 — drop whitespace-only files entirely.
-    if parsed.body.trim().is_empty() {
+    if lingxi_core::host::instruction_announcements::js_trim(&parsed.body).is_empty() {
         return Vec::new();
     }
 
     // Parent before children (claudemd.ts:663-664).
     //
-    // `content_differs_from_disk` is `bn_`'s `p = d !== e` (@230803364): the
+    // `content_differs_from_disk` is `$ot`'s `_e = he !== e` (@184388419): the
     // stripped body compared EXACTLY against the raw disk text, no trim. It
     // must be computed HERE, before the memory-block renderer's later
     // `.trim()`, or every file would falsely report "differs". `loaded.body` is
-    // `read_to_string` output verbatim (see `load_file`), so it IS the disk
-    // text.
+    // unmodified lossy UTF-8 decoded output (see `load_file`), so the comparison
+    // uses the same decoded disk text as the native loader.
     let content_differs_from_disk = parsed.body != loaded.body;
     let mut result = vec![MemoryEntry {
         path: path.to_path_buf(),
+        parent: None,
         body: parsed.body,
         globs: parsed.globs,
         raw_content: loaded.body,
@@ -563,7 +593,7 @@ pub fn expand_memory_file_with_excluder<S: std::hash::BuildHasher>(
         if is_external && !include_external {
             continue;
         }
-        result.extend(expand_memory_file_with_excluder(
+        let mut included = expand_memory_file_inner(
             &inc,
             processed,
             include_external,
@@ -572,10 +602,20 @@ pub fn expand_memory_file_with_excluder<S: std::hash::BuildHasher>(
             depth + 1,
             tier,
             excluder,
-        ));
+            false,
+        );
+        if let Some(first) = included.first_mut() {
+            first.parent = Some(path.to_path_buf());
+        }
+        result.extend(included);
     }
 
     result
+}
+
+fn is_agents_instruction_file(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name == AGENTS_FILE_NAME)
 }
 
 fn is_memory_path_excluded(
@@ -764,8 +804,13 @@ pub fn parse_memory_content(raw: &str, file_path: &Path, home: Option<&Path>) ->
 
 fn frontmatter_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    // claude-code FRONTMATTER_REGEX = /^---\s*\n([\s\S]*?)---\s*\n?/
-    RE.get_or_init(|| Regex::new(r"(?s)^---\s*\n.*?---\s*\n?").unwrap())
+    // Current native GC = /^---\s*\n([\s\S]*?)---\s*\n?/.
+    // ECMAScript \s includes FEFF but excludes NEL; Rust's Unicode \s
+    // differs. Preserve the native capture even for an ambiguous closing ---.
+    RE.get_or_init(|| {
+        let whitespace = r"[\t\n\x0b\x0c\r \u{00a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}]";
+        Regex::new(&format!("(?s)^---{whitespace}*\\n(.*?)---{whitespace}*\\n?")).unwrap()
+    })
 }
 
 /// Strip a leading `---`…`---` YAML frontmatter block, returning the content
@@ -774,9 +819,12 @@ fn frontmatter_re() -> &'static Regex {
 /// returned unchanged.
 #[must_use]
 pub fn strip_frontmatter(raw: &str) -> &str {
-    if let Some(m) = frontmatter_re().find(raw) {
+    // Native Hs applies Ww only for frontmatter detection. If the block is
+    // absent it returns the original input, including a leading BOM.
+    let for_detection = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    if let Some(m) = frontmatter_re().find(for_detection) {
         if m.start() == 0 {
-            return &raw[m.end()..];
+            return &for_detection[m.end()..];
         }
     }
     raw
@@ -842,20 +890,10 @@ enum FrontmatterPathValue {
 
 /// Parse the leading frontmatter as YAML and project its `paths` value.
 fn frontmatter_paths_values(raw: &str) -> Option<Vec<FrontmatterPathValue>> {
-    let m = frontmatter_re().find(raw)?;
-    if m.start() != 0 {
-        return None;
-    }
-    let mut yaml_lines = m.as_str().lines();
-    let opening = yaml_lines.next()?;
-    if opening.trim() != "---" {
-        return None;
-    }
-    let yaml = yaml_lines
-        .take_while(|line| line.trim() != "---")
-        .collect::<Vec<_>>()
-        .join("\n");
-    let document: serde_yaml::Value = serde_yaml::from_str(&yaml).ok()?;
+    let for_detection = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    let captures = frontmatter_re().captures(for_detection)?;
+    let yaml = captures.get(1)?.as_str();
+    let document: serde_yaml::Value = serde_yaml::from_str(yaml).ok()?;
     let paths = document
         .as_mapping()?
         .get(serde_yaml::Value::String("paths".into()))?;
@@ -1024,6 +1062,11 @@ pub fn strip_html_comments(content: &str) -> String {
     if !content.contains("<!--") {
         return content.to_string();
     }
+    // Native uat invokes the marked lexer only when this marker is present;
+    // Rq.lex normalizes CRLF and bare CR before token sanitization. A body
+    // without an HTML-comment marker retains its disk line endings.
+    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let content = normalized.as_str();
     let lines: Vec<&str> = content.split_inclusive('\n').collect();
     let mut out = String::with_capacity(content.len());
     let mut fence: Option<(char, usize)> = None;
@@ -1369,6 +1412,46 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn frontmatter_ecmascript_whitespace_matches_actual_native_287_parser() {
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/instruction_marked_2_1_287.json"
+        ))
+        .unwrap();
+        let cases: Vec<_> = oracle["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|case| case["name"].as_str().unwrap().starts_with("frontmatter-"))
+            .collect();
+        assert_eq!(cases.len(), 3);
+        for case in cases {
+            let raw = case["input"]["raw"].as_str().unwrap();
+            let path = Path::new(case["input"]["path"].as_str().unwrap());
+            let parsed = parse_memory_content(raw, path, None);
+            let native = &case["expected"]["parsed"];
+            assert_eq!(
+                parsed.body,
+                native["info"]["content"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                serde_json::json!(parsed.globs),
+                native["info"]["globs"],
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                serde_json::json!(parsed.include_paths),
+                native["includePaths"],
+                "{}",
+                case["name"]
+            );
+            assert_ne!(parsed.body, raw, "native frontmatter was removed");
+        }
+    }
+
+    #[test]
     fn expand_memory_file_reports_disk_fidelity() {
         // Pins the oracle rule `bn_` @230803364: `let p = d !== e` — an EXACT
         // string compare of the frontmatter/HTML-comment-stripped body against
@@ -1454,6 +1537,108 @@ mod tests {
         assert!(out.body.contains("hello"));
         assert_eq!(out.size_bytes, 14);
     }
+
+    fn native_utf8_fixture() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/memory_utf8_2_1_286.json"
+        ))
+        .expect("hash-pinned native UTF-8 fixture")
+    }
+
+    #[test]
+    fn native_utf8_byte_cases_load_with_raw_size() {
+        let fixture = native_utf8_fixture();
+        assert_eq!(fixture["native_version"], "2.1.286");
+        assert_eq!(fixture["byte_limit"], MEMORY_FILE_BYTE_LIMIT);
+        let cases = fixture["byte_cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 20);
+        let tmp = TempDir::new().unwrap();
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let bytes: Vec<u8> = case["bytes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|byte| u8::try_from(byte.as_u64().unwrap()).unwrap())
+                .collect();
+            let path = tmp.path().join(format!("{name}.md"));
+            fs::write(&path, &bytes).unwrap();
+            let loaded = load_file(&path, None).unwrap();
+            let expected = case["l0_body"].as_str().unwrap();
+            assert_eq!(loaded.body, expected, "native l0: {name}");
+            assert_eq!(case["backend_body"], expected, "native QDn: {name}");
+            assert_eq!(case["hot_body"], expected, "native Hot file: {name}");
+            assert_eq!(
+                case["hot_backend_body"], expected,
+                "native Hot backend: {name}"
+            );
+            assert_eq!(loaded.size_bytes, bytes.len() as u64, "raw size: {name}");
+            assert_eq!(case["raw_size_bytes"], loaded.size_bytes);
+            assert_eq!(case["decoded_utf8_bytes"], loaded.body.len() as u64);
+        }
+    }
+
+    #[test]
+    fn malformed_utf8_parent_and_child_still_expand_imports() {
+        let fixture = native_utf8_fixture();
+        let cases = fixture["byte_cases"].as_array().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+        let mut expected = Vec::new();
+        for (case_name, file_name) in [
+            ("invalid-parent-with-import", "LINGXI.md"),
+            ("invalid-child-with-import", "child.md"),
+        ] {
+            let case = cases.iter().find(|case| case["name"] == case_name).unwrap();
+            let bytes: Vec<u8> = case["bytes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|byte| u8::try_from(byte.as_u64().unwrap()).unwrap())
+                .collect();
+            fs::write(cwd.join(file_name), bytes).unwrap();
+            expected.push(case["l0_body"].as_str().unwrap());
+        }
+        fs::write(cwd.join("grandchild.md"), "grandchild\n").unwrap();
+        expected.push("grandchild\n");
+        let mut processed = HashSet::new();
+        let entries = expand_memory_file(
+            &cwd.join("LINGXI.md"),
+            &mut processed,
+            false,
+            cwd,
+            Some(cwd),
+            0,
+        );
+        assert_eq!(
+            entries.len(),
+            3,
+            "malformed bytes must not drop either file"
+        );
+        for ((entry, file_name), body) in entries
+            .iter()
+            .zip(["LINGXI.md", "child.md", "grandchild.md"])
+            .zip(expected)
+        {
+            assert_eq!(entry.path, cwd.join(file_name));
+            assert_eq!(entry.body, body);
+            assert_eq!(entry.raw_content, body);
+            assert!(!entry.content_differs_from_disk);
+        }
+    }
+
+    #[test]
+    fn byte_limit_applies_before_utf8_replacement() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("LINGXI.md");
+        let mut bytes = vec![b'x'; MEMORY_FILE_BYTE_LIMIT as usize];
+        *bytes.last_mut().unwrap() = 0xff;
+        fs::write(&path, &bytes).unwrap();
+        let loaded = load_file(&path, None).expect("native l0 allows stat.size == T7");
+        assert_eq!(loaded.size_bytes, MEMORY_FILE_BYTE_LIMIT);
+        assert_eq!(loaded.body.len() as u64, MEMORY_FILE_BYTE_LIMIT + 2);
+        assert!(loaded.body.ends_with('\u{fffd}'));
+    }
     /// SUPERSEDED by `file_over_the_byte_limit_is_skipped`.
     ///
     /// This asserted an 11 MiB file loads, which followed from a module doc
@@ -1498,6 +1683,84 @@ mod tests {
         std::fs::write(&p, "x".repeat(MEMORY_FILE_BYTE_LIMIT as usize)).unwrap();
         let out = load_file(&p, None).expect("a file at the limit is not over it");
         assert_eq!(out.size_bytes, MEMORY_FILE_BYTE_LIMIT);
+    }
+
+    /// The bundled `agents-md` Mod's nested Read frame expands the files named
+    /// by `AGENTS_NAMES` without applying the LINGXI/CLAUDE memory-file cap.
+    /// Keep the exception at the selected root: normal memory files and
+    /// `@include` children still pass through `load_file`'s 4 MiB guard.
+    #[test]
+    fn agents_md_ancestor_expansion_bypasses_only_the_selected_file_size_cap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = dir.path();
+        let oversized = "x".repeat(MEMORY_FILE_BYTE_LIMIT as usize + 1);
+        let agents_paths = [
+            cwd.join("AGENTS.md"),
+            cwd.join(branding::DOT_DIR).join("AGENTS.md"),
+        ];
+
+        for path in &agents_paths {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, &oversized).unwrap();
+
+            // This is the same expansion entry point used by
+            // `$.fs.ancestors`, not a test of the private byte-limit helper.
+            let mut processed = HashSet::new();
+            let expanded = expand_memory_file_with_excluder(
+                path,
+                &mut processed,
+                false,
+                cwd,
+                None,
+                0,
+                LingxiMdTier::Project,
+                None,
+            );
+            assert_eq!(
+                expanded.len(),
+                1,
+                "selected AGENTS file should load: {path:?}"
+            );
+            assert_eq!(
+                expanded[0].raw_content.len() as u64,
+                MEMORY_FILE_BYTE_LIMIT + 1
+            );
+        }
+
+        let lingxi = cwd.join("LINGXI.md");
+        std::fs::write(&lingxi, &oversized).unwrap();
+        let mut processed = HashSet::new();
+        let expanded = expand_memory_file_with_excluder(
+            &lingxi,
+            &mut processed,
+            false,
+            cwd,
+            None,
+            0,
+            LingxiMdTier::Project,
+            None,
+        );
+        assert!(expanded.is_empty(), "ordinary LINGXI.md remains capped");
+
+        let agents_root = cwd.join("AGENTS.md");
+        let oversized_import = cwd.join("large-import.md");
+        std::fs::write(&agents_root, format!("@./large-import.md\n{}", oversized)).unwrap();
+        std::fs::write(&oversized_import, &oversized).unwrap();
+        let mut processed = HashSet::new();
+        let expanded = expand_memory_file_with_excluder(
+            &agents_root,
+            &mut processed,
+            false,
+            cwd,
+            None,
+            0,
+            LingxiMdTier::Project,
+            None,
+        );
+        assert_eq!(expanded.len(), 1, "oversized import must be skipped");
+        assert_eq!(expanded[0].path, agents_root);
     }
 
     /// A directory is skipped by the `!o.isFile()` half of the same guard.
@@ -1691,9 +1954,37 @@ mod import_tests {
         // Parent FIRST, then children in directive order.
         assert_eq!(entries.len(), 4);
         assert_eq!(entries[0].path, main, "parent must come before children");
+        assert_eq!(entries[0].parent, None);
+        assert!(entries[1..]
+            .iter()
+            .all(|entry| entry.parent.as_deref() == Some(main.as_path())));
         assert!(entries[0].body.contains("main notes"));
         let child_bodies: Vec<String> = bodies(&entries[1..]);
         assert_eq!(child_bodies, vec!["REL", "TILDE", "ABS"]);
+    }
+
+    #[test]
+    fn nested_imports_keep_their_direct_parent() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("LINGXI.md");
+        let child = temp.path().join("child.md");
+        let grandchild = temp.path().join("grandchild.md");
+        fs::write(&root, "root\n@./child.md\n").unwrap();
+        fs::write(&child, "child\n@./grandchild.md\n").unwrap();
+        fs::write(&grandchild, "grandchild\n").unwrap();
+        let mut processed = HashSet::new();
+        let entries = expand_memory_file(
+            &root,
+            &mut processed,
+            true,
+            temp.path(),
+            Some(temp.path()),
+            0,
+        );
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].parent, None);
+        assert_eq!(entries[1].parent.as_deref(), Some(root.as_path()));
+        assert_eq!(entries[2].parent.as_deref(), Some(child.as_path()));
     }
 
     #[test]

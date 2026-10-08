@@ -350,6 +350,16 @@ pub trait BackgroundExitSink: Send + Sync {
     async fn on_supervised_exit(&self, task_id: &str, code: Option<i32>) {
         self.on_exit(task_id, code).await;
     }
+    /// A held background child was killed at its elapsed lifetime limit.
+    async fn on_background_deadline_exit(&self, task_id: &str, code: Option<i32>) {
+        self.on_exit_with_status(task_id, code, true).await;
+    }
+    /// Deadline completion from the independent terminal-output writer.
+    async fn on_supervised_background_deadline_exit(&self, task_id: &str, code: Option<i32>) {
+        self.on_supervised_start(task_id).await;
+        self.on_background_deadline_exit(task_id, code).await;
+    }
+
     /// Distinguish an explicit stop from an unknown/signaled exit.
     async fn on_exit_with_status(&self, task_id: &str, code: Option<i32>, _killed: bool) {
         self.on_exit(task_id, code).await;

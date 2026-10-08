@@ -387,9 +387,13 @@ async fn grep_count(
 /// non-interactive session so an ask resolves to a denial.
 fn host_context() -> SubagentInvocationContext {
     SubagentInvocationContext {
+        input_projection: None,
+        cancellation_token: lingxi_core::host::CancellationToken::new(),
         permission_pause_observer: None,
         parent_agent_id: None,
         origin_session_id: None,
+        instruction_context: None,
+        fork_context: None,
         tool_execution_policy: ToolExecutionPolicy::Ordinary,
         agent_name: None,
         team_name: None,
@@ -403,6 +407,11 @@ fn host_context() -> SubagentInvocationContext {
         observer: None,
         parent_model: None,
         parent_model_profile: None,
+        agent_spawn_provenance: Default::default(),
+        tool_context_state: None,
+        assistant_message: None,
+        same_turn_tool_uses: Vec::new(),
+        current_history: Vec::new(),
         mode_override: None,
         request_source: None,
         frozen_command_denies: Vec::new(),

@@ -9,34 +9,35 @@ use lingxi_core::host::{McpError, McpTransportSpec, ServerCapabilitiesDto};
 use lingxi_core::types::McpConnectionId;
 
 impl McpRegistry {
+    /// Called only by the current lazy-dial owner while holding the server's
+    /// lifecycle lock. Compare the grant again before mutating its partition:
+    /// Claude 2.1.286 WRt refuses strikes fetched under a superseded grant.
     pub(super) async fn record_discovery_cache_refresh_failure_locked(
         &self,
-        key: &str,
-        cached_connection_id: McpConnectionId,
         config: &McpServerConfig,
         partition: Option<&DiscoveryCachePartition>,
+        auth_response: bool,
     ) {
         let Some(partition) = partition else {
             return;
         };
-        let still_current = {
-            let conns = self.connections.read().await;
-            match conns.get(key) {
-                Some(McpConnectionState::Cached {
-                    connection_id,
-                    config: current_config,
-                    ..
-                }) => {
-                    *connection_id == cached_connection_id
-                        && Self::same_config_snapshot(current_config, config)
-                }
-                _ => false,
-            }
-        };
-        if !still_current {
+        let current = self
+            .discovery_cache_partition_for(config, partition.negotiation_mode)
+            .await;
+        if current.as_ref().ok() != Some(partition) {
             return;
         }
-        self.record_discovery_cache_refresh_failure(config, partition);
+        if auth_response {
+            // The upstream auth classifier purges a rejected credential's
+            // cached catalog before adopting the needs-auth row.
+            if let Some(store) = &self.discovery_cache_store {
+                if let Err(error) = store.purge_partitioned(&partition.partition_key) {
+                    tracing::warn!(server = %config.name, %error, "Discovery cache auth purge skipped");
+                }
+            }
+        } else {
+            self.record_discovery_cache_refresh_failure(config, partition);
+        }
     }
     pub(super) async fn discovery_cache_partition_for(
         &self,
@@ -410,6 +411,7 @@ impl McpRegistry {
                 connection_id,
                 capabilities: entry.capabilities,
                 negotiated,
+                server_info: entry.server_info,
                 tools: entry.tools,
                 resources: entry.resources,
                 resource_templates: entry.resource_templates,
@@ -476,6 +478,7 @@ impl McpRegistry {
         negotiation_mode: crate::protocol_negotiation::NegotiationMode,
         grant_provenance: Option<&GrantProvenance>,
         negotiated: Option<&lingxi_core::host::McpNegotiatedProtocol>,
+        metadata: Option<&lingxi_core::host::McpServerMetadataDto>,
     ) {
         let Some(store) = &self.discovery_cache_store else {
             return;
@@ -525,7 +528,7 @@ impl McpRegistry {
                 if &partition != captured_partition {
                     return;
                 }
-                let entry = crate::discovery_cache::DiscoveryCacheEntry::new(
+                let mut entry = crate::discovery_cache::DiscoveryCacheEntry::new(
                     cache_key,
                     crate::discovery_cache::now_ms(),
                     caps.clone(),
@@ -539,6 +542,19 @@ impl McpRegistry {
                         .map(|protocol| negotiated_era_label(protocol.era))
                         .unwrap_or("legacy"),
                 );
+                if let Some(server_info) =
+                    metadata.and_then(|metadata| metadata.server_info.as_ref())
+                {
+                    // The production native caller clips the implementation
+                    // before handing it to the disk writer. Never persist its
+                    // title/icons/description, instructions or discovery result.
+                    let Ok(server_info) = serde_json::from_value::<
+                        crate::discovery_cache::DiscoveryCacheServerInfo,
+                    >(server_info.clone()) else {
+                        return;
+                    };
+                    entry = entry.with_server_info(server_info);
+                }
                 let Ok(serialized) = serde_json::to_string(&entry) else {
                     return;
                 };
@@ -574,10 +590,10 @@ impl McpRegistry {
             Some(_) => {}
         }
     }
-    /// Record one oracle `_6e` strike against the exact partition that served
-    /// the stale catalog. Ordinary connection failures never call this path.
-    /// Keeping the captured partition avoids striking a new identity partition
-    /// if the remote MCP refresh grant rotates during background revalidation.
+    /// Record one Claude 2.1.286 WRt strike against the partition that served
+    /// the cached catalog. The caller validates generation and grant ownership.
+    /// At the threshold the entry is deleted, so a rebuilt registry cannot
+    /// expose the failed catalog again. Ordinary uncached failures never strike.
     pub(super) fn record_discovery_cache_refresh_failure(
         &self,
         config: &McpServerConfig,
@@ -591,7 +607,14 @@ impl McpRegistry {
         {
             entry.consecutive_refresh_failures =
                 entry.consecutive_refresh_failures.saturating_add(1);
-            if let Err(error) = store.store_partitioned(&entry, &partition.partition_key) {
+            let result = if entry.consecutive_refresh_failures
+                >= crate::discovery_cache::strike_threshold()
+            {
+                store.purge_partitioned(&partition.partition_key)
+            } else {
+                store.store_partitioned(&entry, &partition.partition_key)
+            };
+            if let Err(error) = result {
                 tracing::warn!(
                     server = %config.name,
                     %error,

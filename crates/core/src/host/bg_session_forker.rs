@@ -24,6 +24,17 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use thiserror::Error;
 
+/// Conversation state copied into a background session. Model reminders keep
+/// their structured attachment payloads as well as rendered messages, so the
+/// new session can replay MCP deltas without announcing them a second time.
+#[derive(Debug, Clone, Default)]
+pub struct BgSessionSnapshot {
+    /// Live transcript messages in their original order and identity.
+    pub history: Vec<crate::types::ConversationMessage>,
+    /// Original payloads for retained durable model reminders.
+    pub model_reminder_attachments: Vec<(crate::types::MessageId, serde_json::Value)>,
+}
+
 /// Failure modes for [`BgSessionForker::fork_to_background`]. Projected to a
 /// coarse `HandleError::ActionFailed` by the handle impl (the `/fork` handler
 /// renders "Could not fork to background session: …").
@@ -54,7 +65,7 @@ pub trait BgSessionForker: Send + Sync {
     ) {
     }
 
-    /// Snapshot `history` (+ the parent's rendered `system_prompt`, when the
+    /// Snapshot `conversation` (+ the parent's rendered `system_prompt`, when the
     /// live session has completed a turn) into a new background session and
     /// dispatch a detached worker that resumes it. `prompt` is the OPTIONAL
     /// `[prompt]` argument (empty string = no seed turn).
@@ -69,7 +80,7 @@ pub trait BgSessionForker: Send + Sync {
     /// the composition root owns the exact text since it mints the new short id.
     async fn fork_to_background(
         &self,
-        history: &[crate::types::ConversationMessage],
+        conversation: &BgSessionSnapshot,
         system_prompt: Option<Arc<str>>,
         prompt: &str,
         model: &str,
@@ -82,14 +93,14 @@ pub trait BgSessionForker: Send + Sync {
     /// its PTY launch spec.
     async fn background_conversation(
         &self,
-        history: &[crate::types::ConversationMessage],
+        conversation: &BgSessionSnapshot,
         system_prompt: Option<Arc<str>>,
         prompt: &str,
         model: &str,
         snapshot: &crate::host::BackgroundingSnapshot,
     ) -> Result<String, BgForkError> {
         let _ = snapshot;
-        self.fork_to_background(history, system_prompt, prompt, model)
+        self.fork_to_background(conversation, system_prompt, prompt, model)
             .await
     }
 

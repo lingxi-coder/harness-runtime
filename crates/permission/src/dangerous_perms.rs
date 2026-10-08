@@ -23,10 +23,7 @@
 use crate::dangerous_patterns::{
     dangerous_bash_patterns, CROSS_PLATFORM_CODE_EXEC, POWERSHELL_DANGEROUS_PATTERNS,
 };
-use crate::rule::{
-    normalize_legacy_tool_name, PermissionBehavior, PermissionRule, PermissionRuleSource,
-    PermissionRuleValue,
-};
+use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue};
 
 /// Canonical tool names (claude-code `tools/{BashTool,PowerShellTool}/toolName.ts`,
 /// `tools/AgentTool/constants.ts`). Kept as local literals so the predicates
@@ -206,10 +203,10 @@ pub fn is_dangerous_powershell_permission(tool_name: &str, rule_content: &Option
 ///
 /// Any Agent allow rule would auto-approve sub-agent spawns before the auto-mode
 /// classifier can evaluate the sub-agent's prompt, defeating delegation-attack
-/// prevention. The tool name is normalized (`Task` → `Agent`) first.
+/// prevention.
 #[must_use]
 pub fn is_dangerous_task_permission(tool_name: &str, _rule_content: &Option<String>) -> bool {
-    normalize_legacy_tool_name(tool_name) == AGENT_TOOL_NAME
+    tool_name == AGENT_TOOL_NAME
 }
 
 /// Checks if a permission rule is dangerous for auto mode (the OR of the three
@@ -636,8 +633,7 @@ mod tests {
             AGENT_TOOL_NAME,
             &content("general-purpose")
         ));
-        // Legacy `Task` normalizes to `Agent`.
-        assert!(is_dangerous_task_permission("Task", &content("anything")));
+        assert!(!is_dangerous_task_permission("Task", &content("anything")));
     }
 
     #[test]

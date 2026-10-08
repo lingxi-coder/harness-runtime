@@ -96,7 +96,7 @@ fn render_blocks(content: &[ContentBlock]) -> String {
     let mut lines: Vec<String> = Vec::with_capacity(content.len());
     for block in content {
         match block {
-            ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
+            ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
                 lines.push(text.clone())
             }
             ContentBlock::ToolUse { name, input, .. } => {
@@ -105,7 +105,7 @@ fn render_blocks(content: &[ContentBlock]) -> String {
             ContentBlock::ToolResult {
                 content, is_error, ..
             } => {
-                let tag = if *is_error {
+                let tag = if is_error.unwrap_or(false) {
                     "tool error"
                 } else {
                     "tool result"
@@ -189,7 +189,7 @@ fn extract_first_prompt(messages: &[ConversationMessage]) -> String {
     let text = content
         .iter()
         .find_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.trim()),
+            ContentBlock::Text { text, .. } => Some(text.trim()),
             _ => None,
         })
         .unwrap_or("");
@@ -279,7 +279,7 @@ mod tests {
         ConversationMessage::Assistant {
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
-                text: text.to_string(),
+                text: text.to_string(), citations: None,
             }],
             stop_reason: Some("end_turn".to_string()),
         }
@@ -298,7 +298,7 @@ mod tests {
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
-                    text: "running".to_string(),
+                    text: "running".to_string(), citations: None,
                 },
                 ContentBlock::ToolUse {
                     id: lingxi_core::types::ToolUseId::new(),
@@ -320,7 +320,7 @@ mod tests {
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
-                    text: "hello".to_string(),
+                    text: "hello".to_string(), citations: None,
                 },
                 ContentBlock::MediaAnalysis {
                     analysis: lingxi_core::types::MediaAnalysis {

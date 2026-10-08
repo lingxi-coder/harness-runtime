@@ -15,13 +15,19 @@ core = { path = "../core" }
 # (`PermissionRuleValue::from_rule_string`, `shell_command`, `shell_rule_matching`).
 permission = { path = "../permission" }
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+futures-util.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util"] }
 tracing.workspace = true
 regex = "1"
 url = "2"
+base64 = "0.22"
+fs2 = "0.4"
+sha2 = "0.10"
+tree-sitter = "=0.25.10"
+tree-sitter-javascript = "0.23"
 # Function hooks run plugin-supplied JS. QuickJS is used for a specific
 # property: a bare context has NO host bindings — no fs, no net, no process, no
 # env — so "deny by default" is the engine's starting state rather than
@@ -30,6 +36,12 @@ rquickjs = { version = "=0.14.0" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.27", default-features = false, features = ["signal", "process"] }
 
 # rquickjs-sys 0.6 ships no pregenerated bindings for iOS/Android; mirror the
 # `workflow` crate's target-gated bindgen so mobile builds resolve identically.

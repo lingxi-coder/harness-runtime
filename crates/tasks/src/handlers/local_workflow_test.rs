@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use std::sync::Mutex as StdMutex;
 use tempfile::tempdir;
 use test_harness::mocks::MockRuntimeSpawner;
-use tokio::sync::oneshot;
 use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::oneshot;
 
 use crate::handlers::CONFIG_DIR_ENV_LOCK as ENV_LOCK;
 
@@ -54,6 +54,7 @@ fn terminal_metrics_distinguish_done_error_skipped_and_empty_results() {
         None,
         None,
         &Ok(SubagentResult::Completed {
+            handback: None,
             agent_id: lingxi_core::types::AgentId::new(),
             content: json!("answer"),
             usage: SubagentUsage::default(),
@@ -208,6 +209,7 @@ impl BlockingWorkflowObserverSpawner {
 
 fn completed_probe_result(agent_id: lingxi_core::types::AgentId) -> SubagentResult {
     SubagentResult::Completed {
+        handback: None,
         agent_id,
         content: Value::String("done".to_string()),
         usage: SubagentUsage::default(),
@@ -376,6 +378,7 @@ impl SubagentSpawner for EchoSpawner {
             });
         }
         Ok(SubagentResult::Completed {
+            handback: None,
             agent_id: lingxi_core::types::AgentId::new(),
             content: Value::String(format!("echo:{}", request.prompt)),
             usage: SubagentUsage {
@@ -821,7 +824,7 @@ impl SubagentSpawner for TranscriptOverrideSpawner {
                         "message": lingxi_core::types::ConversationMessage::Assistant {
                             id: lingxi_core::types::MessageId::new(),
                             content: vec![lingxi_core::types::ContentBlock::Text {
-                                text: "hello from child".to_string(),
+                                text: "hello from child".to_string(), citations: None,
                             }],
                             stop_reason: None,
                         }
@@ -831,6 +834,7 @@ impl SubagentSpawner for TranscriptOverrideSpawner {
             .expect("write transcript line");
         }
         Ok(SubagentResult::Completed {
+            handback: None,
             agent_id,
             content: Value::String("ok".to_string()),
             usage: SubagentUsage::default(),
@@ -954,6 +958,7 @@ async fn run_with_progress_drain_completes_and_does_not_hang() {
             tokio::task::yield_now().await;
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
             Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: lingxi_core::types::AgentId::new(),
                 content: Value::String(format!("echo:{}", request.prompt)),
                 usage: SubagentUsage {
@@ -1205,6 +1210,7 @@ impl SubagentSpawner for NamespacedListingSpawner {
     ) -> Result<SubagentResult, SubagentSpawnError> {
         self.seen_reqs.lock().unwrap().push(request.clone());
         Ok(SubagentResult::Completed {
+            handback: None,
             agent_id: lingxi_core::types::AgentId::new(),
             content: Value::String(format!("echo:{}", request.prompt)),
             usage: SubagentUsage::default(),
@@ -1939,9 +1945,11 @@ async fn workflow_emits_queued_progress_for_waiting_parallel_agents_before_slots
             .collect::<Vec<_>>(),
         (0..cap as u64).collect::<Vec<_>>()
     );
-    assert!(queued
-        .iter()
-        .all(|progress| progress.queued_at_ms.is_some() && progress.attempt == Some(1)));
+    assert!(
+        queued
+            .iter()
+            .all(|progress| progress.queued_at_ms.is_some() && progress.attempt == Some(1))
+    );
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(100), async {
             loop {
@@ -4790,10 +4798,12 @@ async fn workflow_live_observer_uses_progress_state_and_surfaces_retry_attempt()
     let retry = rx.recv().await.expect("retry progress");
     assert_eq!(retry.state.as_deref(), Some("progress"));
     assert_eq!(retry.attempt, Some(2));
-    assert!(retry
-        .last_attempt_reason
-        .as_deref()
-        .is_some_and(|reason| reason.contains("opening the response stream")));
+    assert!(
+        retry
+            .last_attempt_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("opening the response stream"))
+    );
 }
 
 #[tokio::test]
@@ -4934,6 +4944,113 @@ async fn workflow_live_observer_writes_rich_snapshots_to_spool() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn workflow_observer_projects_message_rows_and_refusal_rows_without_treating_tombstones_as_idle()
+ {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let observer = WorkflowAgentLiveObserver::new_with_metrics(
+        None,
+        Some(tx),
+        workflow_progress_update(&workflow::Progress::Agent {
+            index: 2,
+            label: "Review".into(),
+            phase_index: None,
+            phase_title: None,
+            agent_id: None,
+            model: Some("test-model".into()),
+            state: workflow::AgentState::Start,
+            error: None,
+            tool_use_id: "workflow_agent_2_queued".into(),
+        }),
+        None,
+        None,
+        0,
+    );
+    let agent_id = lingxi_core::types::AgentId::new();
+    let message_id = lingxi_core::types::MessageId::new();
+    let tool_use_id = lingxi_core::types::ToolUseId::new();
+    let assistant = lingxi_core::types::ConversationMessage::Assistant {
+        id: message_id,
+        content: vec![lingxi_core::types::ContentBlock::ToolUse {
+            id: tool_use_id,
+            name: "Read".into(),
+            input: serde_json::json!({"file_path":"review.md"}),
+            provider_id: Some("provider-read".into()),
+        }],
+        stop_reason: Some("tool_use".into()),
+    };
+
+    lingxi_core::host::subagent_spawn::SubagentSpawnObserver::on_event(
+        &observer,
+        lingxi_core::host::subagent_spawn::SubagentObservation::MessageRow {
+            agent_id,
+            message: assistant,
+            message_index: 41,
+        },
+    )
+    .await;
+    let message_update = rx.recv().await.expect("row updates workflow progress");
+    assert_eq!(message_update.last_tool_name.as_deref(), Some("Read"));
+    assert_eq!(message_update.last_tool_summary.as_deref(), Some("Read"));
+
+    lingxi_core::host::subagent_spawn::SubagentSpawnObserver::on_event(
+        &observer,
+        lingxi_core::host::subagent_spawn::SubagentObservation::ServerFallbackTombstone {
+            agent_id,
+            message: lingxi_core::host::ServerFallbackTombstoneMessage {
+                uuid: message_id,
+                message_type: "assistant".into(),
+                timestamp: "created".into(),
+                request_id: None,
+                request_ref: None,
+                provider_message_id: None,
+                model: Some("test-model".into()),
+                stop_reason: Some("tool_use".into()),
+                stop_details: None,
+                usage: None,
+                content: vec![],
+                is_api_error_message: None,
+                supersedes_uuids: None,
+            },
+            display_only: true,
+        },
+    )
+    .await;
+    assert!(
+        rx.try_recv().is_err(),
+        "progress has no row ledger to retract"
+    );
+    assert_eq!(observer.snapshot().await.state.as_deref(), Some("start"));
+
+    let mut refusal = lingxi_core::host::ServerFallbackApiErrorRow::new(
+        "refusal body remains a visible assistant message",
+        "created".into(),
+    );
+    refusal.set_refusal(
+        Some("request-refusal".into()),
+        serde_json::json!({"type":"refusal","category":"cyber"}),
+    );
+    lingxi_core::host::subagent_spawn::SubagentSpawnObserver::on_event(
+        &observer,
+        lingxi_core::host::subagent_spawn::SubagentObservation::ServerFallbackApiErrorRow {
+            agent_id,
+            row: refusal,
+            message_index: 42,
+        },
+    )
+    .await;
+    let refusal_update = rx
+        .recv()
+        .await
+        .expect("refusal row updates workflow progress");
+    assert_eq!(refusal_update.state.as_deref(), Some("start"));
+    assert!(refusal_update
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("refusal body remains a visible assistant message")));
+    assert_eq!(refusal_update.last_tool_name.as_deref(), Some("Read"));
 }
 
 /// r2-tests-honesty-005: nothing ties the `agentType: '<x>'` literals in the
@@ -5097,9 +5214,9 @@ fn without_a_usable_override_the_gate_is_the_cpu_default() {
 /// The env var's spelling is the contract with the user; a typo here fails
 /// silently and looks exactly like the feature not existing.
 #[test]
-fn the_override_env_var_is_spelled_the_way_claude_code_spells_it() {
+fn the_override_env_var_uses_the_product_namespace() {
     assert_eq!(
         WORKFLOW_MAX_CONCURRENT_AGENTS_ENV,
-        "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS"
+        branding::WORKFLOW_MAX_CONCURRENT_AGENTS_ENV
     );
 }

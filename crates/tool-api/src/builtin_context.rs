@@ -563,6 +563,14 @@ impl BuiltinToolContext {
 /// `Arc<hooks::HookExecutorImpl>`.
 #[async_trait::async_trait]
 pub trait TaskLifecycleHookFirer: Send + Sync {
+    /// Capture the session-owned stop capability before a foreground agent can
+    /// move to background work. The resulting owner retains its epoch fence.
+    fn subagent_stop_firer(
+        &self,
+        _session_id: lingxi_core::types::SessionId,
+    ) -> Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>> {
+        None
+    }
     /// claude-code `executeTaskCreatedHooks` BLOCKING path. `Ok(())` = allow
     /// creation; `Err(reason)` = a hook BLOCKED creation (the tool rolls the
     /// just-created task back and surfaces `reason`).

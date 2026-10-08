@@ -345,7 +345,7 @@ pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> 
     let assistant_id = MessageId::new();
     let assistant_msg = ConversationMessage::Assistant {
         id: assistant_id,
-        content: vec![ContentBlock::Text { text: text.clone() }],
+        content: vec![ContentBlock::Text { text: text.clone(), citations: None }],
         stop_reason: Some("prompt_too_long".to_string()),
     };
     {
@@ -376,7 +376,7 @@ pub(crate) async fn surface_rapid_refill_thrashing(orch: &ConversationOrchestrat
     let assistant_msg = ConversationMessage::Assistant {
         id: assistant_id,
         content: vec![ContentBlock::Text {
-            text: compaction::RAPID_REFILL_THRASHING_MESSAGE.to_string(),
+            text: compaction::RAPID_REFILL_THRASHING_MESSAGE.to_string(), citations: None,
         }],
         // The binary surfaces this as `error:"invalid_request"`.
         stop_reason: Some("invalid_request".to_string()),
@@ -583,7 +583,7 @@ pub(crate) async fn surface_terminal_api_error(
     let assistant_id = MessageId::new();
     let assistant_msg = ConversationMessage::Assistant {
         id: assistant_id,
-        content: vec![ContentBlock::Text { text: text.clone() }],
+        content: vec![ContentBlock::Text { text: text.clone(), citations: None }],
         stop_reason: Some(stop_reason.to_string()),
     };
     {
@@ -639,10 +639,14 @@ pub(crate) fn is_carveout_propagated(e: &OrchestratorError) -> bool {
         OrchestratorError::PermissionAbort { .. }
             | OrchestratorError::RepeatedOverloaded
             | OrchestratorError::ApiCall(
-                LlmError::RateLimited { .. } | LlmError::Overloaded { .. }
+                LlmError::RateLimited { .. }
+                    | LlmError::Overloaded { .. }
+                    | LlmError::RequestDispatchRejected { .. }
             )
             | OrchestratorError::Streaming(
-                LlmError::RateLimited { .. } | LlmError::Overloaded { .. }
+                LlmError::RateLimited { .. }
+                    | LlmError::Overloaded { .. }
+                    | LlmError::RequestDispatchRejected { .. }
             )
     )
 }
@@ -753,7 +757,7 @@ pub(crate) async fn surface_api_error_notice(
     let assistant_id = MessageId::new();
     let assistant_msg = ConversationMessage::Assistant {
         id: assistant_id,
-        content: vec![ContentBlock::Text { text: text.clone() }],
+        content: vec![ContentBlock::Text { text: text.clone(), citations: None }],
         stop_reason: Some("model_error".to_string()),
     };
     {

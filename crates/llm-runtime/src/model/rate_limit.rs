@@ -1,8 +1,4 @@
-//! Rate-limit header parsing for Anthropic responses.
-//!
-//! Spec §7 (lines 665-666):
-//! * `Retry-After` — seconds, RFC 7231 §7.1.3 delta-seconds form.
-//! * `anthropic-ratelimit-requests-reset` — ISO8601 UTC.
+//! Rate-limit state and UI projection for decoded provider response metadata.
 //!
 //! The user-facing error string `"Rate limited; retrying in {N}s"` is locked
 //! byte-for-byte (spec §5 recovery-strategy table line 517).
@@ -10,6 +6,9 @@
 #![forbid(unsafe_code)]
 
 use chrono::{DateTime, Datelike, Local, TimeZone, Timelike};
+use lingxi_llm_client::providers::response_headers::{
+    AnthropicQuotaWindowHeaders, AnthropicRateLimitError, AnthropicRateLimitHeaders,
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Locked rate-limit error message format. Used by `ApiError::RateLimited::fmt`.
@@ -22,74 +21,16 @@ pub fn format_rate_limited_msg(secs: u64) -> String {
     format!("Rate limited; retrying in {secs}s")
 }
 
-/// Look up `header_name` case-insensitively in a header vec and return the
-/// first matching value, if any.
-pub(crate) fn header_value<'a>(
-    headers: &'a [(String, String)],
-    header_name: &str,
-) -> Option<&'a str> {
-    headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(header_name))
-        .map(|(_, v)| v.as_str())
-}
-
-/// Parse the `Retry-After` header (RFC 7231 §7.1.3 delta-seconds form).
-///
-/// Returns `None` if the header is missing, empty, or in the HTTP-date form
-/// (which we deliberately don't support — claude-code parity).
+/// Project the SDK's `Retry-After` delta-seconds decoder for Host retry policy.
 #[must_use]
 pub fn parse_retry_after(headers: &[(String, String)]) -> Option<Duration> {
-    let raw = header_value(headers, "retry-after")?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    raw.parse::<u64>().ok().map(Duration::from_secs)
+    lingxi_llm_client::providers::response_headers::retry_after_delta_seconds(headers)
 }
 
-/// Parse a Go-duration string (e.g. `"6m0s"`, `"1.5s"`, `"880ms"`,
-/// `"2m59.56s"`, `"1h2m3s"`) into a [`Duration`]. A bare number with no unit is
-/// treated as seconds. Returns `None` on a malformed value.
+/// Project the SDK's Go-duration decoder for Host retry policy.
 #[must_use]
 pub fn parse_go_duration(raw: &str) -> Option<Duration> {
-    let s = raw.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let bytes = s.as_bytes();
-    let mut idx = 0;
-    let mut total_secs = 0f64;
-    let mut saw_component = false;
-    while idx < bytes.len() {
-        let num_start = idx;
-        while idx < bytes.len() && (bytes[idx].is_ascii_digit() || bytes[idx] == b'.') {
-            idx += 1;
-        }
-        if idx == num_start {
-            return None; // a unit with no preceding number
-        }
-        let num: f64 = s[num_start..idx].parse().ok()?;
-        let unit_start = idx;
-        while idx < bytes.len() && !bytes[idx].is_ascii_digit() && bytes[idx] != b'.' {
-            idx += 1;
-        }
-        let mult = match &s[unit_start..idx] {
-            "h" => 3600.0,
-            "m" => 60.0,
-            "s" => 1.0,
-            "ms" => 0.001,
-            "us" | "µs" => 0.000_001,
-            "ns" => 0.000_000_001,
-            "" => 1.0, // bare number → seconds
-            _ => return None,
-        };
-        total_secs += num * mult;
-        saw_component = true;
-    }
-    if !saw_component || !total_secs.is_finite() {
-        return None;
-    }
-    Some(Duration::from_secs_f64(total_secs.max(0.0)))
+    lingxi_llm_client::providers::response_headers::parse_go_duration(raw)
 }
 
 /// Resolve an OpenAI-style 429 reset delay from the `x-ratelimit-reset-requests`
@@ -102,61 +43,28 @@ pub fn parse_go_duration(raw: &str) -> Option<Duration> {
 /// into a window that hasn't refilled.
 #[must_use]
 pub fn parse_openai_reset(headers: &[(String, String)]) -> Option<Duration> {
-    let one = |name: &str| header_value(headers, name).and_then(parse_go_duration);
-    match (
-        one("x-ratelimit-reset-requests"),
-        one("x-ratelimit-reset-tokens"),
-    ) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (Some(a), None) | (None, Some(a)) => Some(a),
-        (None, None) => None,
-    }
+    lingxi_llm_client::providers::response_headers::ProviderResponseHeaders::decode(
+        lingxi_llm_client::protocol::ProtocolFamily::OpenAiResponses,
+        "openai",
+        headers,
+        SystemTime::now(),
+    )
+    .openai_reset
 }
 
-/// Parse `anthropic-ratelimit-requests-reset` (ISO8601 `YYYY-MM-DDTHH:MM:SSZ`)
-/// into a `Duration` relative to `now`. Negative diffs (past timestamps)
-/// clamp to `Duration::ZERO`. Non-conforming values return `None`.
-///
-/// The parser is hand-rolled to avoid pulling `chrono` into the runtime
-/// crate; it accepts the exact `YYYY-MM-DDTHH:MM:SSZ` shape claude-code emits.
+/// Resolve the SDK-decoded Anthropic request reset against Host's clock.
 #[must_use]
 pub fn parse_anthropic_ratelimit_reset(
     headers: &[(String, String)],
     now: SystemTime,
 ) -> Option<Duration> {
-    let raw = header_value(headers, "anthropic-ratelimit-requests-reset")?.trim();
-    let target = parse_iso8601_utc(raw)?;
-    let now_secs = now.duration_since(UNIX_EPOCH).ok()?.as_secs();
-    Some(Duration::from_secs(target.saturating_sub(now_secs)))
+    AnthropicRateLimitHeaders::request_reset_delay(headers, now)
 }
 
-/// Cap a persistent rate-limit reset wait at 6 hours (claude-code
-/// `PERSISTENT_RESET_CAP_MS`).
-pub const PERSISTENT_RESET_CAP_MS: u64 = 6 * 60 * 60 * 1000;
-
-/// Parse `anthropic-ratelimit-unified-reset` (a Unix-epoch **seconds** value —
-/// distinct from the ISO8601 `…-requests-reset` above) into a `Duration` from
-/// `now`, capped at [`PERSISTENT_RESET_CAP_MS`]. 1:1 with claude-code
-/// `getRateLimitResetDelayMs` (`withRetry.ts:814-821`): a past-or-equal reset
-/// (`delayMs <= 0`) returns `None` so the caller falls through to the next
-/// delay source (NOT clamped to zero, unlike the ISO parser above).
-///
-/// Divergence: claude-code uses JS `Number()`, accepting decimal/scientific
-/// forms; we parse integer epoch seconds (the form the server sends). A
-/// non-integer value yields `None` (same fail-soft outcome).
+/// Resolve the SDK-decoded unified reset against Host's clock.
 #[must_use]
 pub fn parse_unified_reset(headers: &[(String, String)], now: SystemTime) -> Option<Duration> {
-    let raw = header_value(headers, "anthropic-ratelimit-unified-reset")?.trim();
-    let reset_unix_sec: u64 = raw.parse().ok()?;
-    let now_ms = u64::try_from(now.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()?;
-    let reset_ms = reset_unix_sec.checked_mul(1000)?;
-    // checked_sub → None for a PAST reset; an exactly-now reset (0) also yields
-    // None (claude-code `delayMs <= 0 → null`).
-    let delay_ms = reset_ms.checked_sub(now_ms)?;
-    if delay_ms == 0 {
-        return None;
-    }
-    Some(Duration::from_millis(delay_ms.min(PERSISTENT_RESET_CAP_MS)))
+    AnthropicRateLimitHeaders::unified_reset_delay(headers, now)
 }
 
 /// 24h in milliseconds — the `formatResetTime` date-vs-time branch boundary
@@ -313,6 +221,15 @@ impl FormattedResetTimes {
 /// call sites (`rateLimitMessages.ts:145-148`).
 #[must_use]
 pub fn formatted_reset_times_from_headers(headers: &[(String, String)]) -> FormattedResetTimes {
+    let parsed = AnthropicRateLimitHeaders::decode(headers);
+    formatted_reset_times_from_decoded(&parsed)
+}
+
+/// Format the decoded reset timestamps using Host locale and timezone state.
+#[must_use]
+pub fn formatted_reset_times_from_decoded(
+    headers: &AnthropicRateLimitHeaders,
+) -> FormattedResetTimes {
     formatted_reset_times_at(headers, Local::now())
 }
 
@@ -320,19 +237,15 @@ pub fn formatted_reset_times_from_headers(headers: &[(String, String)]) -> Forma
 /// `now` so unit tests never read the wall clock.
 #[must_use]
 fn formatted_reset_times_at(
-    headers: &[(String, String)],
+    headers: &AnthropicRateLimitHeaders,
     now: DateTime<Local>,
 ) -> FormattedResetTimes {
-    // `Number(header)` in TS: an absent/blank/non-numeric value yields `None`
-    // (NaN → falsy → `resetsAt` undefined), so the reset clause is dropped.
-    let parse = |name: &str| -> Option<i64> {
-        header_value(headers, name)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .and_then(|s| s.parse::<i64>().ok())
-    };
-    let resets_at = parse("anthropic-ratelimit-unified-reset");
-    let overage_resets_at = parse("anthropic-ratelimit-unified-overage-reset");
+    let resets_at = headers
+        .reset_epoch_seconds
+        .and_then(|seconds| i64::try_from(seconds).ok());
+    let overage_resets_at = headers
+        .overage_reset_epoch_seconds
+        .and_then(|seconds| i64::try_from(seconds).ok());
 
     FormattedResetTimes {
         reset_time: format_reset_time_at(resets_at, now, true, true),
@@ -351,11 +264,8 @@ fn formatted_reset_times_at(
 /// `withRetry.ts:276`). Surfaced so callers can avoid retrying a 429 that
 /// cannot succeed until the window resets.
 #[must_use]
-pub fn overage_disabled_reason(headers: &[(String, String)]) -> Option<&str> {
-    header_value(
-        headers,
-        "anthropic-ratelimit-unified-overage-disabled-reason",
-    )
+pub fn overage_disabled_reason(headers: &[(String, String)]) -> Option<String> {
+    AnthropicRateLimitHeaders::decode(headers).overage_disabled_reason
 }
 
 /// Parsed unified rate-limit state used to render the user-facing 429 message.
@@ -469,35 +379,12 @@ fn claim_abbrev(claim: &str) -> Option<&'static str> {
     }
 }
 
-/// Tolerant epoch-seconds read, mirroring TS `Number(header)` fail-soft:
-/// absent/blank/non-numeric → `None`. Divergence (same stance as
-/// `parse_unified_reset`): TS `Number()` accepts decimal/scientific epoch
-/// forms; we parse integer epoch seconds (the form the server sends) and fail
-/// soft otherwise.
-fn parse_epoch_secs(headers: &[(String, String)], name: &str) -> Option<u64> {
-    header_value(headers, name)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .and_then(|s| s.parse::<u64>().ok())
-}
-
-/// Tolerant 0-1-fraction read (utilization / surpassed-threshold headers).
-/// Non-finite values (`NaN`/`inf` parse as valid f64 in Rust) are rejected so
-/// `RateLimitInfo: PartialEq` comparisons stay total in practice.
-fn parse_fraction(headers: &[(String, String)], name: &str) -> Option<f64> {
-    header_value(headers, name)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .and_then(|s| s.parse::<f64>().ok())
-        .filter(|f| f.is_finite())
-}
-
 /// One window of raw utilization (`RawWindowUtilization`,
 /// `claudeAiLimits.ts:150-153`). Both fields are required — a window is
 /// parsed ATOMICALLY (both `-utilization` and `-reset` headers, ts:174) or
 /// not at all, so a `RawWindow` can never carry a dangling half.
-// `Eq` cannot be derived (`utilization: f64`); `parse_fraction` filters
-// non-finite values so `PartialEq` stays total in practice.
+// `Eq` cannot be derived (`utilization: f64`); the SDK drops non-finite wire
+// values so `PartialEq` stays total in practice.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RawWindow {
     /// 0-1 utilization fraction.
@@ -521,35 +408,26 @@ pub struct RawUtilization {
 }
 
 impl RawUtilization {
-    /// Parse from response headers. Absent/empty headers → `Self::default()`.
-    ///
-    /// Per window (`['five_hour','5h'] / ['seven_day','7d']`,
-    /// `claudeAiLimits.ts:166-169`): both the `-utilization` and `-reset`
-    /// header must be present AND parse (the file's tolerant-parse stance —
-    /// TS `Number()` would store `NaN` for a present-but-malformed value; we
-    /// drop the window instead, the same fail-soft divergence documented on
-    /// [`parse_fraction`] / [`parse_epoch_secs`]).
+    /// Project decoded SDK quota headers to the runtime's account-state model.
     #[must_use]
     pub fn from_headers(headers: &[(String, String)]) -> Self {
-        let window = |abbrev: &str| -> Option<RawWindow> {
-            let utilization = parse_fraction(
-                headers,
-                &format!("anthropic-ratelimit-unified-{abbrev}-utilization"),
-            )?;
-            let resets_at = parse_epoch_secs(
-                headers,
-                &format!("anthropic-ratelimit-unified-{abbrev}-reset"),
-            )?;
-            Some(RawWindow {
-                utilization,
-                resets_at,
-            })
-        };
+        Self::from_decoded(&AnthropicRateLimitHeaders::decode(headers))
+    }
+
+    #[must_use]
+    pub fn from_decoded(headers: &AnthropicRateLimitHeaders) -> Self {
         Self {
-            five_hour: window("5h"),
-            seven_day: window("7d"),
+            five_hour: raw_window(&headers.five_hour),
+            seven_day: raw_window(&headers.seven_day),
         }
     }
+}
+
+fn raw_window(headers: &AnthropicQuotaWindowHeaders) -> Option<RawWindow> {
+    Some(RawWindow {
+        utilization: headers.utilization?,
+        resets_at: headers.reset_epoch_seconds?,
+    })
 }
 
 /// One early-warning threshold pair (`claudeAiLimits.ts:38-41`): warn when
@@ -629,25 +507,21 @@ fn compute_time_progress(resets_at: u64, window_seconds: u64, now: SystemTime) -
 }
 
 /// `getHeaderBasedEarlyWarning` (`claudeAiLimits.ts:255-294`): iterate the
-/// claim map in order; the first claim whose
-/// `anthropic-ratelimit-unified-{abbrev}-surpassed-threshold` header is
-/// PRESENT (`!== null`, `:268`) wins and yields a FRESH replacement limits
-/// object (`:281-289`) — only the fields the TS object sets are populated.
+/// claim map in order; the first finite, nonempty decoded threshold wins.
+/// Native 2.1.291 `Nve` removes empty and non-finite values before `UPn`
+/// checks `surpassedThreshold !== undefined`. Numeric zero remains present.
 fn header_based_early_warning(
-    headers: &[(String, String)],
+    headers: &AnthropicRateLimitHeaders,
     fallback_available: Option<bool>,
 ) -> Option<RateLimitInfo> {
     for (abbrev, rate_limit_type) in EARLY_WARNING_CLAIM_MAP {
-        let surpassed_name = format!("anthropic-ratelimit-unified-{abbrev}-surpassed-threshold");
-        if header_value(headers, &surpassed_name).is_none() {
+        let Some(window) = quota_window(headers, abbrev) else {
             continue;
-        }
-        // `utilizationHeader ? Number(...) : undefined` (ts:276-279) — the
-        // tolerant parsers reproduce the absent→undefined collapse.
-        let resets_at = parse_epoch_secs(
-            headers,
-            &format!("anthropic-ratelimit-unified-{abbrev}-reset"),
-        );
+        };
+        let Some(surpassed_threshold) = window.surpassed_threshold else {
+            continue;
+        };
+        let resets_at = window.reset_epoch_seconds;
         return Some(RateLimitInfo {
             status: Some("allowed_warning".to_string()),
             // The TS fresh object folds the per-claim reset into the
@@ -656,17 +530,9 @@ fn header_based_early_warning(
             resets_at,
             claim_resets_at: resets_at,
             rate_limit_type: Some(rate_limit_type.to_string()),
-            utilization: parse_fraction(
-                headers,
-                &format!("anthropic-ratelimit-unified-{abbrev}-utilization"),
-            ),
+            utilization: window.utilization,
             fallback_available,
-            // `Number(surpassedThreshold)` (ts:288). Divergence (same
-            // fail-soft stance as `parse_fraction` everywhere else): TS would
-            // store `NaN` for a malformed value — but `0` for an EMPTY string
-            // (`Number('')` is `0`, not `NaN`); we store `None` for both. The
-            // warning itself still fires on header PRESENCE alone (ts:268).
-            surpassed_threshold: parse_fraction(headers, &surpassed_name),
+            surpassed_threshold: Some(surpassed_threshold),
             // Fresh-object semantics: overage fields stay `None`
             // (`isUsingOverage: false` in TS has no struct counterpart).
             ..RateLimitInfo::default()
@@ -681,7 +547,7 @@ fn header_based_early_warning(
 /// t.timePct` (`:324-326`). The fresh object carries NO `surpassedThreshold`
 /// (`:332-339`).
 fn time_relative_early_warning(
-    headers: &[(String, String)],
+    headers: &AnthropicRateLimitHeaders,
     config: &EarlyWarningConfig,
     fallback_available: Option<bool>,
     now: SystemTime,
@@ -691,14 +557,9 @@ fn time_relative_early_warning(
     // malformed value becomes `NaN`, every `NaN` comparison is false, and no
     // warning fires — requiring a successful parse here is behaviourally
     // identical and keeps the fail-soft stance of the tolerant parsers.
-    let utilization = parse_fraction(
-        headers,
-        &format!("anthropic-ratelimit-unified-{abbrev}-utilization"),
-    )?;
-    let resets_at = parse_epoch_secs(
-        headers,
-        &format!("anthropic-ratelimit-unified-{abbrev}-reset"),
-    )?;
+    let window = quota_window(headers, abbrev)?;
+    let utilization = window.utilization?;
+    let resets_at = window.reset_epoch_seconds?;
     let time_progress = compute_time_progress(resets_at, config.window_seconds, now);
     let should_warn = config
         .thresholds
@@ -722,8 +583,8 @@ fn time_relative_early_warning(
 /// `getEarlyWarningFromHeaders` (`claudeAiLimits.ts:347-374`): header-based
 /// detection first (preferred when the API sends the header), else the
 /// time-relative configs in priority order.
-fn early_warning_from_headers(
-    headers: &[(String, String)],
+fn early_warning_from_decoded(
+    headers: &AnthropicRateLimitHeaders,
     fallback_available: Option<bool>,
     now: SystemTime,
 ) -> Option<RateLimitInfo> {
@@ -733,6 +594,18 @@ fn early_warning_from_headers(
     EARLY_WARNING_CONFIGS
         .iter()
         .find_map(|config| time_relative_early_warning(headers, config, fallback_available, now))
+}
+
+fn quota_window<'a>(
+    headers: &'a AnthropicRateLimitHeaders,
+    abbrev: &str,
+) -> Option<&'a AnthropicQuotaWindowHeaders> {
+    match abbrev {
+        "5h" => Some(&headers.five_hour),
+        "7d" => Some(&headers.seven_day),
+        "overage" => Some(&headers.overage),
+        _ => None,
+    }
 }
 
 impl RateLimitInfo {
@@ -756,68 +629,45 @@ impl RateLimitInfo {
     /// downgraded to `allowed`; `rejected` passes through untouched.
     #[must_use]
     pub fn from_headers_at(headers: &[(String, String)], now: SystemTime) -> Self {
-        let rate_limit_type =
-            header_value(headers, "anthropic-ratelimit-unified-representative-claim")
-                .map(str::to_string);
+        Self::from_decoded_at(&AnthropicRateLimitHeaders::decode(headers), now)
+    }
 
-        // Per-claim window reads keyed by the representative claim's abbrev
-        // (`anthropic-ratelimit-unified-{abbrev}-utilization` / `-reset`,
-        // claudeAiLimits.ts:164-179). No abbrev → no per-claim read.
-        let abbrev = rate_limit_type.as_deref().and_then(claim_abbrev);
-        let utilization = abbrev.and_then(|a| {
-            parse_fraction(
-                headers,
-                &format!("anthropic-ratelimit-unified-{a}-utilization"),
-            )
-        });
-        let claim_resets_at = abbrev.and_then(|a| {
-            parse_epoch_secs(headers, &format!("anthropic-ratelimit-unified-{a}-reset"))
-        });
-
+    /// Apply Host early-warning and account-state policy to decoded SDK wire
+    /// fields. The SDK owns header names, coercion, and provider error-body
+    /// decoding; this layer owns the injected clock and state projection.
+    #[must_use]
+    pub fn from_decoded_at(headers: &AnthropicRateLimitHeaders, now: SystemTime) -> Self {
+        let rate_limit_type = headers.representative_claim.clone();
+        let window = rate_limit_type
+            .as_deref()
+            .and_then(claim_abbrev)
+            .and_then(|abbrev| quota_window(headers, abbrev));
         let mut parsed = Self {
             rate_limit_type,
-            overage_status: header_value(headers, "anthropic-ratelimit-unified-overage-status")
-                .map(str::to_string),
-            overage_disabled_reason: overage_disabled_reason(headers).map(str::to_string),
+            overage_status: headers.overage_status.clone(),
+            overage_disabled_reason: headers.overage_disabled_reason.clone(),
             // `headers.get(…) || 'allowed'` (claudeAiLimits.ts:379-381) —
             // empty string is falsy in TS, so it is "no usable value" → None.
-            status: header_value(headers, "anthropic-ratelimit-unified-status")
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
-            resets_at: parse_epoch_secs(headers, "anthropic-ratelimit-unified-reset"),
-            utilization,
-            claim_resets_at,
-            overage_resets_at: parse_epoch_secs(
-                headers,
-                "anthropic-ratelimit-unified-overage-reset",
-            ),
-            // `=== 'available'` (claudeAiLimits.ts:384-385): strict equality
-            // on the verbatim header value — no trim, no case-fold.
-            fallback_available: header_value(headers, "anthropic-ratelimit-unified-fallback")
-                .map(|v| v == "available"),
+            status: headers.status.clone(),
+            resets_at: headers.reset_epoch_seconds,
+            utilization: window.and_then(|window| window.utilization),
+            claim_resets_at: window.and_then(|window| window.reset_epoch_seconds),
+            overage_resets_at: headers.overage_reset_epoch_seconds,
+            fallback_available: headers.fallback_available,
             // Only ever set by the header-based early-warning replacement
             // below (claudeAiLimits.ts:288) — never by the raw parse.
             surpassed_threshold: None,
             // 2.1.206 overage fields — `=== 'true'` strict equality (no
             // header → `false`, matching the TS boolean's no-`undefined`
             // stance).
-            overage_in_use: header_value(headers, "anthropic-ratelimit-unified-overage-in-use")
-                == Some("true"),
+            overage_in_use: headers.overage_in_use,
             // `d ? d.split(',').map(trim) : undefined` — an empty header
             // value is falsy in TS, so a present-but-empty header collapses to
             // `None` exactly like an absent one (same `.filter(!empty)`
             // convention as `status` / the `from_429_error_headers` fields).
-            upgrade_paths: header_value(headers, "anthropic-ratelimit-unified-upgrade-paths")
-                .filter(|s| !s.is_empty())
-                .map(|v| v.split(',').map(|s| s.trim().to_string()).collect()),
-            overage_period_monthly_utilization: parse_fraction(
-                headers,
-                "anthropic-ratelimit-unified-overage-period-monthly-utilization",
-            ),
-            overage_period_channel_utilization: parse_fraction(
-                headers,
-                "anthropic-ratelimit-unified-overage-period-channel-utilization",
-            ),
+            upgrade_paths: headers.upgrade_paths.clone(),
+            overage_period_monthly_utilization: headers.overage_period_monthly_utilization,
+            overage_period_channel_utilization: headers.overage_period_channel_utilization,
             // The success-path header parse never sees a 429 error body —
             // `Nqi(e)` only runs on the error-catch site
             // ([`Self::from_429_error`]).
@@ -829,7 +679,7 @@ impl RateLimitInfo {
         match parsed.status.as_deref() {
             Some("allowed" | "allowed_warning") => {
                 if let Some(warning) =
-                    early_warning_from_headers(headers, parsed.fallback_available, now)
+                    early_warning_from_decoded(headers, parsed.fallback_available, now)
                 {
                     // TS RETURNS the fresh early-warning object (ts:419-421),
                     // discarding the regular parse — including every overage
@@ -909,73 +759,22 @@ impl RateLimitInfo {
         headers: &[(String, String)],
         body: Option<&serde_json::Value>,
     ) -> Option<Self> {
-        // `headers?.get?.(…)` + TS truthiness: empty string is falsy, so it
-        // neither passes the gate nor is assigned onto the limits object.
-        let rate_limit_type =
-            header_value(headers, "anthropic-ratelimit-unified-representative-claim")
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
-        let overage_status = header_value(headers, "anthropic-ratelimit-unified-overage-status")
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let (credits_required, body_disabled_reason) = body
-            .map(Self::credits_required_from_body)
-            .unwrap_or((false, None));
-        if rate_limit_type.is_none() && overage_status.is_none() && !credits_required {
-            return None;
-        }
-        Some(Self {
-            // errors.ts:483 — status is 'rejected' regardless of any
-            // `anthropic-ratelimit-unified-status` header on the error.
-            status: Some("rejected".to_string()),
-            rate_limit_type,
-            overage_status,
-            // `if (resetHeader) limits.resetsAt = Number(resetHeader)`
-            // (errors.ts:489-494) — the tolerant parse reproduces the
-            // absent/empty→skip collapse; malformed values fail soft to
-            // `None` (the documented divergence from TS storing `NaN`).
-            resets_at: parse_epoch_secs(headers, "anthropic-ratelimit-unified-reset"),
-            overage_resets_at: parse_epoch_secs(
-                headers,
-                "anthropic-ratelimit-unified-overage-reset",
-            ),
-            // `if (overageDisabledReason)` (errors.ts:511-516) — empty is falsy.
-            // Header takes precedence over the `Nqi` body-derived reason.
-            overage_disabled_reason: overage_disabled_reason(headers)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .or(body_disabled_reason),
-            credits_required,
-            ..Self::default()
-        })
+        let decoded = AnthropicRateLimitHeaders::decode_429_error(headers, body)?;
+        Some(Self::from_decoded_429_error(&decoded))
     }
 
-    /// Dig a 429 error body for claude-code `Nqi(e)`'s
-    /// `error.error.details` — returns `(credits_required,
-    /// disabled_reason)`. `disabled_reason` is only meaningful when
-    /// `credits_required` is `true` (mirrors `Nqi` only reading
-    /// `details.disabled_reason` inside the `error_code==="credits_required"`
-    /// branch).
-    fn credits_required_from_body(body: &serde_json::Value) -> (bool, Option<String>) {
-        let details = body
-            .get("error")
-            .and_then(|e| e.get("error"))
-            .and_then(|e| e.get("details"));
-        let Some(details) = details else {
-            return (false, None);
-        };
-        let is_credits_required = details
-            .get("error_code")
-            .and_then(serde_json::Value::as_str)
-            == Some("credits_required");
-        if !is_credits_required {
-            return (false, None);
+    #[must_use]
+    pub fn from_decoded_429_error(headers: &AnthropicRateLimitError) -> Self {
+        Self {
+            status: Some("rejected".to_string()),
+            rate_limit_type: headers.representative_claim.clone(),
+            overage_status: headers.overage_status.clone(),
+            resets_at: headers.reset_epoch_seconds,
+            overage_resets_at: headers.overage_reset_epoch_seconds,
+            overage_disabled_reason: headers.overage_disabled_reason.clone(),
+            credits_required: headers.credits_required,
+            ..Self::default()
         }
-        let disabled_reason = details
-            .get("disabled_reason")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
-        (true, disabled_reason)
     }
 }
 
@@ -1105,68 +904,6 @@ fn limit_reached_text(
 /// intentionally omitted (api-client is the external CLI surface).
 fn format_limit_reached_text(limit: &str, reset_message: &str) -> String {
     format!("You've hit your {limit}{reset_message}")
-}
-
-/// Parse the strict `YYYY-MM-DDTHH:MM:SSZ` form into a Unix-epoch second.
-/// Hand-rolled — no chrono runtime dep needed.
-#[allow(
-    clippy::cast_sign_loss,
-    clippy::cast_possible_wrap,
-    clippy::similar_names,
-    clippy::unreadable_literal,
-    reason = "Hinnant days_from_civil algorithm: ranges are mathematically bounded by the YYYY-MM-DDTHH:MM:SSZ validation above; literals 146097/719468 are canonical algorithm constants"
-)]
-fn parse_iso8601_utc(s: &str) -> Option<u64> {
-    // 1234567890123456789012345
-    // YYYY-MM-DDTHH:MM:SSZ
-    if s.len() != 20 || !s.ends_with('Z') {
-        return None;
-    }
-    let year: i64 = s[0..4].parse().ok()?;
-    let month: u32 = s[5..7].parse().ok()?;
-    let day: u32 = s[8..10].parse().ok()?;
-    let hour: u32 = s[11..13].parse().ok()?;
-    let minute: u32 = s[14..16].parse().ok()?;
-    let second: u32 = s[17..19].parse().ok()?;
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || hour >= 24
-        || minute >= 60
-        || second >= 60
-    {
-        return None;
-    }
-    // Days since Unix epoch (1970-01-01), using the proleptic Gregorian
-    // calendar. We only need to handle 1970-2099 for our use case; the
-    // formula is the standard "civil from days" inverse.
-    let y = year;
-    let m = i64::from(month);
-    let d = i64::from(day);
-    // Howard Hinnant's "days_from_civil" algorithm:
-    let y_adj = y - i64::from(m <= 2);
-    let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
-    let yoe = (y_adj - era * 400) as u64; // [0, 399]
-    let doy: u64 = (153 * {
-        let m = m as u64;
-        if m > 2 {
-            m - 3
-        } else {
-            m + 9
-        }
-    } + 2)
-        / 5
-        + d as u64
-        - 1; // [0, 365]
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
-    let days = era * 146097 + doe as i64 - 719468; // 719468 = days from 0000-03-01 to 1970-01-01
-    if days < 0 {
-        return None;
-    }
-    let secs = (days as u64) * 86_400
-        + u64::from(hour) * 3_600
-        + u64::from(minute) * 60
-        + u64::from(second);
-    Some(secs)
 }
 
 /// Seconds to wait, from an llm-runtime rate-limit error (server value wins).

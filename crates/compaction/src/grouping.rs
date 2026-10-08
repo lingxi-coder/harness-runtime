@@ -85,7 +85,7 @@ pub fn estimate_tokens_for_range(msgs: &[ConversationMessage]) -> u64 {
 
 fn estimate_block_tokens(block: &ContentBlock) -> u64 {
     match block {
-        ContentBlock::Text { text } => estimate_content_tokens(text),
+        ContentBlock::Text { text, .. } => estimate_content_tokens(text),
         ContentBlock::TextJsUtf16 {
             utf16_code_units, ..
         } => {
@@ -169,10 +169,10 @@ mod tests {
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
-                    text: "你好".into(),
+                    text: "你好".into(), citations: None,
                 },
                 ContentBlock::Text {
-                    text: "😀".into()
+                    text: "😀".into(), citations: None
                 },
                 ContentBlock::ToolUse {
                     id: ToolUseId::new(),
@@ -199,7 +199,7 @@ mod tests {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
                 content: "display".repeat(1000),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: Some(vec![
                     json!({"type":"text", "text":"你好😀"}),
@@ -233,7 +233,7 @@ mod tests {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id,
                 content: "ok".into(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],

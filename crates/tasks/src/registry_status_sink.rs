@@ -95,6 +95,19 @@ impl TaskStatusSink for RegistryStatusSink {
         }
     }
 
+    async fn set_agent_status_with_finalizing(
+        &self,
+        task_id: &str,
+        status: TaskStatus,
+        finalizing: bool,
+    ) {
+        if let Some(registry) = self.registry() {
+            let _ = registry
+                .set_agent_status_with_finalizing(task_id, status, finalizing)
+                .await;
+        }
+    }
+
     async fn set_teammate_idle(&self, task_id: &str) {
         if let Some(registry) = self.registry() {
             let _ = registry.set_teammate_idle(task_id).await;
@@ -132,9 +145,30 @@ impl TaskStatusSink for RegistryStatusSink {
         agent_id: Option<lingxi_core::types::AgentId>,
         agent_name: Option<String>,
         team_name: Option<String>,
+        run: Option<lingxi_core::host::handback::HandbackRunKey>,
     ) {
         if let Some(reg) = self.registry() {
-            reg.mark_task_rested(task_id, result, usage, agent_id, agent_name, team_name)
+            reg.mark_task_rested(task_id, result, usage, agent_id, agent_name, team_name, run)
+                .await;
+        }
+    }
+
+    async fn notify_rest_with_finalizing(
+        &self,
+        task_id: &str,
+        result: Option<String>,
+        usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
+        agent_id: Option<lingxi_core::types::AgentId>,
+        agent_name: Option<String>,
+        team_name: Option<String>,
+        run: Option<lingxi_core::host::handback::HandbackRunKey>,
+        finalizing: bool,
+    ) {
+        if let Some(registry) = self.registry() {
+            registry
+                .mark_task_rested_with_finalizing(
+                    task_id, result, usage, agent_id, agent_name, team_name, run, finalizing,
+                )
                 .await;
         }
     }
@@ -146,6 +180,18 @@ impl TaskStatusSink for RegistryStatusSink {
     ) {
         if let Some(reg) = self.registry() {
             reg.set_agent_outcome(task_id, outcome).await;
+        }
+    }
+
+    async fn replace_agent_transcript(
+        &self,
+        task_id: &str,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
+    ) {
+        if let Some(reg) = self.registry() {
+            let _ = reg
+                .replace_agent_transcript_messages(task_id, messages)
+                .await;
         }
     }
 

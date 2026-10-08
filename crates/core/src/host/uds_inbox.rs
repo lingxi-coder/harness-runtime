@@ -15,6 +15,43 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+/// The queue insertion called by `session.receive`'s first `next(e)`. Its
+/// result is true only when the inbound policy actually accepted the message.
+pub type PeerQueueCommit = Arc<dyn Fn(String) -> bool + Send + Sync>;
+
+#[async_trait::async_trait]
+pub trait PeerReceiveGate: Send + Sync {
+    /// Return false only when this gate belongs to a different session
+    /// generation; a consumed delivery still counts as handled.
+    async fn receive(
+        &self,
+        destination_session_id: &str,
+        text: &str,
+        commit: PeerQueueCommit,
+    ) -> bool;
+}
+
+/// Installed before a listener is advertised, then filled when its owning
+/// Orchestrator is ready. This closes the bridge startup window without
+/// letting a different session generation screen an earlier delivery.
+#[derive(Default)]
+pub struct PeerReceiveGateSlot(Mutex<Option<Arc<dyn PeerReceiveGate>>>);
+
+impl PeerReceiveGateSlot {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&self, gate: Arc<dyn PeerReceiveGate>) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(gate);
+    }
+
+    fn get(&self) -> Option<Arc<dyn PeerReceiveGate>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
 use crate::host::live_sessions::{
     extract_cross_session_inner, inbound_decision, parse_from_name, parse_wrap_attr,
     peer_message_reminder, process_live_dir, process_name, process_permission_class,
@@ -59,6 +96,8 @@ struct InboxState {
     /// Set after a hot remount. Legacy unscoped UDS payloads are then refused
     /// so a sender paused after resolving A cannot enter newly mounted B.
     require_session_fence: bool,
+    receive_gate: Option<Arc<PeerReceiveGateSlot>>,
+    tokio_handle: Option<tokio::runtime::Handle>,
     stop: AtomicBool,
 }
 
@@ -74,6 +113,8 @@ impl InboxState {
             child_token: Mutex::new(None),
             bound_session_id,
             require_session_fence,
+            receive_gate: None,
+            tokio_handle: None,
             stop: AtomicBool::new(false),
         }
     }
@@ -416,7 +457,7 @@ fn send_uds_unix(path: &Path, auth_token: Option<&str>, payload: &Value) -> io::
 pub fn start_process_inbox(path: impl Into<PathBuf>) -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
-        start_process_inbox_unix(path.into(), process_session_id(), false)
+        start_process_inbox_unix(path.into(), process_session_id(), false, None)
     }
     #[cfg(not(unix))]
     {
@@ -437,11 +478,32 @@ pub fn start_process_inbox_for_session(
 ) -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
-        start_process_inbox_unix(path.into(), Some(session_id.to_string()), false)
+        start_process_inbox_unix(path.into(), Some(session_id.to_string()), false, None)
     }
     #[cfg(not(unix))]
     {
         let _ = (path, session_id);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "UDS inbox is not available on this platform",
+        ))
+    }
+}
+
+/// Bind a generation whose inbound peer deliveries must reach a Mod gate
+/// before policy and queue insertion. The slot may be filled after binding.
+pub fn start_process_inbox_for_session_with_gate(
+    path: impl Into<PathBuf>,
+    session_id: &str,
+    slot: Arc<PeerReceiveGateSlot>,
+) -> io::Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        start_process_inbox_unix(path.into(), Some(session_id.to_string()), false, Some(slot))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, session_id, slot);
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "UDS inbox is not available on this platform",
@@ -457,7 +519,8 @@ pub fn retarget_process_inbox(session_id: &str) -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
         let path = process_socket_path().unwrap_or_else(|| default_socket_path(std::process::id()));
-        start_process_inbox_unix(path, Some(session_id.to_string()), true)
+        let gate = inbox().receive_gate.clone();
+        start_process_inbox_unix(path, Some(session_id.to_string()), true, gate)
     }
     #[cfg(not(unix))]
     {
@@ -469,14 +532,47 @@ pub fn retarget_process_inbox(session_id: &str) -> io::Result<PathBuf> {
     }
 }
 
+/// Retarget with a new runtime's gate instead of retaining the previous one.
+pub fn retarget_process_inbox_with_gate(
+    session_id: &str,
+    slot: Arc<PeerReceiveGateSlot>,
+) -> io::Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        let path = process_socket_path().unwrap_or_else(|| default_socket_path(std::process::id()));
+        start_process_inbox_unix(path, Some(session_id.to_string()), true, Some(slot))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (session_id, slot);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "UDS inbox is not available on this platform",
+        ))
+    }
+}
+
+/// Replace the gate when a runtime remounts the same session without rebinding.
+pub fn set_process_inbox_receive_gate(gate: Arc<dyn PeerReceiveGate>) {
+    if let Some(slot) = inbox().receive_gate.as_ref() {
+        slot.set(gate);
+    }
+}
+
 #[cfg(unix)]
 fn start_process_inbox_unix(
     path: PathBuf,
     bound_session_id: Option<String>,
     require_session_fence: bool,
+    receive_gate: Option<Arc<PeerReceiveGateSlot>>,
 ) -> io::Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
+    let inherited_handle = RUNTIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|runtime| runtime.state.tokio_handle.clone());
     stop_process_inbox_inner()?;
     if let Some(parent) = path.parent() {
         ensure_private_dir(parent)?;
@@ -493,10 +589,12 @@ fn start_process_inbox_unix(
             ));
         }
     }
-    let state = Arc::new(InboxState::new(
-        bound_session_id.clone(),
-        require_session_fence,
-    ));
+    let mut state = InboxState::new(bound_session_id.clone(), require_session_fence);
+    state.receive_gate = receive_gate;
+    state.tokio_handle = tokio::runtime::Handle::try_current()
+        .ok()
+        .or(inherited_handle);
+    let state = Arc::new(state);
     *state.path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.clone());
     if let Some(p) = path.to_str() {
         std::env::set_var("CLAUDE_CODE_MESSAGING_SOCKET", p);
@@ -596,7 +694,7 @@ fn accept_loop(listener: std::os::unix::net::UnixListener, state: Arc<InboxState
 }
 
 #[cfg(unix)]
-fn handle_client(mut stream: std::os::unix::net::UnixStream, state: &InboxState) {
+fn handle_client(mut stream: std::os::unix::net::UnixStream, state: &Arc<InboxState>) {
     // `accept_loop` puts the LISTENER into non-blocking mode, and on macOS/BSD an
     // accepted socket INHERITS O_NONBLOCK (Linux does not — POSIX leaves it
     // unspecified and the two disagree). A non-blocking socket ignores
@@ -726,7 +824,7 @@ fn peer_identity_apple(stream: &std::os::unix::net::UnixStream) -> Option<(u32, 
     Some((pid as u32, euid))
 }
 
-fn dispatch_line(v: Value, state: &InboxState, peer_pid: Option<u32>) {
+fn dispatch_line(v: Value, state: &Arc<InboxState>, peer_pid: Option<u32>) {
     let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
     match kind {
         "auth" => {}
@@ -753,7 +851,61 @@ fn dispatch_line(v: Value, state: &InboxState, peer_pid: Option<u32>) {
             let Some(msg) = attribute_user_message(content, from_addr, msg_id, peer_pid) else {
                 return;
             };
-            apply_inbound(msg, state);
+            if !reserve_inbound_id(&msg, state) {
+                return;
+            }
+            let Some(slot) = state.receive_gate.as_ref() else {
+                apply_inbound_reserved(msg, state);
+                return;
+            };
+            let Some(handle) = state.tokio_handle.as_ref() else {
+                apply_inbound_reserved(msg, state);
+                return;
+            };
+            let pending = Arc::new(Mutex::new(Some(msg)));
+            let original_text = pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|msg| msg.content.clone())
+                .unwrap_or_default();
+            let gate = loop {
+                if let Some(gate) = slot.get() {
+                    break Some(gate);
+                }
+                if state.stop.load(Ordering::Acquire) {
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            let Some(gate) = gate else {
+                if let Some(msg) = pending.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    apply_inbound_reserved(msg, state);
+                }
+                return;
+            };
+            let commit_state = state.clone();
+            let commit_pending = pending.clone();
+            let commit: PeerQueueCommit = Arc::new(move |text| {
+                let Some(mut msg) = commit_pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+                else {
+                    return false;
+                };
+                msg.content = text;
+                msg.mod_screened = true;
+                apply_inbound_reserved(msg, &commit_state)
+            });
+            let handled = state.bound_session_id.as_deref().is_some_and(|session_id| {
+                handle.block_on(gate.receive(session_id, &original_text, commit))
+            });
+            if !handled {
+                if let Some(msg) = pending.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    apply_inbound_reserved(msg, state);
+                }
+            }
         }
         "control" => {
             let Some(peer_pid) = peer_pid else {
@@ -834,29 +986,39 @@ fn attribute_user_message(
         msg_id,
         from_addr: receipt_addr,
         from_mode,
+        mod_screened: false,
     })
 }
 
-fn apply_inbound(msg: PeerMessage, state: &InboxState) {
+fn reserve_inbound_id(msg: &PeerMessage, state: &InboxState) -> bool {
     if let Some(message_id) = msg.msg_id.as_deref() {
         let mut seen = state
             .seen_message_ids
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if seen.iter().any(|known| known == message_id) {
-            return;
+            return false;
         }
         if seen.len() >= SEEN_MESSAGE_LIMIT {
             seen.pop_front();
         }
         seen.push_back(message_id.to_string());
     }
+    true
+}
+
+fn apply_inbound(msg: PeerMessage, state: &InboxState) -> bool {
+    reserve_inbound_id(&msg, state) && apply_inbound_reserved(msg, state)
+}
+
+fn apply_inbound_reserved(msg: PeerMessage, state: &InboxState) -> bool {
     let (policy, cause) = inbound_decision(msg.from_mode.as_deref());
     match policy {
         InboundPolicy::Refuse | InboundPolicy::Default => {
             if policy == InboundPolicy::Refuse {
                 send_receipt(&msg, "denied");
             }
+            false
         }
         InboundPolicy::Hold => {
             send_receipt(&msg, "held");
@@ -873,14 +1035,16 @@ fn apply_inbound(msg: PeerMessage, state: &InboxState) {
                 announced: false,
                 quiet_until: None,
             });
+            false
         }
         InboundPolicy::Accept => {
-            send_receipt(&msg, "delivered");
             state
                 .accepted
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push_back(msg);
+                .push_back(msg.clone());
+            send_receipt(&msg, "delivered");
+            true
         }
     }
 }
@@ -1153,16 +1317,44 @@ pub fn enqueue_inbound(msg: PeerMessage) {
     apply_inbound(msg, &inbox());
 }
 
+/// Reserve a file-fallback message before its Mod receives it. The first
+/// `next(e)` invokes the returned commit, applying inbound policy and queueing
+/// the rewritten body once; a consumed message leaves the queue untouched.
+#[must_use]
+pub fn prepare_file_inbound(msg: PeerMessage) -> Option<(String, PeerQueueCommit)> {
+    let state = inbox();
+    if !reserve_inbound_id(&msg, &state) {
+        return None;
+    }
+    let text = msg.content.clone();
+    let pending = Arc::new(Mutex::new(Some(msg)));
+    let commit: PeerQueueCommit = Arc::new(move |rewritten| {
+        let Some(mut msg) = pending.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+            return false;
+        };
+        msg.content = rewritten;
+        msg.mod_screened = true;
+        apply_inbound_reserved(msg, &state)
+    });
+    Some((text, commit))
+}
+
 /// Drain accepted UDS messages into reminder strings.
 #[must_use]
 pub fn take_accepted_peer_reminders(mid_turn: bool) -> Vec<String> {
+    take_accepted_peer_messages()
+        .iter()
+        .map(|msg| peer_message_reminder(msg, mid_turn))
+        .collect()
+}
+
+/// Preserve the authenticated peer payload until the host has screened its
+/// model-facing text through `session.receive`.
+#[must_use]
+pub fn take_accepted_peer_messages() -> Vec<PeerMessage> {
     let state = inbox();
     let mut q = state.accepted.lock().unwrap_or_else(|e| e.into_inner());
-    let mut out = Vec::new();
-    while let Some(msg) = q.pop_front() {
-        out.push(peer_message_reminder(&msg, mid_turn));
-    }
-    out
+    q.drain(..).collect()
 }
 
 /// Stop the accept loop, join it, and unlink the socket + key.
@@ -1380,6 +1572,37 @@ mod tests {
     }
 
     #[test]
+    fn accepted_peer_payload_is_available_before_reminder_rendering() {
+        let _guard = test_guard();
+        stop_process_inbox();
+        let message = PeerMessage {
+            from: "sender".into(),
+            from_session_id: "peer-session".into(),
+            content: "hello".into(),
+            ..PeerMessage::default()
+        };
+        enqueue_accepted(message.clone());
+        assert_eq!(take_accepted_peer_messages(), vec![message]);
+        assert!(take_accepted_peer_reminders(false).is_empty());
+        let temp = tempfile::TempDir::new().unwrap();
+        crate::host::live_sessions::set_process_dir(
+            crate::host::live_sessions::LiveSessionDir::at(temp.path().join("sessions")),
+        );
+        crate::host::live_sessions::set_process_session_id("11111111-2222-4333-8444-555555555555");
+        enqueue_accepted(PeerMessage {
+            from: "sender".into(),
+            from_session_id: "peer-session".into(),
+            content: "hello".into(),
+            ..PeerMessage::default()
+        });
+        let delivered = crate::host::live_sessions::take_accepted_peer_deliveries(false);
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].origin_kind, "peer");
+        assert!(delivered[0].text.contains("hello"));
+        stop_process_inbox();
+    }
+
+    #[test]
     fn uds_address_encodes_spaces() {
         let _g = test_guard();
         assert_eq!(
@@ -1558,6 +1781,41 @@ mod tests {
     }
 
     #[test]
+    fn file_fallback_reaches_receive_gate_before_policy_and_queue() {
+        let _guard = test_guard();
+        stop_process_inbox();
+        clean_env();
+        std::env::set_var("LINGXI_CROSS_SESSION_INBOUND", "accept");
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = crate::host::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        let session_id = "11111111-2222-4333-8444-555555555555";
+        crate::host::live_sessions::set_process_dir(dir.clone());
+        crate::host::live_sessions::set_process_session_id(session_id);
+        let message = crate::host::live_sessions::outbound_peer_message(
+            "sender",
+            "22222222-3333-4444-8555-666666666666",
+            "file body",
+            None,
+        );
+        dir.send_inbox(session_id, &message).unwrap();
+        assert!(crate::host::live_sessions::take_queued_peer_deliveries(false).is_empty());
+        let drained = crate::host::live_sessions::drain_file_peer_messages(session_id);
+        assert_eq!(drained.len(), 1);
+        let (original, commit) = prepare_file_inbound(drained[0].clone()).unwrap();
+        assert!(original.contains("file body"));
+        assert_eq!(inbox().accepted.lock().unwrap().len(), 0);
+        assert!(commit("rewritten file body".into()));
+        assert!(!commit("again".into()));
+        assert!(prepare_file_inbound(drained[0].clone()).is_none());
+        let delivered = crate::host::live_sessions::take_queued_peer_deliveries(false);
+        assert_eq!(delivered.len(), 1);
+        assert!(delivered[0].already_screened);
+        assert!(delivered[0].text.contains("rewritten file body"));
+        std::env::remove_var("LINGXI_CROSS_SESSION_INBOUND");
+        stop_process_inbox();
+    }
+
+    #[test]
     fn restart_does_not_leak_previous_accept_loop() {
         let _g = test_guard();
         stop_process_inbox();
@@ -1696,7 +1954,7 @@ mod tests {
         std::env::set_var("LINGXI_CROSS_SESSION_INBOUND", "accept");
         crate::host::live_sessions::set_process_name("receiver");
         crate::host::live_sessions::set_process_session_id("session-b");
-        let state = InboxState::new(Some("session-b".into()), true);
+        let state = Arc::new(InboxState::new(Some("session-b".into()), true));
         let payload = |destination: Option<&str>, id: &str| {
             let mut value = serde_json::json!({
                 "type": "user",
@@ -1731,6 +1989,98 @@ mod tests {
             Some("current")
         );
         std::env::remove_var("LINGXI_CROSS_SESSION_INBOUND");
+    }
+
+    #[test]
+    fn receive_gate_commits_only_after_screening_and_marks_the_queue_entry() {
+        struct Gate {
+            state: Arc<InboxState>,
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl PeerReceiveGate for Gate {
+            async fn receive(
+                &self,
+                destination_session_id: &str,
+                text: &str,
+                commit: PeerQueueCommit,
+            ) -> bool {
+                assert_eq!(destination_session_id, "session-b");
+                let prior_calls = self.calls.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(
+                    self.state
+                        .accepted
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .len(),
+                    prior_calls
+                );
+                if text.contains("muted") {
+                    return true;
+                }
+                assert!(commit("rewritten".into()));
+                true
+            }
+        }
+
+        let _guard = test_guard();
+        stop_process_inbox();
+        clean_env();
+        std::env::set_var("LINGXI_CROSS_SESSION_INBOUND", "accept");
+        crate::host::live_sessions::set_process_name("receiver");
+        crate::host::live_sessions::set_process_session_id("session-b");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let slot = Arc::new(PeerReceiveGateSlot::new());
+        let mut state = InboxState::new(Some("session-b".into()), false);
+        state.receive_gate = Some(slot.clone());
+        state.tokio_handle = Some(runtime.handle().clone());
+        let state = Arc::new(state);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate = Arc::new(Gate {
+            state: state.clone(),
+            calls: calls.clone(),
+        });
+        for (index, (id, body)) in [("admitted", "hello"), ("consumed", "muted")]
+            .into_iter()
+            .enumerate()
+        {
+            let worker_state = state.clone();
+            let worker = std::thread::spawn(move || {
+                dispatch_line(
+                    serde_json::json!({
+                        "type":"user", "msg_id":id,
+                        "message":{"role":"user","content":body},
+                        "from":"uds:/tmp/source.sock"
+                    }),
+                    &worker_state,
+                    Some(std::process::id()),
+                );
+            });
+            if index == 0 {
+                std::thread::sleep(Duration::from_millis(40));
+                assert!(state
+                    .accepted
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_empty());
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                slot.set(gate.clone());
+            }
+            worker.join().unwrap();
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let accepted = state.accepted.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].content, "rewritten");
+        assert!(accepted[0].mod_screened);
+        drop(accepted);
+        std::env::remove_var("LINGXI_CROSS_SESSION_INBOUND");
+        stop_process_inbox();
     }
 
     /// Shutdown must preserve BOTH queues, not just the accepted one.

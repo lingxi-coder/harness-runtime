@@ -197,6 +197,44 @@ pub(crate) fn frozen_cost_quote(estimate: &llm_runtime::CostEstimate) -> Option<
     ))
 }
 
+/// A native multi-model quote already contains its hosted-tool component.
+/// If that branch has no complete quote, retain usage as unpriced instead of
+/// applying the ordinary aggregate request-model tariff.
+pub(crate) fn response_pricing(
+    estimate: Option<&llm_runtime::CostEstimate>,
+    native_fallback_quote: bool,
+) -> (Option<ModelRef>, cost::CostResponsePricing) {
+    use cost::CostResponsePricing;
+    match estimate.and_then(frozen_cost_quote) {
+        Some((model, amount)) => (
+            Some(model),
+            if native_fallback_quote {
+                CostResponsePricing::CompleteQuote(amount)
+            } else {
+                CostResponsePricing::TokenQuote(amount)
+            },
+        ),
+        None => (
+            None,
+            if native_fallback_quote {
+                CostResponsePricing::Unpriced
+            } else {
+                CostResponsePricing::Catalog
+            },
+        ),
+    }
+}
+
+pub(crate) fn has_native_fallback_quote(metadata: &serde_json::Value) -> bool {
+    llm_runtime::history::server_fallback_cost_quote(metadata).is_some()
+}
+
+pub(crate) fn native_fallback_cost_model(metadata: &serde_json::Value) -> Option<&str> {
+    llm_runtime::history::server_fallback_cost_quote(metadata)?
+        .get("summaryModel")?
+        .as_str()
+}
+
 /// Build an `llm_runtime::PricingCatalog` populated from a `cost::PricingCatalog`.
 ///
 /// Conversion: for each [`cost::ModelPricing`] entry, the `billing_model` is the
@@ -250,6 +288,10 @@ pub fn llm_catalog_from_cost(
                 .token_rates
                 .get(&TokenClass::ReasoningOutput)
                 .map(|_| nano_to_usd(TokenClass::ReasoningOutput)),
+            web_search_per_request: entry
+                .non_token_rates_nano_usd
+                .get(&cost::NonTokenBillableUnit::WebSearchRequest)
+                .map(|nano| *nano as f64 / 1_000_000_000.0),
             ..Default::default()
         };
         out = out.with_price(provider, billing_model, pricing);

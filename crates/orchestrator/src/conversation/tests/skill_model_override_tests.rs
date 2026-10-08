@@ -18,12 +18,12 @@ use tool_api::tool_trait::{
 };
 
 /// The model the [`ModelSwitchTool`] switches the session to.
-const SWITCHED_MODEL: &str = "claude-opus-4-9-zzz";
+const SWITCHED_MODEL: &str = "changed-model";
 
 /// A tool that succeeds AND returns a `context_modifier` setting the turn's
 /// `main_loop_model` to [`SWITCHED_MODEL`] — the orchestrator-side twin of a
 /// Skill tool with a `model:` frontmatter. Sets the model directly (the
-/// skill-specific `[1m]`-resolution logic is unit-tested in the skill crate).
+/// route and context-window resolution are tested in the Agent crate).
 struct ModelSwitchTool;
 #[async_trait]
 impl Tool for ModelSwitchTool {
@@ -77,14 +77,14 @@ impl Tool for ModelSwitchTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        input: serde_json::Value,
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        let modifier: ContextModifier = Box::new(|mut ctx: ToolUseContext| {
-            ctx.options.main_loop_model = SWITCHED_MODEL.to_string();
-            ctx
-        });
+        let modifier = preference_modifier(
+            input.get("model").and_then(serde_json::Value::as_str).unwrap_or(SWITCHED_MODEL),
+            input.get("model_profile").and_then(serde_json::Value::as_str),
+        );
         Ok(ToolCallResult {
             data: serde_json::json!({
                 "content": "TOOL-RESULT",
@@ -175,6 +175,273 @@ fn registry_with(tool: Arc<dyn Tool>) -> Arc<ToolRegistry> {
     Arc::new(reg)
 }
 
+fn skill_test_route(
+    model: &str,
+    profile: Option<&str>,
+) -> Result<agent::ModelResolutionContext, agent::ModelResolutionError> {
+    let (qualifier, requested) = model
+        .split_once('/')
+        .map_or((None, model), |(profile, model)| (Some(profile), model));
+    let route_error = || agent::ModelResolutionError::RouteUnavailable {
+        model: model.into(),
+        profile: profile.map(str::to_owned),
+        reason: "unavailable test route".into(),
+    };
+    if profile
+        .zip(qualifier)
+        .is_some_and(|(profile, qualifier)| profile != qualifier)
+    {
+        return Err(route_error());
+    }
+    let profile = profile.or(qualifier).unwrap_or("a");
+    if profile != "a" && profile != "b" {
+        return Err(route_error());
+    }
+    let target = match requested {
+        "balanced" => format!("balanced-{profile}"),
+        "balanced-a" if profile == "a" => requested.into(),
+        "balanced-b" if profile == "b" => requested.into(),
+        crate::config::DEFAULT_MODEL | SWITCHED_MODEL | "shared" => requested.into(),
+        _ => return Err(route_error()),
+    };
+    Ok(agent::ModelResolutionContext {
+        route: agent::ModelRouteFacts {
+            model: target,
+            profile: Some(profile.into()),
+            provider: Some(agent::ModelProviderKind::Other),
+            ..Default::default()
+        },
+        family_defaults: agent::FamilyModelDefaults {
+            sonnet: Some(format!("balanced-{profile}")),
+            ..Default::default()
+        },
+        catalog_aliases: [("balanced".into(), vec![format!("balanced-{profile}")])].into(),
+        ..Default::default()
+    })
+}
+
+fn route_test_orchestrator() -> ConversationOrchestrator {
+    ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        registry_with(Arc::new(PlainTool)),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+    .with_model_resolution_context_provider(Arc::new(skill_test_route))
+}
+
+fn preference_modifier(model: &str, profile: Option<&str>) -> ContextModifier {
+    let model = model.to_owned();
+    let profile = profile.map(str::to_owned);
+    Box::new(move |mut context| {
+        context.options.main_loop_model = model;
+        context.options.model_profile = profile;
+        context
+    })
+}
+
+#[tokio::test]
+async fn skill_model_override_uses_live_profile_catalog_alias() {
+    let orch = route_test_orchestrator();
+    {
+        let mut session = orch.session.lock().await;
+        session.model = "shared".into();
+        session.model_profile = Some("b".into());
+    }
+    crate::turn_loop::apply_model_context_modifiers(
+        &orch,
+        vec![preference_modifier("balanced", None)],
+    )
+    .await
+    .unwrap();
+    let session = orch.session.lock().await;
+    assert_eq!(session.model, "balanced-b");
+    assert_eq!(session.model_profile.as_deref(), Some("b"));
+}
+
+#[tokio::test]
+async fn skill_model_override_same_model_different_profile_switches_route() {
+    for (model, profile) in [("b/shared", None), ("shared", Some("b"))] {
+        let orch = route_test_orchestrator();
+        {
+            let mut session = orch.session.lock().await;
+            session.model = "shared".into();
+            session.model_profile = Some("a".into());
+        }
+        crate::turn_loop::apply_model_context_modifiers(
+            &orch,
+            vec![preference_modifier(model, profile)],
+        )
+        .await
+        .unwrap();
+        let session = orch.session.lock().await;
+        assert_eq!(session.model, "shared");
+        assert_eq!(session.model_profile.as_deref(), Some("b"));
+    }
+}
+
+#[tokio::test]
+async fn skill_model_override_invalid_route_preserves_model_and_profile() {
+    let orch = route_test_orchestrator();
+    {
+        let mut session = orch.session.lock().await;
+        session.model = "shared".into();
+        session.model_profile = Some("a".into());
+    }
+    let error = crate::turn_loop::apply_model_context_modifiers(
+        &orch,
+        vec![
+            preference_modifier("b/shared", None),
+            preference_modifier("missing/model", None),
+        ],
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("could not be resolved"));
+    let session = orch.session.lock().await;
+    assert_eq!(session.model, "shared");
+    assert_eq!(session.model_profile.as_deref(), Some("a"));
+}
+
+#[tokio::test]
+async fn skill_model_override_resolves_later_alias_in_preceding_selected_profile() {
+    let orch = route_test_orchestrator();
+    {
+        let mut session = orch.session.lock().await;
+        session.model = "shared".into();
+        session.model_profile = Some("a".into());
+    }
+    crate::turn_loop::apply_model_context_modifiers(
+        &orch,
+        vec![
+            preference_modifier("b/shared", None),
+            preference_modifier("balanced", None),
+        ],
+    )
+    .await
+    .unwrap();
+    let session = orch.session.lock().await;
+    assert_eq!(session.model, "balanced-b");
+    assert_eq!(session.model_profile.as_deref(), Some("b"));
+}
+
+#[tokio::test]
+async fn skill_model_override_streaming_context_state_applies_profile_only_change() {
+    let orch = route_test_orchestrator();
+    {
+        let mut session = orch.session.lock().await;
+        session.model = "shared".into();
+        session.model_profile = Some("a".into());
+    }
+    let context = ToolUseContext::model_seed("shared".into(), Some("b".into()));
+    let state = lingxi_core::host::tool_invoker::ToolInvocationContextState::new(Arc::new(context));
+    crate::turn_loop::apply_model_context_state(&orch, state)
+        .await
+        .unwrap();
+    let session = orch.session.lock().await;
+    assert_eq!(session.model, "shared");
+    assert_eq!(session.model_profile.as_deref(), Some("b"));
+}
+
+#[tokio::test]
+async fn batched_skill_model_override_next_call_uses_selected_profile_with_same_model() {
+    let resp1 = mock_message_response(
+        vec![LlmContentBlock::ToolCall {
+            id: ToolUseId::new().to_string(),
+            name: "ModelSwitch".into(),
+            input: serde_json::json!({"model": "b/shared"}),
+        }],
+        Some("tool_use"),
+    );
+    let resp2 = mock_message_response(
+        vec![LlmContentBlock::Text {
+            text: "done".into(),
+            cache_control: None,
+            citations: None,
+        }],
+        Some("end_turn"),
+    );
+    let api = Arc::new(MockApiClient::new(vec![resp1, resp2]));
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api.clone(),
+        registry_with(Arc::new(ModelSwitchTool)),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+    .with_model_resolution_context_provider(Arc::new(skill_test_route));
+    {
+        let mut session = orch.session.lock().await;
+        session.model = "shared".into();
+        session.model_profile = Some("a".into());
+    }
+    orch.run_turn("switch route").await.unwrap();
+    let requests = api.captured_requests().await;
+    let [crate::OrchestratorApiRequest::Main(first), crate::OrchestratorApiRequest::Main(second)] =
+        requests.as_slice()
+    else {
+        panic!("expected two main requests");
+    };
+    assert_eq!(first.profile.as_deref(), Some("a"));
+    assert_eq!(second.profile.as_deref(), Some("b"));
+    assert_eq!(first.model, "shared");
+    assert_eq!(second.model, "shared");
+}
+
+#[tokio::test]
+async fn streaming_skill_model_override_next_call_uses_selected_profile_with_same_model() {
+    let tool_use_id = ToolUseId::new();
+    let turn1 = vec![
+        message_start("m1", "shared"),
+        content_block_start_tool_use(0, tool_use_id, "ModelSwitch"),
+        input_json_delta(0, "{\"model\":\"b/shared\"}"),
+        content_block_stop(0),
+        message_delta_stop("tool_use"),
+        message_stop(),
+    ];
+    let turn2 = vec![
+        message_start("m2", "shared"),
+        content_block_start_text(0),
+        text_delta(0, "done"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ];
+    let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![turn1, turn2]));
+    let orch = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            streaming.clone(),
+            registry_with(Arc::new(ModelSwitchTool)),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_model_resolution_context_provider(Arc::new(skill_test_route)),
+    );
+    {
+        let mut session = orch.session.lock().await;
+        session.model = "shared".into();
+        session.model_profile = Some("a".into());
+    }
+    orch.run_turn_streaming("switch route").await.unwrap();
+    let calls = streaming.captured_calls().await;
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].profile.as_deref(), Some("a"));
+    assert_eq!(calls[1].profile.as_deref(), Some("b"));
+    assert!(calls.iter().all(|call| call.model == "shared"));
+}
+
 // ----- batched driver (`run_turn`) -----
 
 #[tokio::test]
@@ -192,6 +459,7 @@ async fn batched_skill_model_override_switches_session_model() {
         vec![LlmContentBlock::Text {
             text: "done".into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     );
@@ -204,7 +472,8 @@ async fn batched_skill_model_override_switches_session_model() {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    )
+    .with_model_resolution_context_provider(Arc::new(skill_test_route));
     // Precondition: the session boots on the default model.
     assert_eq!(
         orch.session.lock().await.model,
@@ -234,6 +503,7 @@ async fn batched_no_modifier_leaves_session_model_untouched() {
         vec![LlmContentBlock::Text {
             text: "done".into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     );
@@ -277,16 +547,19 @@ async fn streaming_skill_model_override_switches_session_and_next_call() {
         message_stop(),
     ];
     let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![turn1, turn2]));
-    let orch = ConversationOrchestrator::new_with_streaming(
-        OrchestratorConfig::default(),
-        Arc::new(MockApiClient::new(vec![])),
-        streaming.clone(),
-        registry_with(Arc::new(ModelSwitchTool)),
-        noop_hook_executor(),
-        Arc::new(NoOpPermissionGate),
-        Arc::new(MockOutputStream::new()),
-        Arc::new(StaticMemoryProvider::empty()),
-        std::env::temp_dir(),
+    let orch = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            streaming.clone(),
+            registry_with(Arc::new(ModelSwitchTool)),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_model_resolution_context_provider(Arc::new(skill_test_route)),
     );
 
     orch.run_turn_streaming("switch please")
@@ -327,7 +600,7 @@ async fn streaming_no_modifier_leaves_session_model_untouched() {
         message_stop(),
     ];
     let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![turn1, turn2]));
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(vec![])),
         streaming.clone(),
@@ -337,7 +610,7 @@ async fn streaming_no_modifier_leaves_session_model_untouched() {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
     orch.run_turn_streaming("no switch")
         .await
         .expect("streaming turn");
@@ -370,7 +643,7 @@ async fn streaming_threads_model_profile_to_stream_call() {
         message_stop(),
     ];
     let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![turn]));
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(vec![])),
         streaming.clone(),
@@ -380,7 +653,7 @@ async fn streaming_threads_model_profile_to_stream_call() {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
     // Set model_profile on the session directly (mirrors what switch_model does).
     {
         let mut s = orch.session.lock().await;

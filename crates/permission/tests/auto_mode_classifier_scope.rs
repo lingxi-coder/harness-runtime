@@ -776,7 +776,7 @@ async fn an_over_long_transcript_falls_back_to_the_prompt_not_a_deny() {
 /// behind a transcript it cannot shorten would deadlock.
 #[tokio::test]
 async fn an_over_long_transcript_still_lets_the_agent_tool_through() {
-    for name in ["Agent", "Task"] {
+    for name in ["Agent"] {
         let (gate, prompt, _) = auto_gate(AutoModeClassifierVerdict::TranscriptTooLong);
         let decision = gate
             .check(name, &json!({ "prompt": "summarize the diff" }))

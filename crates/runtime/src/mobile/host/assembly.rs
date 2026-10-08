@@ -48,14 +48,15 @@ use super::{
     mobile_builtin_plugin_enabled_from_settings, mobile_launch_is_interactive,
     mobile_local_app_scope_id, mobile_mcp_oauth_authorization_callback, mobile_mcp_preflight,
     mobile_mcp_record_reload_intent, mobile_mcp_run_reload_job, mobile_provider_settings,
-    mobile_reload_skills_handler, mobile_settings_write_lock, mobile_skill_listing_provider,
-    mobile_typescript_lsp_mode, mobile_typescript_lsp_ready, model_listings, model_preference,
-    model_visible_mobile_cwd, permission_preference, provider_model_catalog_from_listings,
-    resolve_default_model_ref, run_app_boot_backfill_sweep, settings_commands,
-    settle_mobile_loop_turn, ActiveTurn, MobileAppAgentExecutor, MobileBuildError, MobileConfig,
-    MobileEngineError, MobileEngineHandle, MobileMcpReloadJob, MobileMsgQueueInput,
-    MobileOAuthManager, MobileRuntime, MobileSessionAgentObserver, MobileWakeupDelivery,
-    TurnLifecycleListener, LOCAL_APPS_MCP_TIMEOUT_MS, MOBILE_CRON_HANDLES,
+    mobile_reload_skills_handler, mobile_settings_write_lock,
+    mobile_skill_listing_provider_with_settings, mobile_typescript_lsp_mode,
+    mobile_typescript_lsp_ready, model_listings, model_preference, model_visible_mobile_cwd,
+    permission_preference, provider_model_catalog_from_listings, resolve_default_model_ref,
+    run_app_boot_backfill_sweep, settings_commands, settle_mobile_loop_turn, ActiveTurn,
+    MobileAppAgentExecutor, MobileBuildError, MobileConfig, MobileEngineError, MobileEngineHandle,
+    MobileMcpReloadJob, MobileMsgQueueInput, MobileOAuthManager, MobileRuntime,
+    MobileSessionAgentObserver, MobileWakeupDelivery, TurnLifecycleListener,
+    LOCAL_APPS_MCP_TIMEOUT_MS, MOBILE_CRON_HANDLES,
 };
 
 /// Build a fully-wired mobile [`MobileRuntime`] from a deterministic
@@ -147,6 +148,9 @@ pub(super) async fn build_mobile_inner_with_ask(
 
     let local_apps_mcp = Arc::new(LocalAppsMcpTransport::new(mobile_apps_data_root(&cfg)));
     let _ = local_apps_mcp.attach_lingxi_home(cfg.lingxi_home.clone());
+    let projects_session_host = Arc::new(mcp::projects_session::ProjectsSessionHostContext::new(
+        cfg.projects_session_startup_url.clone(),
+    ));
     let remote_mcp = Arc::new(platform_common::RemoteMcpTransport::new());
     let mobile_mcp = Arc::new(MobileMcpTransport::new(local_apps_mcp.clone(), remote_mcp));
     let mcp_auth_url = Arc::new(StdMutex::new(None::<String>));
@@ -156,6 +160,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         mobile_mcp.clone() as Arc<dyn lingxi_core::host::McpTransport>,
         mobile_mcp.clone() as Arc<dyn RawConnectionProvider>,
     )
+    .with_projects_session_host(projects_session_host.clone())
     .with_headers_helper_cwd(cwd.clone())
     .with_discovery_cache_store(mcp::DiscoveryCacheStore::new(
         cfg.lingxi_home.join("mcp-discovery-cache"),
@@ -324,14 +329,30 @@ pub(super) async fn build_mobile_inner_with_ask(
             })
         }));
     }
-    let session_writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
-        orchestrator::transcript_paths::main_transcript_path(
-            &cfg.lingxi_home,
-            &cwd.to_string_lossy(),
-            &main_session_uuid,
-        ),
-        fs.clone(),
-    ));
+    let transcript_sessions = Arc::new(
+        crate::mobile::transcript::MobileTranscriptSessionSwitcher::new(cfg.lingxi_home.clone()),
+    );
+    let transcript_authority =
+        transcript_sessions
+            .writer(main_session_id)
+            .await
+            .map_err(|error| {
+                MobileBuildError::Orchestrator(format!("transcript authority: {error}"))
+            })?;
+    let transcript_path = orchestrator::transcript_paths::main_transcript_path(
+        &cfg.lingxi_home,
+        &cwd.to_string_lossy(),
+        &main_session_uuid,
+    );
+    let session_writer = Arc::new(
+        session::jsonl::writer::JsonlWriter::new(transcript_path.clone(), fs.clone())
+            .with_durable_lock(transcript_authority),
+    );
+    session_writer
+        .activate_session_target(main_session_id, transcript_path, cwd.clone())
+        .map_err(|error| {
+            MobileBuildError::Orchestrator(format!("transcript activation: {error}"))
+        })?;
     let mobile_linux = platform.mobile_linux();
     let mobile_linux_capability = match mobile_linux.as_ref() {
         Some(runtime) => Some(runtime.probe_capability().await),
@@ -376,6 +397,7 @@ pub(super) async fn build_mobile_inner_with_ask(
                 tokens.access_token,
                 tokens.refresh_token,
                 tokens.expires_at,
+                tokens.scopes,
                 llm_transport.clone(),
                 clock.clone(),
                 None,
@@ -505,25 +527,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             (profile.profile_name.clone(), provider.to_string())
         })
         .collect();
-    let model_provider_profiles: std::collections::BTreeMap<String, String> = assembled
-        .client_config
-        .providers
-        .iter()
-        .flat_map(|profile| {
-            let profile_name = profile.profile_name.clone();
-            profile
-                .models
-                .iter()
-                .map(move |model| (model.request_model.clone(), profile_name.clone()))
-        })
-        .collect();
-    let boot_auto_mode_provider = default_model_profile
-        .as_ref()
-        .or_else(|| model_provider_profiles.get(&default_model_id))
-        .and_then(|profile| profile_auto_mode_provider.get(profile))
-        .cloned()
-        .unwrap_or_else(|| "firstParty".to_string());
-
+    let model_resolution_client_config = assembled.client_config.clone();
     let mut client = ModelRuntime::from_config(assembled.client_config)
         .map_err(|e| MobileBuildError::ApiBase(format!("llm-runtime config: {e}")))?;
     // §6.1: ONE composite credential slot for ALL providers. OAuth delegates
@@ -550,13 +554,11 @@ pub(super) async fn build_mobile_inner_with_ask(
             .map(|_| openai_refresh_spawner.clone()),
         http.clone(),
     ));
-    if !has_api_key {
-        if let Some(driver) = anthropic_refresh {
-            oauth_delegates.insert(
-                "anthropic-oauth".to_string(),
-                Arc::new(OAuthCredentialProvider::new(driver)) as Arc<dyn CredentialProvider>,
-            );
-        }
+    if let Some(driver) = anthropic_refresh {
+        oauth_delegates.insert(
+            "anthropic-oauth".to_string(),
+            Arc::new(OAuthCredentialProvider::new(driver)) as Arc<dyn CredentialProvider>,
+        );
     }
     if let Some(driver) = openai_refresh {
         oauth_delegates.insert(
@@ -578,6 +580,52 @@ pub(super) async fn build_mobile_inner_with_ask(
     );
     client = client.with_credential_provider(Arc::new(composite));
     let llm_runtime = Arc::new(client);
+    let model_resolution_context_provider: Arc<
+        dyn agent::model_resolution::ModelResolutionContextProvider,
+    > = Arc::new(
+        crate::model_resolution::RuntimeModelResolutionProvider::new(
+            llm_runtime.clone(),
+            &model_resolution_client_config,
+        ),
+    );
+    let (resolved_default_model, default_model_profile, boot_auto_mode_provider) =
+        if default_listings.is_empty() {
+            // A fail-closed mobile allowlist can intentionally leave this
+            // engine with no live route. Keep the configured model reference
+            // as an inert initial selection so the host can still expose the
+            // region-filtered catalog and let the user configure a provider.
+            // In particular, do not restore a disabled saved model, attach a
+            // disabled profile, or create a synthetic route just to satisfy
+            // boot-time model resolution. "other" is only the Auto-mode
+            // capability class for an unresolved route; it adds no provider.
+            (default_model_id.clone(), None, "other".to_string())
+        } else {
+            let boot_model_resolution_context = model_resolution_context_provider
+                .context_for_route(&default_model_id, default_model_profile.as_deref())
+                .map_err(|error| {
+                    MobileBuildError::ApiBase(format!("default model route: {error}"))
+                })?;
+            let resolved_default_model = agent::model_resolution::resolve_user_specified_model(
+                &default_model_id,
+                &boot_model_resolution_context,
+            )
+            .map_err(|error| {
+                MobileBuildError::ApiBase(format!("model alias resolution: {error}"))
+            })?;
+            let default_model_profile = boot_model_resolution_context.route.profile.clone();
+            let boot_auto_mode_provider = default_model_profile
+                .as_deref()
+                .and_then(|profile| profile_auto_mode_provider.get(profile))
+                .cloned()
+                .ok_or_else(|| {
+                    MobileBuildError::ApiBase("default route provider is unresolved".into())
+                })?;
+            (
+                resolved_default_model,
+                default_model_profile,
+                boot_auto_mode_provider,
+            )
+        };
 
     // No live subscription slot on mobile (no OAuth profile fetch) — static state stands.
     let subscriber_state = SubscriberState {
@@ -664,7 +712,28 @@ pub(super) async fn build_mobile_inner_with_ask(
             settings_max_retries,
             settings_backoff_ms,
         )
-        .with_interactive_session(interactive_launch),
+        .with_fast_policy_source({
+            let home = cfg.lingxi_home.clone();
+            Arc::new(move || crate::fast_settings::policy(&home, None, &[]))
+        })
+        .with_interactive_session(interactive_launch)
+        .with_effort_table_options(crate::effort_settings::table_options(&cfg.lingxi_home))
+        .with_effort_settings_source({
+            let effort_cfg = cfg.clone();
+            Arc::new(move || {
+                super::provider_services::mobile_effective_settings(&effort_cfg)
+                    .map(|settings| settings.effort_layers)
+                    .unwrap_or_default()
+            })
+        })
+        .with_prompt_cache_ttl_settings_source({
+            let cache_cfg = cfg.clone();
+            Arc::new(move || {
+                super::provider_services::mobile_effective_settings(&cache_cfg)
+                    .map(|settings| settings.settings.prompt_cache_ttl_settings())
+                    .unwrap_or_default()
+            })
+        }),
     );
     // Task 9: the local-app generator's three LLM calls (author/plan/write
     // source) ride the SAME `api_service` — routing, auth, retry — as the
@@ -692,6 +761,8 @@ pub(super) async fn build_mobile_inner_with_ask(
     // `/login` remains the Anthropic trait-shaped command. Provider settings
     // use `oauth` above so ChatGPT's account-shaped identity stays separate.
     let auth: Arc<dyn AuthHandle> = anthropic_oauth_handle.clone();
+    auth.register_account_change_observer(Arc::downgrade(&api_service.account_change_observer()));
+    let instruction_identity = crate::instruction_identity::InstructionIdentity::new(auth.clone());
 
     // (4) Orchestrator config from `cfg` (was a host env/arg read).
     let persisted_reasoning_selection =
@@ -1256,13 +1327,8 @@ pub(super) async fn build_mobile_inner_with_ask(
     //      - `with_prompt_runner(ApiClientHookPromptRunner)` evaluates inline
     //        single-turn `prompt` hooks over the SAME `api_client` the
     //        orchestrator drives (shared provider routing / auth / telemetry).
-    //      The `with_async_registry` + `with_agent_spawner` builders are
-    //      DELIBERATELY OMITTED: mobile has no subagent spawner, and with no
-    //      async/agent hook configured this is behavior-neutral (a non-blocking
-    //      hook falls back to running synchronously; an `agent` hook returns a
-    //      structured "not wired" error rather than spawning). The
-    //      `RuntimeSpawner` is the posix-minimal `PosixRuntime` (only the omitted
-    //      Agent/async arms consult it; the Command arm uses `process`).
+    // Agent hooks bind the real mobile spawner after the pool is assembled.
+    // Async command hooks remain synchronous because no async registry is wired.
     // Transcript sink for the per-hook-run `attachment` records claude-code
     // persists (one line per hook run). Created empty because the hook
     // executor is built BEFORE the orchestrator that owns the JSONL writer;
@@ -1273,6 +1339,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // own model), and the session does not exist yet. `attach`ed in step 8.
     let hook_prompt_runner = Arc::new(orchestrator::ApiClientHookPromptRunner::new(
         api_client.clone(),
+        model_resolution_context_provider.clone(),
     ));
     let hooks: Arc<hooks::HookExecutorImpl> = Arc::new(
         hooks::HookExecutorImpl::new(
@@ -1302,6 +1369,37 @@ pub(super) async fn build_mobile_inner_with_ask(
         .memory_provider
         .clone()
         .unwrap_or_else(|| Arc::new(StaticMemoryProvider::empty()));
+    // Mobile exposes a user settings tier; project/local options are not trusted.
+    let instruction_tiers: Vec<serde_json::Value> =
+        std::fs::read_to_string(cfg.lingxi_home.join("settings.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .into_iter()
+            .collect();
+    let instruction_options =
+        orchestrator::prompt::memory_block::instruction_options_from_tiers(&instruction_tiers);
+    let memory = orchestrator::prompt::memory_block::configure_instruction_files(
+        memory,
+        &instruction_options,
+    );
+    let root_instruction_provider =
+        Arc::new(orchestrator::prompt::memory_block::RootInstructionContextProvider::new());
+    let instruction_provider: Arc<dyn lingxi_core::host::instructions::InstructionContextProvider> =
+        root_instruction_provider.clone();
+    let instruction_provider = if let Some(runtime) = mobile_linux.clone() {
+        lingxi_core::host::instructions::with_path_resolver(
+            instruction_provider,
+            Arc::new(move |path| {
+                mobile_linux_api::map_guest_path_to_host(
+                    &path.to_string_lossy(),
+                    &runtime.current_mounts(),
+                )
+                .unwrap_or_else(|| path.to_path_buf())
+            }),
+        )
+    } else {
+        instruction_provider
+    };
 
     // (7) Assemble the mobile tool registry through the composition root. The
     //     device capabilities (camera / audio / share) come from `platform`;
@@ -1572,17 +1670,23 @@ pub(super) async fn build_mobile_inner_with_ask(
         mobile_runtime_environment.as_ref(),
         mobile_workspace_cwd_provider.clone(),
     );
+    let parked_agent_store = Arc::new(crate::parked_agent_restore::SessionParkedAgentStore::new(
+        cfg.lingxi_home.clone(),
+        cwd.to_string_lossy().into_owned(),
+        subagents_dir_provider.clone(),
+    ));
     let session_agent_observer = Arc::new(MobileSessionAgentObserver::new(
         event_sink.clone(),
         active_session_uuid.clone(),
     ));
+    let session_agent_transcript_cache = session_agent_observer.transcript_cache.clone();
     let mut subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
+        .with_instruction_provider(instruction_provider.clone())
         .with_refusal_fallback_chain(orch_cfg.refusal_chain())
         .with_api_client(provider_adapter.clone() as Arc<dyn agent::SubagentApiClient>)
         .with_session_interactive(interactive_launch)
-        .with_default_model(agent::model_resolution::resolve_user_specified_model(
-            &orch_cfg.model,
-        ))
+        .with_model_resolution_context_provider(model_resolution_context_provider.clone())
+        .with_default_model(resolved_default_model.clone())
         .with_permission_mode(resolved_permission_mode)
         .with_spawn_bypass_gates(subagent_bypass_gates)
         .with_model_setting(orch_cfg.model.clone())
@@ -1616,11 +1720,10 @@ pub(super) async fn build_mobile_inner_with_ask(
     let subagent_skill_loader_cell = subagent_spawner_concrete.skill_loader_handle();
     let subagent_default_model_selection_provider_cell =
         subagent_spawner_concrete.default_model_selection_provider_handle();
-    let subagent_provider_first_party_resolver_cell =
-        subagent_spawner_concrete.provider_first_party_resolver_handle();
     let subagent_spawner_arc = Arc::new(subagent_spawner_concrete);
     let subagent_spawner: Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawner> =
         subagent_spawner_arc.clone();
+    hooks.attach_agent_spawner(Arc::downgrade(&subagent_spawner));
 
     // (c) Budget enforcer over the session CostTracker (desktop parity —
     // background subagents halt at the same session ceiling as the main loop;
@@ -1703,9 +1806,14 @@ pub(super) async fn build_mobile_inner_with_ask(
             .with_streaming_spawner(subagent_spawner_arc.clone())
             .with_status_sink(local_agent_status_sink.clone())
             .with_worktree_manager(worktree.clone())
-            .with_fork_resume_gate(agent_resume_gate),
+            .with_fork_resume_gate(agent_resume_gate.clone())
+            .with_parked_agent_store(parked_agent_store),
         ),
     );
+    #[cfg(feature = "collaboration")]
+    task_registry_inner.set_team_member_activity_handle(Arc::new(
+        coordinator::team_file::TeamFileMemberActivity::new(cfg.lingxi_home.clone()),
+    ));
     let task_registry = Arc::new(task_registry_inner);
     // ONE observer pairing table per session, shared with the orchestrator
     // below (desktop parity). The registry files a pairing when it spawns an
@@ -1789,7 +1897,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         // registry + budget enforcer built above — the `Workflow` tool and
         // the Task command family run for real now.
         subagent_spawner: Some(subagent_spawner.clone()),
-        agent_name_registry: None,
+        agent_name_registry: Some(subagent_spawner_arc.agent_name_registry()),
         task_registry: Some(
             task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>
         ),
@@ -1928,6 +2036,8 @@ pub(super) async fn build_mobile_inner_with_ask(
             Arc::new(RwLock::new(ToolRegistry::new())),
         )
         .with_agent_catalog(plugin_agent_catalog.clone())
+        .with_mods_enabled(false)
+        .with_workspace_trusted(cfg.workspace_trusted)
         .with_plugin_configs(plugin_configs)
         .with_blocked_marketplaces(
             plugin_settings
@@ -1970,11 +2080,12 @@ pub(super) async fn build_mobile_inner_with_ask(
     // ordinary project whose path merely ends in `apps/<id>/workspace` inherit
     // the full app authoring surface.
     let local_app_scope_id = mobile_local_app_scope_id(&cwd, &mobile_apps_data_root(&cfg));
-    let wired_skill_listing_provider = mobile_skill_listing_provider(
+    let wired_skill_listing_provider = mobile_skill_listing_provider_with_settings(
         shared_command_registry.clone(),
         cfg.session_mode,
         local_app_scope_id.is_some(),
         Some(read_state_map.clone()),
+        super::mobile_code_review_suggestion_provider(cfg.clone()),
     );
     #[cfg(test)]
     let wired_skill_loader = skill_loader.clone();
@@ -2083,6 +2194,11 @@ pub(super) async fn build_mobile_inner_with_ask(
         }
     }
     let tools = Arc::new(tools);
+    let child_skill_listing_provider = wired_skill_listing_provider.clone();
+    tools.set_bash_precommit_skills_provider(move || {
+        let provider = child_skill_listing_provider.clone();
+        async move { provider.bash_precommit_skills().await }
+    });
     // Oracle `kq` — publish the read-auto-allow probe now that BOTH inputs
     // exist: the policy, and the FINAL tool list. Earlier means an unknown tool
     // list (which the probe answers `false` for); later means after the file
@@ -2193,13 +2309,6 @@ pub(super) async fn build_mobile_inner_with_ask(
     let _ = subagent_agent_catalog_cell.set(plugin_agent_catalog.clone());
     let _ = subagent_hook_executor_cell.set(hooks.clone());
     let _ = subagent_skill_loader_cell.set(agent_skill_loader);
-    let profile_first_party = profile_auto_mode_provider
-        .iter()
-        .map(|(profile, provider)| (profile.clone(), provider == "firstParty"))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let _ = subagent_provider_first_party_resolver_cell.set(Arc::new(move |profile| {
-        profile_first_party.get(profile).copied()
-    }));
     // Phase 2 Plugin agents declare frontmatter `skills:`. Their preload cell
     // therefore reads the same live registry as the Skill tool and listing;
     // bare agent entries resolve through the agent's plugin namespace.
@@ -2207,32 +2316,37 @@ pub(super) async fn build_mobile_inner_with_ask(
         tool_api::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
     ));
     local_workflow_status_sink.bind(task_registry.clone());
+    let parked_agent_restore_inheritance = lingxi_core::host::SubagentInheritance {
+        tool_invoker: Arc::new(
+            tool_api::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
+        ),
+        budget: budget_enforcer.clone(),
+    };
 
     // MEM-1 ACTIVATION on mobile — the same gate as desktop,
     // `memory::auto_memory_enabled`, which claude-code defaults ON (`dLt()` ends
     // `return!0`). When active, wire the memdir-backed memory selector so
-    // relevant project memdir entries surface each turn via a Haiku-class side
-    // query (a `ProviderSideQueryClient` over the device HTTP transport +
-    // `cfg.api_key`, independent of the multi-provider turn client).
+    // relevant project memdir entries surface each turn via the same provider
+    // service and live model/profile as the session's main turn.
     //
     // Disable with `autoMemoryEnabled:false` or the `*_DISABLE_AUTO_MEMORY` /
-    // `*_SIMPLE` env killswitches. A missing/unusable key makes the side query
+    // `*_SIMPLE` env killswitches. A failed provider call makes the side query
     // fail → empty surfaced set (never breaks a turn).
     let memdir_prefetch = if memory::auto_memory_enabled(
         &memory::AutoMemoryEnv::from_process_env(),
         provider_settings.auto_memory_enabled,
     ) {
-        // `cfg.lingxi_home` is the device `.claude` dir; the helper re-appends
+        // `cfg.lingxi_home` is the device config dir; the helper re-appends
         // the config-home segment, so pass its PARENT as `home`.
         let home = cfg
             .lingxi_home
             .parent()
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| cwd.clone());
-        Some(orchestrator::prompt::build_memdir_prefetch_from_anthropic(
-            cfg.api_key.clone(),
-            Some(cfg.api_base.clone()),
-            api_service.transport(),
+        Some(orchestrator::prompt::build_memdir_prefetch(
+            Arc::new(sidequery::ProviderSideQueryClient::from_service(
+                api_service.clone(),
+            )),
             Arc::new(platform_posix_minimal::runtime::PosixRuntime::new())
                 as Arc<dyn lingxi_core::host::RuntimeSpawner>,
             &home,
@@ -2276,6 +2390,8 @@ pub(super) async fn build_mobile_inner_with_ask(
     let app_agent_executor: Arc<dyn LocalAppsAgentExecutor> =
         Arc::new(MobileAppAgentExecutor::new(
             orch_cfg.clone(),
+            default_model_profile.clone(),
+            model_resolution_context_provider.clone(),
             api_client.clone(),
             streaming_api.clone(),
             hooks.clone(),
@@ -2283,6 +2399,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             cfg.lingxi_home.clone(),
             mobile_apps_data_root(&cfg),
             local_apps_mcp.clone(),
+            projects_session_host.clone(),
             app_agent_mcp_tool_context,
         ));
 
@@ -2298,7 +2415,10 @@ pub(super) async fn build_mobile_inner_with_ask(
         // `cwd` is reused below by the batch-8 registration, so clone here.
         cwd.clone(),
     )
+    .with_hook_agent_inheritance(parked_agent_restore_inheritance.clone())
     .with_dynamic_workflows_gate(dynamic_workflows_gate)
+    .with_model_resolution_context_provider(model_resolution_context_provider.clone())
+    .with_instruction_user_email_provider(instruction_identity.clone())
     .with_workflow_size_guideline(workflow_size_guideline_state)
     .with_session_id(main_session_id)
     .with_jsonl_writer(session_writer.clone())
@@ -2306,7 +2426,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // reports the loaded settings hooks (the executor fires against it; this
     // exposes it for inspection — mobile sibling of desktop's
     // `.with_hook_registry(hook_registry)`).
-    .with_hook_registry(hook_registry)
+    .with_hook_registry(hook_registry.clone())
     .with_vision_delegation(vision_delegation_enabled)
     // FIX A: hand the orchestrator the resolved claude-home so its hook payloads
     // carry a deterministically-computed `transcript_path` (claude-code
@@ -2321,6 +2441,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     .with_analytics_bus(analytics_bus)
     .with_observer_pairings(observer_pairings.clone())
     .with_cost_tracker(cost_tracker)
+    .with_cost_session_switcher(transcript_sessions)
     .with_api_calls_counter(api_calls_recorded)
     .with_new_diagnostics_source(lsp_diagnostics.diagnostics_source(
         Some(std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone())),
@@ -2399,13 +2520,41 @@ pub(super) async fn build_mobile_inner_with_ask(
             .with_mobile_runtime_environment(environment)
             .with_mobile_workspace_cwd_resolver(resolver);
     }
-    orch_inner = orch_inner.with_mcp_registry(mcp_registry.clone());
+    orch_inner = orch_inner
+        .with_mcp_registry(mcp_registry.clone())
+        .with_task_registry(task_registry.clone())
+        .with_mod_agent_name_registry(subagent_spawner_arc.agent_name_registry());
     // P0.1 (gated): attach the memdir prefetch when enabled above.
     if let Some(prefetch) = memdir_prefetch {
         orch_inner = orch_inner.with_memory_prefetch(prefetch);
     }
-    let orch = Arc::new(orch_inner.with_loop_wakeup_armed_slot(loop_wakeup_armed));
+    let orch = orchestrator::ConversationOrchestrator::into_shared(
+        orch_inner.with_loop_wakeup_armed_slot(loop_wakeup_armed),
+    );
+    // Initialize the configured route before publishing report wakes or the
+    // live parent-selection provider used by child agents.
+    if let Some(profile) = default_model_profile.as_deref() {
+        orch.seed_initial_model_profile(&default_model_id, profile)
+            .await;
+    }
+    instruction_identity.bind_root(&orch);
+    root_instruction_provider
+        .bind(&orch)
+        .map_err(MobileBuildError::Orchestrator)?;
+    let mod_session: Arc<dyn hooks::mods::ModSessionContext> = orch.clone();
+    hook_registry
+        .write()
+        .await
+        .attach_mod_background_context(Arc::downgrade(&mod_session));
     orch.enable_goal_retries();
+    orch.attach_owned_session_switches();
+    let main_report_waker = Arc::new(crate::main_report_waker::MainReportWakeRouter::new(
+        Arc::new(crate::main_report_waker::DirectMainReportWaker::new(&orch)),
+    ));
+    orch.set_main_report_waker(main_report_waker.clone());
+    task_registry.bind_reporting_admission(Arc::downgrade(
+        &(orch.clone() as Arc<dyn lingxi_core::host::handback::ReportingAdmission>),
+    ));
 
     // v3 Phase 1: publish the shared output-token pool + turn baseline to the
     // LocalWorkflow handler's cells now that the orchestrator exists — the
@@ -2415,40 +2564,42 @@ pub(super) async fn build_mobile_inner_with_ask(
     let _ = local_workflow_turn_baseline.set(orch.turn_start_output_baseline());
     {
         let session = orch.session();
-        let selection_model_provider_profiles = model_provider_profiles.clone();
-        let selection_profile_auto_mode_provider = profile_auto_mode_provider.clone();
-        let last_selection = Arc::new(std::sync::Mutex::new(session.try_lock().ok().map(
+        let selection_context_provider = model_resolution_context_provider.clone();
+        let last_selection = Arc::new(std::sync::Mutex::new(session.try_lock().ok().and_then(
             |state| {
-                agent::DefaultModelSelection {
+                let context = selection_context_provider
+                    .context_for_route(&state.model, state.model_profile.as_deref())
+                    .ok()?;
+                Some(agent::DefaultModelSelection {
                     model: state.model.clone(),
-                    model_profile: state.model_profile.clone(),
-                    provider_first_party: state
-                        .model_profile
-                        .as_ref()
-                        .or_else(|| selection_model_provider_profiles.get(&state.model))
-                        .and_then(|profile| selection_profile_auto_mode_provider.get(profile))
-                        .map_or(true, |provider| provider == "firstParty"),
-                }
+                    model_profile: context
+                        .route
+                        .profile
+                        .clone()
+                        .or(state.model_profile.clone()),
+                    model_resolution_context: context,
+                })
             },
         )));
         let _ = subagent_default_model_selection_provider_cell.set(Arc::new(move || {
             if let Ok(state) = session.try_lock() {
+                let context = selection_context_provider
+                    .context_for_route(&state.model, state.model_profile.as_deref())?;
                 let selection = agent::DefaultModelSelection {
                     model: state.model.clone(),
-                    model_profile: state.model_profile.clone(),
-                    provider_first_party: state
-                        .model_profile
-                        .as_ref()
-                        .or_else(|| selection_model_provider_profiles.get(&state.model))
-                        .and_then(|profile| selection_profile_auto_mode_provider.get(profile))
-                        .map_or(true, |provider| provider == "firstParty"),
+                    model_profile: context
+                        .route
+                        .profile
+                        .clone()
+                        .or(state.model_profile.clone()),
+                    model_resolution_context: context,
                 };
                 if let Ok(mut cached) = last_selection.lock() {
                     *cached = Some(selection.clone());
                 }
-                return Some(selection);
+                return Ok(Some(selection));
             }
-            last_selection.lock().ok().and_then(|cached| cached.clone())
+            Ok(last_selection.lock().ok().and_then(|cached| cached.clone()))
         }));
     }
 
@@ -2473,35 +2624,25 @@ pub(super) async fn build_mobile_inner_with_ask(
     }
     if let Some(cell) = live_model_provider_cell.as_ref() {
         let session = orch.session();
-        let model_provider_profiles = model_provider_profiles.clone();
         let profile_auto_mode_provider = profile_auto_mode_provider.clone();
+        let model_resolution_context_provider = model_resolution_context_provider.clone();
         let _ = cell.set(std::sync::Arc::new(move || {
-            session.try_lock().ok().map(|state| {
-                let profile = state
-                    .model_profile
-                    .as_ref()
-                    .or_else(|| model_provider_profiles.get(&state.model));
-                let provider = profile
-                    .and_then(|profile| profile_auto_mode_provider.get(profile))
-                    .cloned()
-                    .unwrap_or_else(|| "firstParty".to_string());
-                permission::LiveModelContext {
+            session.try_lock().ok().and_then(|state| {
+                let context = model_resolution_context_provider
+                    .context_for_route(&state.model, state.model_profile.as_deref())
+                    .ok()?;
+                let profile = context.route.profile.as_ref()?;
+                let provider = profile_auto_mode_provider.get(profile)?.clone();
+                Some(permission::LiveModelContext {
                     model: state.model.clone(),
                     provider,
-                }
+                })
             })
         }));
     }
 
     // (8) Command registry through the mobile composition root.
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();
-    // TPM-C (mobile step 2): seed the initial model_profile from a
-    // profile-qualified default_model.  SessionState::empty starts model_profile
-    // at None; this is a no-op when default_model is a bare id.
-    if let Some(profile) = default_model_profile.as_deref() {
-        orch.seed_initial_model_profile(&default_model_id, profile)
-            .await;
-    }
     orch.spawn_startup_responses_websocket_prewarm();
     // Fill the shared registry slot so batch-8, the slash dispatcher, the
     // per-turn skill listing, and the Skill tool all observe ONE command set.
@@ -2551,6 +2692,10 @@ pub(super) async fn build_mobile_inner_with_ask(
         device_skill_tools.clone(),
     )));
     *shared_command_registry.write().await = reg;
+    shared_command_registry
+        .write()
+        .await
+        .set_session_skill_allowlist(cfg.session_skill_allowlist.clone());
     // P1.10 (§19.2): read the activation bit BEFORE materializing the
     // compiled-in bundle. A disabled boot keeps its inventory/status available
     // from compiled metadata but performs no bundle filesystem work; enabling
@@ -2621,12 +2766,17 @@ pub(super) async fn build_mobile_inner_with_ask(
         }));
     }
     let prompt_paths_orch = orch.clone();
+    let bundled_prompt_model_orch = orch.clone();
     let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
         .with_prompt_paths(Arc::new(move || {
             (
                 prompt_paths_orch.project_root(),
                 prompt_paths_orch.current_cwd(),
             )
+        }))
+        .with_bundled_prompt_model(Arc::new(move || {
+            let orch = bundled_prompt_model_orch.clone();
+            Box::pin(async move { orch.bundled_prompt_model().await.map(Some) })
         }))
         .with_skill_usage_home(cfg.lingxi_home.clone());
     let dispatcher = if cfg.session_mode == session::jsonl::SessionMode::Code {
@@ -2759,6 +2909,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         session_default_permission_mode: initial_permission_mode,
         listener,
         event_sink,
+        session_agent_transcript_cache,
         message_output,
         session_writer,
         oauth_supported,
@@ -2783,6 +2934,9 @@ pub(super) async fn build_mobile_inner_with_ask(
         active_session_uuid,
         plan_files,
         app_agent_executor,
+        parked_agent_restore_inheritance,
+        agent_resume_gate,
+        main_report_waker,
     })
 }
 
@@ -2891,6 +3045,12 @@ pub fn build_mobile_engine_inner(
 
     let skill_count = crate::mobile::mobile_skill_registry().len();
     let message_queue = Arc::new(msgqueue::MessageQueueManager::new());
+    inner.main_report_waker.bind_queue(message_queue.clone());
+    runtime.block_on(async {
+        if let Err(error) = inner.orchestrator.recover_main_reports().await {
+            tracing::warn!(%error, "could not recover admitted mobile subagent reports");
+        }
+    });
     let loop_transition = Arc::new(Mutex::new(()));
     let loop_state = Arc::new(tool_cron::LoopRuntime::default());
     let loop_delivery = Arc::new(MobileWakeupDelivery {
@@ -3189,6 +3349,7 @@ pub fn build_mobile_engine_inner(
                         && !message_queue
                             .get_by_max_priority(msgqueue::QueuePriority::Next, |command| {
                                 command.is_main_thread()
+                                    && !matches!(command.content, msgqueue::QueuedCommandContent::HandbackWake { .. })
                             })
                             .await
                             .is_empty()
@@ -3210,6 +3371,7 @@ pub fn build_mobile_engine_inner(
                                         command.source,
                                         msgqueue::QueueSource::Cron
                                             | msgqueue::QueueSource::PromptInput
+                                            | msgqueue::QueueSource::SubagentHandback
                                     ))
                         })
                         .await;
@@ -3232,12 +3394,24 @@ pub fn build_mobile_engine_inner(
                                             command.source,
                                             msgqueue::QueueSource::Cron
                                                 | msgqueue::QueueSource::PromptInput
+                                                | msgqueue::QueueSource::SubagentHandback
                                         ))
                             })
                             .await
                     };
                     if !notifications && scheduled.is_none() {
                         continue;
+                    }
+                    let handback_scope = scheduled.as_ref().and_then(|command| {
+                        match &command.content {
+                            msgqueue::QueuedCommandContent::HandbackWake { scope, .. } => Some(*scope),
+                            _ => None,
+                        }
+                    });
+                    if let Some(scope) = handback_scope {
+                        if !orch.has_pending_main_reports(scope).await {
+                            continue;
+                        }
                     }
                     let session_id = session_uuid.lock().map(|id| id.clone()).unwrap_or_default();
                     let permission_owner_id =
@@ -3329,7 +3503,11 @@ pub fn build_mobile_engine_inner(
                     );
                     let scheduler = loop_scheduler.clone();
                     let reason = cancel_reason.clone();
-                    let task = tokio::spawn(async move {
+                    // The turn task embeds the streaming + Mod lifecycle state
+                    // machine. Box it at the spawn boundary so the worker does
+                    // not materialize the full queued-turn future inline while
+                    // creating the Tokio task.
+                    let task = tokio::spawn(Box::pin(async move {
                         let result = match prompt {
                             Err(error) => {
                                 Err(orchestrator::OrchestratorError::Internal(error.to_string()))
@@ -3344,6 +3522,9 @@ pub fn build_mobile_engine_inner(
                                         queue_priority: Some("later".into()),
                                         scheduled_task_id,
                                         scheduled_fire_id,
+                                        mod_origin: is_scheduled
+                                            .then(|| serde_json::json!({"kind": "scheduled-trigger"})),
+                                        transcript_row_token: None,
                                     }],
                                     task_turn.cancel.clone(),
                                 )
@@ -3360,11 +3541,13 @@ pub fn build_mobile_engine_inner(
                                 .await
                             }
                             Ok(None) => {
-                                orch.run_task_notification_rewake(
-                                    registry.as_ref(),
-                                    task_turn.cancel.clone(),
-                                )
-                                .await
+                                if let Some(scope) = handback_scope {
+                                    orch.run_main_report_turn(scope, task_turn.cancel.clone()).await
+                                } else {
+                                    orch.run_task_notification_rewake(
+                                        registry.as_ref(), task_turn.cancel.clone(),
+                                    ).await
+                                }
                             }
                         };
                         if let Err(error) = result {
@@ -3393,7 +3576,7 @@ pub fn build_mobile_engine_inner(
                         }
                         message_queue.clear_active_turn().await;
                         task_turn.mark_completed();
-                    });
+                    }));
                     turn.set_task_handle(task);
                 }
             })

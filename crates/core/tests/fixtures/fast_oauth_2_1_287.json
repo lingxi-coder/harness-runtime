@@ -1,0 +1,1157 @@
+{
+  "version": "2.1.287",
+  "native_sha256": "6eab8333fe2121553100d8f40bfada384a3e989b94f947e18ba6677a6fcb41ea",
+  "sourceByteRanges": [
+    {
+      "label": "actual OAuth scope constants",
+      "start": 178157968,
+      "end": 178158104,
+      "sha256": "cc032c14fc62ecd859ec01e451f8e2e859cd644ec96ebbb2d492c74f6da9ea82"
+    },
+    {
+      "label": "actual profile predicate",
+      "start": 181280776,
+      "end": 181280849,
+      "sha256": "f8a464317e4d84bf44dd6711ad5415d90b70c3a062a62148dc9e507916546bde"
+    },
+    {
+      "label": "actual qu/YBe eligibility",
+      "start": 180872182,
+      "end": 180872282,
+      "sha256": "41cb3bc285dd5471fc77fdaa95d34cd3b4fd7770a29f6dcc2d4db95958aafd60"
+    },
+    {
+      "label": "actual refresh HTTP trigger",
+      "start": 180883090,
+      "end": 180883262,
+      "sha256": "54bb1215760d8dc4e0e1bff76f53d50747bd9ba49d0bef68cf36cb01566c2e6a"
+    }
+  ],
+  "scope": "Actual OAuth scope constants, zp/qu/YBe and Rbe HTTP refresh trigger. Supplied scope array/session-token/no-user facts; To admitted. Session-token/JWT producers, account-source resolution and complete Rbe persistence excluded.",
+  "cases": [
+    {
+      "input": {
+        "scopes": [],
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [],
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [],
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [],
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile"
+        ],
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile"
+        ],
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile"
+        ],
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile"
+        ],
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": false,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:ccr_inference"
+        ],
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference"
+        ],
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:inference"
+        ],
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:inference"
+        ],
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:inference"
+        ],
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:inference"
+        ],
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:inference"
+        ],
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": false,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference"
+        ],
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "unexpected"
+        ],
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "unexpected"
+        ],
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "unexpected"
+        ],
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "unexpected"
+        ],
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "unexpected"
+        ],
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": false,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "unexpected"
+        ],
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:inference",
+          "unexpected"
+        ],
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:inference",
+          "unexpected"
+        ],
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": false,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": false,
+        "eligible": false
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "session_token": false,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "session_token": false,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "session_token": true,
+        "no_user_account": false
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    },
+    {
+      "input": {
+        "scopes": [
+          "user:profile",
+          "user:ccr_inference",
+          "user:inference",
+          "unexpected"
+        ],
+        "session_token": true,
+        "no_user_account": true
+      },
+      "expected": {
+        "profile": true,
+        "eligible": true
+      }
+    }
+  ],
+  "errors": [
+    {
+      "input": {
+        "status": 400,
+        "body": null
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 400,
+        "body": {}
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 400,
+        "body": "OAuth token has been revoked"
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 400,
+        "body": "prefix OAuth token has been revoked suffix"
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 400,
+        "body": "oauth token has been revoked"
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 400,
+        "body": {
+          "error": {
+            "message": "OAuth token has been revoked"
+          }
+        }
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 401,
+        "body": null
+      },
+      "expected": true
+    },
+    {
+      "input": {
+        "status": 401,
+        "body": {}
+      },
+      "expected": true
+    },
+    {
+      "input": {
+        "status": 401,
+        "body": "OAuth token has been revoked"
+      },
+      "expected": true
+    },
+    {
+      "input": {
+        "status": 401,
+        "body": "prefix OAuth token has been revoked suffix"
+      },
+      "expected": true
+    },
+    {
+      "input": {
+        "status": 401,
+        "body": "oauth token has been revoked"
+      },
+      "expected": true
+    },
+    {
+      "input": {
+        "status": 401,
+        "body": {
+          "error": {
+            "message": "OAuth token has been revoked"
+          }
+        }
+      },
+      "expected": true
+    },
+    {
+      "input": {
+        "status": 403,
+        "body": null
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 403,
+        "body": {}
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 403,
+        "body": "OAuth token has been revoked"
+      },
+      "expected": true
+    },
+    {
+      "input": {
+        "status": 403,
+        "body": "prefix OAuth token has been revoked suffix"
+      },
+      "expected": true
+    },
+    {
+      "input": {
+        "status": 403,
+        "body": "oauth token has been revoked"
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 403,
+        "body": {
+          "error": {
+            "message": "OAuth token has been revoked"
+          }
+        }
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 404,
+        "body": null
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 404,
+        "body": {}
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 404,
+        "body": "OAuth token has been revoked"
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 404,
+        "body": "prefix OAuth token has been revoked suffix"
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 404,
+        "body": "oauth token has been revoked"
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 404,
+        "body": {
+          "error": {
+            "message": "OAuth token has been revoked"
+          }
+        }
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 500,
+        "body": null
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 500,
+        "body": {}
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 500,
+        "body": "OAuth token has been revoked"
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 500,
+        "body": "prefix OAuth token has been revoked suffix"
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 500,
+        "body": "oauth token has been revoked"
+      },
+      "expected": false
+    },
+    {
+      "input": {
+        "status": 500,
+        "body": {
+          "error": {
+            "message": "OAuth token has been revoked"
+          }
+        }
+      },
+      "expected": false
+    }
+  ]
+}

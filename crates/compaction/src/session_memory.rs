@@ -35,17 +35,11 @@
 
 use lingxi_core::types::{ConversationMessage, MessageId};
 
-/// Configuration for the session-memory subsystem (spec §6.5 + §13.8).
+/// Configuration for session-memory extraction during compaction (spec §13.8).
 ///
 /// `enabled` is the single master gate (no `tengu_session_memory` flag exists
 /// in v2.1.181). `compact_extracts_memory` additionally gates the §13.8
-/// dual-extraction-during-compaction path; the standalone §6.5 extractor keys
-/// off `enabled` alone.
-///
-/// The numeric `*_threshold` defaults are deliberately NOT pinned to a literal
-/// here — they are unknown in the spec/binary/git history, so tests assert
-/// behavior *relative to the configured field*, never a hard-coded number. A
-/// caller (composition root / settings loader) supplies concrete values.
+/// dual-extraction-during-compaction path.
 #[derive(Debug, Clone)]
 pub struct SessionMemoryConfig {
     /// Master gate for the whole session-memory subsystem.
@@ -53,15 +47,6 @@ pub struct SessionMemoryConfig {
     /// When `true`, the compaction pass also extracts a `<session_memory>`
     /// block from its summary response (the §13.8 dual-extraction path).
     pub compact_extracts_memory: bool,
-    /// Tool-call count since the last extraction that triggers the FIRST
-    /// extraction of a session (before any memory has been written).
-    pub initialization_threshold: u32,
-    /// Tool-call count since the last extraction that triggers a SUBSEQUENT
-    /// (incremental) extraction once the session already has memory.
-    pub update_threshold: u32,
-    /// Model alias used by the standalone §6.5 extractor for its cheap
-    /// distillation fork. Haiku-class by default (matches the memory selector).
-    pub extraction_model: String,
 }
 
 impl Default for SessionMemoryConfig {
@@ -72,13 +57,6 @@ impl Default for SessionMemoryConfig {
             // parity subsystem in this codebase.
             enabled: false,
             compact_extracts_memory: false,
-            // Thresholds are unknown upstream; tests assert against the field,
-            // not these placeholders. They only matter once `enabled` is set.
-            initialization_threshold: 0,
-            update_threshold: 0,
-            // Cheap standalone distillation fork — Haiku-class, matching
-            // `memory::selector::MemorySelector::new`'s `claude-haiku-4-5`.
-            extraction_model: "claude-haiku-4-5".to_string(),
         }
     }
 }
@@ -176,7 +154,6 @@ mod tests {
         SessionMemoryConfig {
             enabled: true,
             compact_extracts_memory: compact_extracts,
-            ..SessionMemoryConfig::default()
         }
     }
 
@@ -192,8 +169,6 @@ mod tests {
             "session memory must be off by default (fixtures stay byte-identical)"
         );
         assert!(!c.compact_extracts_memory);
-        // Extraction model defaults to the Haiku-class selector model.
-        assert_eq!(c.extraction_model, "claude-haiku-4-5");
     }
 
     #[test]

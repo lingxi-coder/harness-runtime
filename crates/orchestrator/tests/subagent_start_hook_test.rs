@@ -1,5 +1,5 @@
 //! tool-dispatch chokepoint (`turn_loop.rs`) immediately BEFORE the
-//! subagent-spawning `Agent` tool (legacy alias `Task`) begins.
+//! subagent-spawning `Agent` tool begins.
 //!
 //! Parity with claude-code: `executeSubagentStartHooks(agentId, agentType, …)`
 //! (`utils/hooks.ts:3932-3952`) builds `hook_event_name: 'SubagentStart'` at the
@@ -14,7 +14,7 @@
 //! 1. An `Agent` dispatch fires `SubagentStart` with the dispatched
 //!    `subagent_type` carried on the hook context's `agent_type` and a real
 //!    `agent:UUID` id on the wire payload's required field.
-//! 2. The legacy `Task` alias fires `SubagentStart` identically.
+//! 2. The removed `Task` name does not fire `SubagentStart`.
 //! 3. A non-Agent tool never fires `SubagentStart`.
 //! 4. No `SubagentStart` hook registered → the spawn is a strict no-op
 //!    (byte-identical: the turn still reaches `end_turn`).
@@ -84,7 +84,7 @@ impl RuntimeSpawner for UnusedRuntime {
 // ---- Tools ----
 
 /// Stand-in for the real `Agent` tool, registered under a configurable name
-/// (`"Agent"` or the legacy `"Task"` alias) so the dispatch chokepoint keys on
+/// so the dispatch chokepoint keys only on the current Agent name for
 /// it. The `SubagentStart` + `SubagentStop` fires happen AFTER `call()` and read
 /// the child's REAL pool id off the result `data.agentId` (C1 seam), so this
 /// fake surfaces a fixed `agentId` to prove both events fire with the SAME
@@ -370,7 +370,7 @@ fn two_turn_api(
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "done".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ),
@@ -413,7 +413,7 @@ async fn agent_dispatch_fires_subagent_start() {
 }
 
 #[tokio::test]
-async fn legacy_task_alias_fires_subagent_start() {
+async fn removed_task_alias_does_not_fire_subagent_start() {
     let tool_use_id = ToolUseId::new();
     let api = two_turn_api(
         tool_use_id,
@@ -430,12 +430,10 @@ async fn legacy_task_alias_fires_subagent_start() {
     assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
 
     let seen = log.lock().unwrap().clone();
-    assert_eq!(
-        seen.len(),
-        1,
-        "the legacy `Task` alias must fire SubagentStart: {seen:?}"
+    assert!(
+        seen.is_empty(),
+        "removed Task name must not fire SubagentStart: {seen:?}"
     );
-    assert_eq!(seen[0].agent_type, "code-reviewer");
 }
 
 #[tokio::test]

@@ -141,7 +141,7 @@ pub trait LocalAppsModel: Send + Sync {
 /// Lower one app-supplied part to the conversation vocabulary.
 fn chat_part_block(part: ChatPart) -> lingxi_core::types::ContentBlock {
     match part {
-        ChatPart::Text(text) => lingxi_core::types::ContentBlock::Text { text },
+        ChatPart::Text(text) => lingxi_core::types::ContentBlock::Text { text, citations: None },
         ChatPart::Image { media_type, base64 } => lingxi_core::types::ContentBlock::Image {
             source: lingxi_core::types::ImageSource::Base64 {
                 media_type,
@@ -1228,11 +1228,11 @@ mod tests {
             },
             ContentBlock::Text {
                 text: "答案第一段".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             },
             ContentBlock::Text {
                 text: "，第二段".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             },
         ];
         assert_eq!(extract_chat_text(&content), "答案第一段，第二段");

@@ -289,10 +289,10 @@ impl RenderedInvokedSkillsAttachment {
         match self.exact_utf16 {
             Some(utf16_code_units) => ContentBlock::TextJsUtf16 {
                 text: self.display_text,
-                utf16_code_units,
+                utf16_code_units, citations: None,
             },
             None => ContentBlock::Text {
-                text: self.display_text,
+                text: self.display_text, citations: None,
             },
         }
     }
@@ -960,18 +960,6 @@ mod tests {
     }
 
     #[test]
-    fn post_compact_file_read_budgets_match_token_limit_contract() {
-        assert_eq!(
-            crate::thresholds::POST_COMPACT_MAX_CHARS_PER_FILE_READ,
-            usize::try_from(POST_COMPACT_MAX_TOKENS_PER_FILE).expect("token cap fits usize") * 4
-        );
-        assert_eq!(
-            crate::thresholds::POST_COMPACT_MAX_BYTES_PER_FILE_READ,
-            crate::thresholds::POST_COMPACT_MAX_CHARS_PER_FILE_READ * 3 + 3
-        );
-    }
-
-    #[test]
     fn restore_files_composes_select_then_budget() {
         // The composed pure form must equal select-then-budget.
         let candidates = vec![file("/a", "one", 2), file("/b", "two", 1)];
@@ -1119,7 +1107,7 @@ mod tests {
         match block {
             ContentBlock::TextJsUtf16 {
                 text,
-                utf16_code_units,
+                utf16_code_units, ..
             } => {
                 assert!(text.contains("### Skill: skill"));
                 assert!(utf16_code_units

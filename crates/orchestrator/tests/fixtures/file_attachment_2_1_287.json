@@ -1,0 +1,212 @@
+{
+  "version": "2.1.287",
+  "native_sha256": "6eab8333fe2121553100d8f40bfada384a3e989b94f947e18ba6677a6fcb41ea",
+  "sourceByteRanges": [
+    {
+      "start": 186664063,
+      "end": 186665660,
+      "startMarker": "mapToolResultToToolResultBlockParam(",
+      "endMarker": "});async function AKn(",
+      "sha256": "b1d531da1a3d9a75643b33f851b1b96787f3e36a7523241a32ba4728c8915311"
+    },
+    {
+      "start": 189888544,
+      "end": 189889110,
+      "startMarker": "case\"file\":{let s=e.content;",
+      "endMarker": "case\"invoked_skills\":",
+      "sha256": "fcc0c84a6fbebdc58f822a5bb3d54cf696261fe76c5e0a30761eebfba27e2fc4"
+    },
+    {
+      "start": 189872277,
+      "end": 189872498,
+      "startMarker": "compact_file_reference:(e)=>",
+      "endMarker": ",pdf_reference:",
+      "sha256": "a588a96dfef789da6703392e404dc7dc1bce23f9c5bf997d29a064c4a1230e57"
+    },
+    {
+      "start": 189798003,
+      "end": 189799519,
+      "startMarker": "function Re(",
+      "endMarker": "function L6(",
+      "sha256": "85a35f3b3c712d0af29fe73388237c8e15351ef73c5438a42a67cb453d861f3f"
+    },
+    {
+      "start": 189911628,
+      "end": 189912130,
+      "startMarker": "function a6(",
+      "endMarker": "function Nt(",
+      "sha256": "1f34607cdb4e8978cc1d5bd80fc80e969a5a4a15d1f574b21c5ba9e56a77b2d3"
+    },
+    {
+      "start": 189852870,
+      "end": 189852911,
+      "startMarker": "function cl(",
+      "endMarker": "function Hrn(",
+      "sha256": "3f88c9d774aa06af8267cd50568dddf07aa3d253b709edf45f34a81a0e19970a"
+    },
+    {
+      "start": 189855437,
+      "end": 189855768,
+      "startMarker": "function ya(",
+      "endMarker": "function i_r(",
+      "sha256": "e65d0a0d2cc7c067840b3cd0492402f04703c9f83cc29e21d46cb0507d175e4c"
+    },
+    {
+      "start": 186668159,
+      "end": 186668332,
+      "startMarker": "var Jgt=",
+      "endMarker": "async function MKn(",
+      "sha256": "1333bd16deb224e1686687ec1b341c614612ac0f421d67c36ea2758cd06365ef"
+    },
+    {
+      "start": 178907289,
+      "end": 178907649,
+      "startMarker": "function xZe(",
+      "endMarker": "function j8o(",
+      "sha256": "17513ad692df44de6cb8abbf0dd527e7f2d0778e98d6d63fcffcb8987d674dda"
+    },
+    {
+      "start": 178148543,
+      "end": 178148594,
+      "startMarker": "var pD=",
+      "endMarker": ",aet=",
+      "sha256": "8a39529d1dc7e97d513f350a9802add5ef1d91a937f98b115ad56db767ed4faa"
+    }
+  ],
+  "scope": "Actual unchanged file switch branch, compact_file_reference renderer, Sv Read mapper, a6/l6/Re/ya/cl and xZe/grr. JSON serializer, path display formatter, UUID/clock and current E7e default false are controlled. No I/O or Read-side weak-map metadata. This is Node helper execution, not native CLI or embedded Bun acceptance. Text-file attachments without truncation; other media, truncation and non-default tab separators are outside the fixture scope.",
+  "cases": [
+    {
+      "name": "plain-file",
+      "input": {
+        "type": "file",
+        "filename": "/repo/pkg/LINGXI.md",
+        "content": {
+          "type": "text",
+          "file": {
+            "filePath": "/repo/pkg/LINGXI.md",
+            "content": "Folder guidance",
+            "numLines": 1,
+            "startLine": 1,
+            "totalLines": 1
+          }
+        },
+        "displayPath": "pkg/LINGXI.md"
+      },
+      "expected": {
+        "rendered": [
+          "<system-reminder>\nCalled the Read tool with the following input: {\"file_path\":\"/repo/pkg/LINGXI.md\"}\n</system-reminder>",
+          "<system-reminder>\nResult of calling the Read tool:\n1\tFolder guidance\n</system-reminder>"
+        ]
+      }
+    },
+    {
+      "name": "untrimmed-multiline-file",
+      "input": {
+        "type": "file",
+        "filename": "/repo/pkg/LINGXI.md",
+        "content": {
+          "type": "text",
+          "file": {
+            "filePath": "/repo/pkg/LINGXI.md",
+            "content": " \nFolder guidance\n\t",
+            "numLines": 3,
+            "startLine": 1,
+            "totalLines": 3
+          }
+        },
+        "displayPath": "pkg/LINGXI.md"
+      },
+      "expected": {
+        "rendered": [
+          "<system-reminder>\nCalled the Read tool with the following input: {\"file_path\":\"/repo/pkg/LINGXI.md\"}\n</system-reminder>",
+          "<system-reminder>\nResult of calling the Read tool:\n1\t \n2\tFolder guidance\n3\t\t\n</system-reminder>"
+        ]
+      }
+    },
+    {
+      "name": "crlf-file",
+      "input": {
+        "type": "file",
+        "filename": "/repo/pkg/LINGXI.md",
+        "content": {
+          "type": "text",
+          "file": {
+            "filePath": "/repo/pkg/LINGXI.md",
+            "content": "one\r\ntwo\r\n",
+            "numLines": 3,
+            "startLine": 1,
+            "totalLines": 3
+          }
+        },
+        "displayPath": "pkg/LINGXI.md"
+      },
+      "expected": {
+        "rendered": [
+          "<system-reminder>\nCalled the Read tool with the following input: {\"file_path\":\"/repo/pkg/LINGXI.md\"}\n</system-reminder>",
+          "<system-reminder>\nResult of calling the Read tool:\n1\tone\n2\ttwo\n3\t\n</system-reminder>"
+        ]
+      }
+    },
+    {
+      "name": "empty-file",
+      "input": {
+        "type": "file",
+        "filename": "/repo/pkg/LINGXI.md",
+        "content": {
+          "type": "text",
+          "file": {
+            "filePath": "/repo/pkg/LINGXI.md",
+            "content": "",
+            "numLines": 0,
+            "startLine": 1,
+            "totalLines": 0
+          }
+        },
+        "displayPath": "pkg/LINGXI.md"
+      },
+      "expected": {
+        "rendered": [
+          "<system-reminder>\nCalled the Read tool with the following input: {\"file_path\":\"/repo/pkg/LINGXI.md\"}\n</system-reminder>",
+          "<system-reminder>\nResult of calling the Read tool:\n<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>\n</system-reminder>"
+        ]
+      }
+    },
+    {
+      "name": "empty-slice-at-offset",
+      "input": {
+        "type": "file",
+        "filename": "/repo/pkg/LINGXI.md",
+        "content": {
+          "type": "text",
+          "file": {
+            "filePath": "/repo/pkg/LINGXI.md",
+            "content": "",
+            "numLines": 1,
+            "startLine": 1,
+            "totalLines": 5
+          }
+        },
+        "displayPath": "pkg/LINGXI.md"
+      },
+      "expected": {
+        "rendered": [
+          "<system-reminder>\nCalled the Read tool with the following input: {\"file_path\":\"/repo/pkg/LINGXI.md\"}\n</system-reminder>",
+          "<system-reminder>\nResult of calling the Read tool:\n1\t\n</system-reminder>"
+        ]
+      }
+    },
+    {
+      "name": "compact-file-reference",
+      "input": {
+        "type": "compact_file_reference",
+        "filename": "/repo/pkg/LINGXI.md",
+        "displayPath": "pkg/LINGXI.md"
+      },
+      "expected": {
+        "rendered": [
+          "<system-reminder>\nNote: /repo/pkg/LINGXI.md was read before the last conversation was summarized, but the contents are too large to include. Use Read tool if you need to access it.\n</system-reminder>"
+        ]
+      }
+    }
+  ]
+}

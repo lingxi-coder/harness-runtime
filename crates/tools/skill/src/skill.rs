@@ -437,6 +437,8 @@ impl SkillTool {
             ctx.origin_session_id
         };
         let request = lingxi_core::host::subagent_spawn::SubagentSpawnRequest {
+            stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped,
+            agent_spawn_provenance: Default::default(),
             teammate_color: None,
             subagent_type: desc
                 .agent
@@ -468,6 +470,7 @@ impl SkillTool {
             cwd: None,
             worktree: None,
             fork_context_messages: None,
+            instruction_context: ctx.instruction_context.clone(),
             fork_parent_system_prompt: None,
             schema: None,
             structured_output_mode: Default::default(),
@@ -480,7 +483,11 @@ impl SkillTool {
             // exists to narrow. Without this the forked agent would run with
             // the PARENT's tools, which is strictly wider than the skill's.
             additional_disallowed_tools: desc.disallowed_tools.clone(),
-            parent_model_override: None,
+            parent_model_override: {
+                let model = ctx.options.main_loop_model.trim();
+                (!model.is_empty() && model != "subagent").then(|| model.to_owned())
+            },
+            parent_model_profile_override: ctx.options.model_profile.clone(),
             resumed_history: None,
             max_turns_override: None,
             max_output_tokens_per_turn: None,
@@ -488,6 +495,13 @@ impl SkillTool {
             query_source_label: None,
             correlation_id: None,
             model_attempt: None,
+            handback_opt_in: false,
+            parent_permission_mode: None,
+            handback_enabled: None,
+            handback_ends_turn_enabled: None,
+            restored_handback_state: None,
+            restored_handback_history: Vec::new(),
+            restore_handback_start: None,
         };
         let mut invoker_impl = tool_api::tool_invoker_impl::RegistryToolInvoker::new(
             ctx.subagent_registry.clone().ok_or_else(|| {
@@ -715,12 +729,12 @@ fn frozen_command_denies(policy: &permission::PermissionPolicy) -> Vec<String> {
 }
 
 /// The per-session subagent spawn cap (claude 2.1.212 `xtu()` =
-/// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION ?? 200`). Duplicated from the Agent
+/// `LINGXI_MAX_SUBAGENTS_PER_SESSION ?? 200`). Duplicated from the Agent
 /// tool rather than shared: both read the same env var, and `tool-skill` does
 /// not depend on `tool-agent`. An unset or unparseable value falls back to the
 /// default, so a garbage env string cannot silently disable the cap.
 fn max_subagents_per_session() -> u64 {
-    std::env::var("CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION")
+    std::env::var(branding::MAX_SUBAGENTS_PER_SESSION_ENV)
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(200)
@@ -1087,9 +1101,12 @@ present this turn, the skill is loaded — follow it directly rather than callin
             let cwd = ctx.cwd.clone().unwrap_or_else(|| self.ctx.cwd());
             match builder.try_build_at(
                 args_for_expansion,
-                &self.ctx.session_cwd.project_root(),
-                &cwd,
-                false,
+                command_api::BundledPromptContext {
+                    project_root: &self.ctx.session_cwd.project_root(),
+                    cwd: &cwd,
+                    is_preload: false,
+                    main_loop_model: Some(ctx.options.main_loop_model.as_str()),
+                },
             ) {
                 Ok(prompt) => prompt,
                 Err(error) => {
@@ -1341,21 +1358,15 @@ present this turn, the skill is loaded — follow it directly rather than callin
             obj.insert("args".into(), Value::String(args));
         }
 
-        // SKILLEXEC.3 (model scope): when the skill declares `model:` in its
-        // frontmatter, return a `context_modifier` that switches the session's
-        // main-loop model for the rest of the session — 1:1 with TS
-        // `SkillTool.ts:808-821` (`contextModifier` sets `options.mainLoopModel
-        // = resolveSkillModelOverride(model, ctx.options.mainLoopModel)`),
-        // including the `[1m]`-suffix preservation rule. The turn loop seeds the
-        // closure's `ctx` with the live `session.model` (the `currentModel`
-        // argument) and folds it POST-BATCH. When `model` is absent the modifier
-        // stays `None`, so the no-override path is byte-identical.
+        // The host resolves this preference against the live model/profile
+        // after dispatch, before changing either part of the session route.
+        // A frontmatter model carries no independent profile; qualified model
+        // references and route-scoped aliases are resolved by the host catalog.
         let context_modifier: Option<tool_api::ContextModifier> =
             model_override.map(|model| -> tool_api::ContextModifier {
                 Box::new(move |mut ctx: ToolUseContext| {
-                    let current = ctx.options.main_loop_model.clone();
-                    ctx.options.main_loop_model =
-                        crate::model_override::resolve_skill_model_override(&model, &current);
+                    ctx.options.main_loop_model = model;
+                    ctx.options.model_profile = None;
                     ctx
                 })
             });

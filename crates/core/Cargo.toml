@@ -19,11 +19,14 @@ jsonrpc = { path = "../jsonrpc" }
 secrecy = { version = "0.10", features = ["serde"] }
 uuid = { version = "1.10", features = ["v4", "serde"] }
 zeroize = "1.8"
+unicode-general-category = "=1.1.0"
 unicode-segmentation = "=1.12.0"
 unicode-width = "=0.1.14"
+url = "2"
 futures-core.workspace = true
 futures-util.workspace = true
 indexmap.workspace = true
+fancy-regex = "0.18.0"
 tokio = { workspace = true, features = ["sync", "io-util", "fs", "process", "rt", "time"] }
 tokio-util.workspace = true
 fs2 = "0.4"
@@ -31,6 +34,7 @@ tempfile = "3.13"
 sha2 = "0.10"
 serde.workspace = true
 serde_json.workspace = true
+ryu-js = "1.0.3"
 thiserror.workspace = true
 tracing.workspace = true
 # M3-01 settings module: schemas + source-loader pattern reference.

@@ -34,9 +34,8 @@ pub const DEFAULT_API_KEY_HELPER_TTL_MS: u64 = 300_000;
 /// `{timeout:600000}` — the helper execution timeout: 10 minutes.
 pub const API_KEY_HELPER_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// The `CLAUDE_CODE_API_KEY_HELPER_TTL_MS` env var name (kept verbatim — this
-/// repo preserves `CLAUDE_CODE_*` env names).
-pub const API_KEY_HELPER_TTL_ENV: &str = "CLAUDE_CODE_API_KEY_HELPER_TTL_MS";
+/// Product environment override for the host-owned API-key helper cache.
+pub const API_KEY_HELPER_TTL_ENV: &str = branding::API_KEY_HELPER_TTL_MS_ENV;
 
 /// `obc()` — resolve the helper-value TTL (milliseconds).
 ///
@@ -177,6 +176,17 @@ impl ApiKeyHelperCache {
         }
     }
 
+    /// Native NQn: observe the existing value even past its refresh TTL.
+    /// Callers that need helper execution use the normal fetch path instead.
+    #[must_use]
+    pub fn snapshot(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|cached| cached.value.clone())
+    }
+
     /// Return the cached value iff it is still within `ttl_ms`
     /// (`Date.now() - ise.timestamp < t`).
     #[must_use]
@@ -248,10 +258,11 @@ pub async fn fetch_api_key_result(
             Ok(key)
         }
         Err(o) => {
+            let diagnostic = crate::Redactor.redact_error_text(&o);
             // `console.error(mt.red(\`apiKeyHelper failed: ${o}\`))` (color dropped).
-            eprintln!("apiKeyHelper failed: {o}");
+            eprintln!("apiKeyHelper failed: {diagnostic}");
             // `C(\`Error getting API key from apiKeyHelper: ${o}\`,{level:"error"})`.
-            tracing::error!("Error getting API key from apiKeyHelper: {o}");
+            tracing::error!("Error getting API key from apiKeyHelper: {diagnostic}");
             Err(o)
         }
     }
@@ -340,6 +351,27 @@ mod tests {
     }
 
     // ── ise cache / Bqt ─────────────────────────────────────────────────────
+
+    #[test]
+    fn native_helper_snapshot_reads_expired_values_without_refreshing() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/fast_auth_sources_2_1_287.json"
+        ))
+        .unwrap();
+        for row in fixture["cache"].as_array().unwrap() {
+            let cache = ApiKeyHelperCache::new();
+            if let Some(value) = row["input"]["value"].as_str() {
+                cache.store(value.into());
+                if row["input"]["expired"].as_bool().unwrap() {
+                    assert!(cache.get_fresh(0).is_none());
+                }
+            }
+            assert_eq!(
+                serde_json::to_value(cache.snapshot()).unwrap(),
+                row["expected"]
+            );
+        }
+    }
 
     #[test]
     fn cache_returns_value_within_ttl_and_expires_after() {

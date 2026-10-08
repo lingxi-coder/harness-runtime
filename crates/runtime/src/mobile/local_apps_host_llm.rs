@@ -470,10 +470,15 @@ impl LocalAppsHostBroker {
                 .await
                 .map_err(|error| error.to_string())?;
             let mut stop_reason = None;
+            let mut cost_quotes = Vec::new();
             while let Some(event) = events.next().await {
                 match event.map_err(|error| error.to_string())? {
                     HistoryEvent::ContentBlockDelta {
                         delta: HistoryContentDelta::TextDelta { text },
+                        ..
+                    } => output.emit_text(&text).await,
+                    HistoryEvent::ContentBlockDelta {
+                        delta: HistoryContentDelta::TextJsUtf16Delta { text, .. },
                         ..
                     } => output.emit_text(&text).await,
                     HistoryEvent::MessageDelta { delta, .. } => {
@@ -482,7 +487,18 @@ impl LocalAppsHostBroker {
                     HistoryEvent::Completed { response } => {
                         stop_reason = response.stop_reason.clone().or(stop_reason);
                     }
+                    HistoryEvent::CostQuoteObserved {
+                        estimate,
+                        native_server_fallback,
+                        summary_model,
+                    } => cost_quotes.push(json!({
+                        "estimate": estimate,
+                        "nativeServerFallback": native_server_fallback,
+                        "summaryModel": summary_model,
+                    })),
                     HistoryEvent::WebSearch { .. }
+                    | HistoryEvent::ServerFallback { .. }
+                    | HistoryEvent::ResponseObserved { .. }
                     | HistoryEvent::MessageStart { .. }
                     | HistoryEvent::ContentBlockStart { .. }
                     | HistoryEvent::ContentBlockDelta { .. }
@@ -490,7 +506,7 @@ impl LocalAppsHostBroker {
                     | HistoryEvent::MessageStop => {}
                 }
             }
-            Ok::<_, String>((output.text_snapshot().await, stop_reason))
+            Ok::<_, String>((output.text_snapshot().await, stop_reason, cost_quotes))
         })
         .await;
         inflight.release().await;
@@ -507,15 +523,19 @@ impl LocalAppsHostBroker {
                 output.error("llm_unavailable", error.clone()).await;
                 Err(BridgeFailure::coded("llm_unavailable", error))
             }
-            Ok(Ok((text, stop_reason))) => {
+            Ok(Ok((text, stop_reason, cost_quotes))) => {
                 output.completed().await;
                 let (text, truncated) = truncate_on_char_boundary(&text, MAX_CHAT_TEXT_BYTES);
-                Ok(json!({
+                let mut result = json!({
                     "streamId": stream_id,
                     "text": text,
                     "stopReason": stop_reason,
                     "truncated": truncated,
-                }))
+                });
+                if !cost_quotes.is_empty() {
+                    result["costQuotes"] = Value::Array(cost_quotes);
+                }
+                Ok(result)
             }
         }
     }
@@ -1009,6 +1029,16 @@ mod tests {
                 },
                 usage: None,
             }),
+            Ok(HistoryEvent::CostQuoteObserved {
+                estimate: None,
+                native_server_fallback: true,
+                summary_model: Some("claude-sonnet-4".into()),
+            }),
+            Ok(HistoryEvent::CostQuoteObserved {
+                estimate: None,
+                native_server_fallback: false,
+                summary_model: None,
+            }),
             Ok(HistoryEvent::MessageStop),
         ]);
         let h = harness(model).await;
@@ -1075,7 +1105,90 @@ mod tests {
             serde_json::from_str(response.result_json.as_deref().unwrap()).expect("stream result");
         assert_eq!(result["text"], "第一段第二段");
         assert_eq!(result["stopReason"], "end_turn");
+        assert_eq!(result["costQuotes"].as_array().map(Vec::len), Some(2));
+        assert!(result["costQuotes"][0]["estimate"].is_null());
+        assert_eq!(result["costQuotes"][0]["nativeServerFallback"], true);
+        assert_eq!(result["costQuotes"][0]["summaryModel"], "claude-sonnet-4");
+        assert_eq!(result["costQuotes"][1]["nativeServerFallback"], false);
+        assert!(result["costQuotes"][1]["summaryModel"].is_null());
         assert_eq!(activity_flags(&h).await, [true, false]);
+    }
+
+    #[tokio::test]
+    async fn llm_stream_keeps_lone_utf16_text_visible_as_display_text() {
+        let model = ChatModel::streaming(vec![
+            Ok(HistoryEvent::ContentBlockDelta {
+                index: 0,
+                delta: HistoryContentDelta::TextJsUtf16Delta {
+                    text: "�".into(),
+                    utf16_code_units: vec![0xd800],
+                },
+            }),
+            Ok(HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
+                    stop_reason: Some("end_turn".into()),
+                    stop_details: None,
+                },
+                usage: None,
+            }),
+            Ok(HistoryEvent::MessageStop),
+        ]);
+        let h = harness(model).await;
+        declare_and_grant(&h);
+        let request_id = "utf16-stream-request";
+        h.broker
+            .execute_bridge(AppBridgeRequestDto {
+                request_id: request_id.into(),
+                app_id: h.app_id.clone(),
+                operation: AppBridgeOperationDto::LlmStream,
+                payload_json: Some(
+                    json!({
+                        "messages": [{"role": "user", "content": "stream"}],
+                        "maxTokens": 128
+                    })
+                    .to_string(),
+                ),
+            })
+            .await;
+
+        let events = h.sink.events().await;
+        let mut frames = Vec::new();
+        let response = events
+            .into_iter()
+            .find_map(|event| match event {
+                ClientEvent::AppEvent {
+                    event: AppEventDto::AppBridgeStreamFrame { frame, .. },
+                } => {
+                    if let client::protocol::local_apps::AppBridgeStreamFrameDto::Data {
+                        data_json,
+                        ..
+                    } = frame
+                    {
+                        frames.push(data_json);
+                    }
+                    None
+                }
+                ClientEvent::AppEvent {
+                    event: AppEventDto::AppBridgeResponse { response },
+                } if response.request_id == request_id => Some(response),
+                _ => None,
+            })
+            .expect("stream response");
+
+        assert!(
+            response.ok,
+            "{:?} {:?}",
+            response.error, response.error_code
+        );
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&frames[0]).unwrap()["text"],
+            "�"
+        );
+        assert!(!frames[0].contains("utf16_code_units"));
+        let result: Value =
+            serde_json::from_str(response.result_json.as_deref().unwrap()).expect("stream result");
+        assert_eq!(result["text"], "�");
     }
 
     #[tokio::test]

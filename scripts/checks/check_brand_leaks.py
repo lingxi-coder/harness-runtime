@@ -79,39 +79,19 @@ KEEP_CLAUDE_ENV = {
     "CLAUDE_CODE_EXTRA_BODY",
     "CLAUDE_CODE_EXTRA_METADATA",
     "CLAUDE_CODE_OAUTH_TOKEN",
-    # 下面十七个是 2026-09-16 逐个回 oracle 2.1.274 核过的。判据不是「二进制里
-    # 出现了这个字符串」——那只证明它被写下过——而是**它被当成环境变量读出来**。
-    # 上游有一张带类型的 env 注册表，键就是环境变量名，值是该名字的 schema
-    # （`O.bool()` / `O.triBool()` / `O.str()` / `O.int()` / `O.enum([...])`），
-    # 读取发生在一个按键取值的惰性 getter 里：
-    #
-    #     for(let[E,r] of Object.entries(t)){
-    #       Object.defineProperty(_,E,{get:()=>{let n=process.env[E];
-    #         if(n!==s)e=r.parse(n),s=n;return e}})}
-    #
-    # 所以「名字出现在这张表里」就等于「process.env 里的这个名字会被读」。
-    # 十六个在表里（各自的 schema 记在下面），CLAUDE_CODE_COORDINATOR_EXTRA_TOOLS
-    # 不在表里而是直接 `process.env.<NAME>` 读——两种都是被读取。
-    #
-    # 它们因此属于上面说的「第三方进程写入的入站契约」：从 claude-code 迁过来
-    # 的用户会设这些名字，端口读同名才是对的，改名等于单方面断掉一条上游协议面。
-    # ⛔ 往这里加名字前必须先在 oracle 里确认它真的被读，不要凭 `CLAUDE_` 前缀
-    # 就放行——这份清单的价值全在于它是被核过的。
+    "CLAUDE_CODE_OAUTH_SCOPES",  # 2.1.287 xk reads actual environment grant scopes.
+    # Remaining readers outside the agent configuration path. These require
+    # their own protocol/inbound-contract audit; current agent settings use
+    # only the product namespace and never fall back to these legacy names.
     "CLAUDE_CODE_BASH_EDIT_DIFF",                          # O.triBool()
     "CLAUDE_CODE_COORDINATOR_EXTRA_TOOLS",                 # process.env.<NAME>
-    "CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL",  # O.bool()
     "CLAUDE_CODE_DISABLE_CRON",                            # O.bool()
-    "CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP",             # O.bool()
-    "CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS",             # O.bool()
     "CLAUDE_CODE_EVAL_CONFINED",                           # O.bool()
     "CLAUDE_CODE_LOOP_KEEPALIVE",                          # O.triBool()
     "CLAUDE_CODE_LOOP_PERSISTENT",                         # O.bool()
     "CLAUDE_CODE_PLUGIN_DIR_WATCH",                        # O.triBool()
-    "CLAUDE_CODE_SAFE_MODE",                               # O.bool()
     "CLAUDE_CODE_SESSION_KIND",                            # O.str()
-    "CLAUDE_CODE_SIMPLE",                                  # O.bool()
     "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP",                     # O.int()
-    "CLAUDE_CODE_SUBAGENT_MODEL_FORCE",                    # O.bool()
     "CLAUDE_CODE_THRIFTY_SONIC",                           # O.triBool()
     "CLAUDE_JOB_DIR",                                      # O.str()
 }
@@ -203,6 +183,10 @@ L1_ALL_COMPILED = (
 # `LINGXI.local.md`。不用一条宽的 `CLAUDE` needle：那会把每一个
 # `CLAUDE_CODE_*` 字面量、每一个 `claude-opus-*` model id 全部卷进来，
 # 而它们分别归 G2 管、或者是不可改的协议值。
+# Product identity is checked separately across multiline literals, with Rust
+# test items excluded. Provider model IDs and protocol names are unaffected.
+CLAUDE_PRODUCT_NEEDLE = r"Claude Code"
+
 CLAUDE_NEEDLES = [
     r"\.claude(?![A-Za-z0-9_.\-])",
     r"\.claude\.json",
@@ -391,6 +375,15 @@ ENV_READ = re.compile(
     r'\s*[(\[]\s*"(CLAUDE_[A-Z0-9_]+)"'
 )
 
+# Rust 同文件 const 名字的间接读取：只解析直接 &str 字面量，不推导表达式。
+RUST_ENV_CONST = re.compile(r'\bconst\s+([A-Z][A-Z0-9_]*)\s*:\s*&str\s*=')
+RUST_CONST_DECLARATION = re.compile(r'\bconst\s+([A-Z][A-Z0-9_]*)\s*:')
+RUST_ENV_CONST_VALUE = re.compile(r'\s*"(CLAUDE_[A-Z0-9_]+)"\s*;')
+ENV_READ_CONST = re.compile(
+    r'(?<![A-Za-z0-9_])(?:' + _ENV_HELPERS + r')'
+    r'\s*\(\s*([A-Z][A-Z0-9_]*)\s*\)'
+)
+
 # 第二种形状：CLAUDE_ 名字在**第二个**实参上。
 # `dual_env(lingxi, claude)`（http-client/src/tls_config.rs:121）先试 LINGXI_
 # 名再回落到 CLAUDE_CODE_ 名，四个 TLS 变量全走这条路——第一实参位置的
@@ -505,6 +498,97 @@ def is_comment_line(path, line):
     return any(stripped.startswith(p) for p in prefixes)
 
 
+RUST_TOKENS = re.compile(
+    r'(?P<comment>//[^\n]*|/\*.*?\*/)|'
+    r'(?P<literal>r(?P<hashes>\#*)".*?"(?P=hashes)|"(?:\\.|[^"\\])*")',
+    re.S,
+)
+
+
+def rust_test_lines(source):
+    """Line numbers inside cfg(test) modules or individual test functions.
+
+    Mask comments and literals before balancing braces so prompts containing
+    JSON or shell braces cannot extend a test item's boundary into production.
+    """
+    code = RUST_TOKENS.sub(lambda match: re.sub(r'[^\n]', ' ', match.group()), source)
+    item = re.compile(
+        r'#\[\s*(?:cfg\s*\(\s*test\s*\)|(?:\w+::)*test(?:\([^]\n]*\))?)\s*\]\s*'
+        r'(?:#\[[^\n]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?'
+        r'(?:async\s+)?(?:mod|fn)\s+\w+[^;{]*\{'
+    )
+    result = set()
+    for match in item.finditer(code):
+        depth = 1
+        end = match.end()
+        while end < len(code) and depth:
+            if code[end] == '{':
+                depth += 1
+            elif code[end] == '}':
+                depth -= 1
+            end += 1
+        first = source.count('\n', 0, match.start()) + 1
+        last = source.count('\n', 0, end) + 1
+        result.update(range(first, last + 1))
+    return result
+
+
+def rust_indirect_env_findings(path, source):
+    """G2 for a direct same-file Rust const used as an env helper argument."""
+    if not path.endswith('.rs'):
+        return set()
+    # Keep offsets and code structure, but hide comments and string contents:
+    # neither oracle snippets nor prompt text are active declarations/reads.
+    code = RUST_TOKENS.sub(lambda match: re.sub(r'[^\n]', ' ', match.group()), source)
+    bindings = {}
+    declarations = {}
+    for declaration in RUST_CONST_DECLARATION.finditer(code):
+        identifier = declaration.group(1)
+        declarations[identifier] = declarations.get(identifier, 0) + 1
+    for declaration in RUST_ENV_CONST.finditer(code):
+        identifier = declaration.group(1)
+        value = RUST_ENV_CONST_VALUE.match(source, declaration.end())
+        if value:
+            bindings.setdefault(identifier, set()).add(value.group(1))
+    result = set()
+    for read in ENV_READ_CONST.finditer(code):
+        names = bindings.get(read.group(1), ())
+        # Same-named constants in distinct scopes require name resolution;
+        # this narrow rule only follows an unambiguous same-file binding.
+        if declarations.get(read.group(1), 0) != 1 or len(names) != 1:
+            continue
+        name = next(iter(names))
+        if name not in KEEP_CLAUDE_ENV:
+            lineno = source.count('\n', 0, read.start()) + 1
+            result.add(('G2', path, lineno, name))
+    return result
+
+
+def product_identity_findings(path, source, frozen_here):
+    """Catch production product identity, including continued Rust strings."""
+    if (not path.endswith('.rs') or path.startswith('crates/test-harness/')
+            or '/tests/' in path or os.path.basename(path).endswith(('_test.rs', '_tests.rs'))
+            or os.path.basename(path) == 'tests.rs'):
+        return set()
+    tests = rust_test_lines(source) if path.endswith('.rs') else set()
+    lines = text_lines(source)
+    result = set()
+    for literal in RUST_TOKENS.finditer(source):
+        if literal.group('literal') is None:
+            continue
+        for match in re.finditer(CLAUDE_PRODUCT_NEEDLE, literal.group()):
+            start = literal.start() + match.start()
+            lineno = source.count('\n', 0, start) + 1
+            if lineno in tests or is_comment_line(path, lines[lineno - 1]):
+                continue
+            offset = source.rfind('\n', 0, start) + 1
+            if span_is_exempt(lines[lineno - 1], start - offset,
+                              start - offset + len(match.group()), frozen_here):
+                continue
+            result.add(('G1', path, lineno, CLAUDE_PRODUCT_NEEDLE))
+    return result
+
+
 def needles_for(path):
     for prefix, pats in AREAS:
         if path.startswith(prefix):
@@ -579,13 +663,17 @@ def scan(root, exempt=None):
         full = os.path.join(root, path)
         try:
             with open(full, encoding="utf-8") as fh:
-                lines = text_lines(fh.read())
+                source = fh.read()
+                lines = text_lines(source)
         except (UnicodeDecodeError, FileNotFoundError, IsADirectoryError):
             continue
 
         pats = needles_for(path)
         in_branding = path.startswith(BRANDING_PREFIX)
         frozen_here = exempt.get(path, ())
+        if not in_branding:
+            findings |= product_identity_findings(path, source, frozen_here)
+        findings |= rust_indirect_env_findings(path, source)
 
         for i, line in enumerate(lines, start=1):
             comment = is_comment_line(path, line)
@@ -744,9 +832,52 @@ def line_index(findings):
 SELFTEST_FILES = {
     # (path, content)
     "crates/st/g1.rs": 'fn f() { let p = ".claude"; }\n',
+    "crates/st/product.rs": (
+        'fn f() { let p = "Configure \n'
+        'Claude Code settings"; }\n'
+        '// let upstream = "Claude Code";\n'
+        '#[cfg(test)]\nmod tests {\n'
+        '    fn fixture() { let name = "Claude Code { fixture }"; }\n}\n'
+        'fn g() { let p = "Claude Code"; }\n'
+        '#[test]\nfn upstream_fixture() { assert_eq!("Claude Code", "Claude Code"); }\n'
+        '/* Native oracle identity: "Claude Code" */\n'
+        '#[tokio::test(start_paused = true)]\n'
+        'async fn timer_fixture() { let p = "Claude Code"; }\n'
+        'fn h() { let p = "Claude Code"; }\n'
+    ),
     "crates/st/g2.rs": (
         'fn f() { let a = std::env::var("CLAUDE_CODE_UNKEPT_NAME");\n'
         '         let b = std::env::var("CLAUDE_CODE_ENTRYPOINT"); }\n'
+    ),
+    "crates/st/g2_const.rs": (
+        'const WORKFLOW_MAX_CONCURRENT_AGENTS_ENV: &str = "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS";\n'
+        'const KEEP_ENV: &str = "CLAUDE_CODE_ENTRYPOINT";\n'
+        'const WRAPPED_ENV: &str = "CLAUDE_CODE_INDIRECT_WRAPPED";\n'
+        'const UNUSED_ENV: &str = "CLAUDE_CODE_UNUSED";\n'
+        'fn f() {\n'
+        '    let cap = std::env::var(WORKFLOW_MAX_CONCURRENT_AGENTS_ENV);\n'
+        '    let kept = std::env::var(KEEP_ENV);\n'
+        '    let wrapped = env_truthy(WRAPPED_ENV);\n'
+        '    let expression = std::env::var(UNUSED_ENV.to_string());\n'
+        '}\n'
+        '// std::env::var(UNUSED_ENV) is an upstream oracle snippet.\n'
+        '/* const COMMENT_ENV: &str = "CLAUDE_CODE_COMMENT_ONLY"; */\n'
+        'fn g() { let missing = std::env::var(COMMENT_ENV); }\n'
+        'fn prompt() { let text = "std::env::var(UNUSED_ENV)"; }\n'
+        'fn quoted_declaration() { let text = r#"const STRING_ENV: &str = "CLAUDE_CODE_STRING_ONLY";"#; }\n'
+        'fn unresolved() { let missing = std::env::var(STRING_ENV); }\n'
+        '/* std::env::var(UNUSED_ENV) */\n'
+    ),
+    "crates/st/g2_const_scopes.rs": (
+        'mod unused { const ENV_KEY: &str = "CLAUDE_CODE_OTHER"; }\n'
+        'mod current { const ENV_KEY: &str = branding::CONFIG_DIR_ENV;\n'
+        'fn f() { let _ = std::env::var(ENV_KEY); } }\n'
+        'mod unused_literal { const LITERAL_KEY: &str = "CLAUDE_CODE_OTHER_LITERAL"; }\n'
+        'mod current_literal { const LITERAL_KEY: &str = "UNRELATED_ENV";\n'
+        'fn f() { let _ = std::env::var(LITERAL_KEY); } }\n'
+        'mod unused_static { const STATIC_KEY: &str = "CLAUDE_CODE_OTHER_STATIC"; }\n'
+        "mod current_static { const STATIC_KEY: &'static str = branding::CONFIG_DIR_ENV;\n"
+        'fn f() { let _ = std::env::var(STATIC_KEY); } }\n'
     ),
     "crates/st/g3.rs": 'fn f() { let p = ".lingxi/state"; }\n',
     "crates/st/g4.rs": '// upstream: process.env.LINGXI_FAKE_CITATION\n',
@@ -775,11 +906,29 @@ SELFTEST_CASES = [
     # (用例名, 必须出现的 (rule, path, needle-substring[, 行号]), 必须不出现的同形项)
     # 第四个元素是**可选的行号**。凡是规则真正守的东西是位置而不是存在性的
     # 用例，必须填它——见 U+2028 那一条的说明。
+    ("G1 catches product identity across lines and resumes after test modules",
+     [("G1", "crates/st/product.rs", "Claude Code", 2),
+      ("G1", "crates/st/product.rs", "Claude Code", 8),
+      ("G1", "crates/st/product.rs", "Claude Code", 14)],
+     [("G1", "crates/st/product.rs", "Claude Code", 3),
+      ("G1", "crates/st/product.rs", "Claude Code", 6),
+      ("G1", "crates/st/product.rs", "Claude Code", 10),
+      ("G1", "crates/st/product.rs", "Claude Code", 11),
+      ("G1", "crates/st/product.rs", "Claude Code", 13)]),
     ("G1 fires on a .claude string literal",
      [("G1", "crates/st/g1.rs", r"\.claude(?!")], []),
     ("G2 fires on a non-KEEP CLAUDE_* read, and KEEP is honoured",
      [("G2", "crates/st/g2.rs", "CLAUDE_CODE_UNKEPT_NAME")],
      [("G2", "crates/st/g2.rs", "CLAUDE_CODE_ENTRYPOINT")]),
+    ("G2 follows direct Rust const env keys and ignores KEEP, comments and expressions",
+     [("G2", "crates/st/g2_const.rs", "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS", 6),
+      ("G2", "crates/st/g2_const.rs", "CLAUDE_CODE_INDIRECT_WRAPPED", 8)],
+     [("G2", "crates/st/g2_const.rs", "CLAUDE_CODE_ENTRYPOINT"),
+      ("G2", "crates/st/g2_const.rs", "CLAUDE_CODE_UNUSED"),
+      ("G2", "crates/st/g2_const.rs", "CLAUDE_CODE_COMMENT_ONLY"),
+      ("G2", "crates/st/g2_const.rs", "CLAUDE_CODE_STRING_ONLY")]),
+    ("G2 ignores ambiguous same-name declarations across Rust modules",
+     [], [("G2", "crates/st/g2_const_scopes.rs", "")]),
     ("G3 fires on a LingXi namespace value outside branding",
      [("G3", "crates/st/g3.rs", ".lingxi")], []),
     ("G4 fires on a fake oracle citation",

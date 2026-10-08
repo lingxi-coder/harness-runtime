@@ -11,7 +11,7 @@
 //! Two construction modes:
 //! - [`MemoryPrefetch::new`] binds a real [`MemorySelector`] + memdir
 //!   [`MemdirRoots`]: [`MemoryPrefetch::start`] scans the memdir, asks the
-//!   selector (a Haiku-class side query) which entries are relevant to the turn
+//!   selector (a side query on the live session route) which entries are relevant to the turn
 //!   query, and maps the chosen entries to [`SurfacedMemory`]. This is the path
 //!   the composition root wires once the prefetch is enabled (claude-code
 //!   `tengu_moth_copse`, default off — here the gate is "is a prefetch wired at
@@ -149,12 +149,20 @@ impl MemoryPrefetch {
     ///   the background task scans the memdir, runs the selector over the turn
     ///   `query`, and ships the chosen entries as [`SurfacedMemory`].
     /// - With neither, it ships an EMPTY set (inert surfacing reminder).
+    /// `model` and `profile` are captured from the live route for this turn.
     ///
     /// `_memory_dir` (the orchestrator's cwd) is currently unused: the memdir
     /// roots are home-based and bound at construction. It is retained for a
     /// future project-scoped memdir root.
-    pub async fn start(&self, query: String, _memory_dir: PathBuf) -> PendingMemoryPrefetch {
-        self.start_for_session(query, _memory_dir, None).await
+    pub async fn start(
+        &self,
+        query: String,
+        model: String,
+        profile: Option<String>,
+        memory_dir: PathBuf,
+    ) -> PendingMemoryPrefetch {
+        self.start_for_session(query, model, profile, memory_dir, None)
+            .await
     }
 
     /// Start a prefetch while excluding the live session's own memory artifact.
@@ -166,6 +174,8 @@ impl MemoryPrefetch {
     pub async fn start_for_session(
         &self,
         query: String,
+        model: String,
+        profile: Option<String>,
         _memory_dir: PathBuf,
         current_session_id: Option<String>,
     ) -> PendingMemoryPrefetch {
@@ -199,9 +209,15 @@ impl MemoryPrefetch {
             .spawn(
                 "memory-prefetch",
                 Box::pin(async move {
-                    let surfaced =
-                        select_surfaced(&selector, &roots, &query, current_session_id.as_deref())
-                            .await;
+                    let surfaced = select_surfaced(
+                        &selector,
+                        &roots,
+                        &query,
+                        &model,
+                        profile.as_deref(),
+                        current_session_id.as_deref(),
+                    )
+                    .await;
                     let _ = tx.send(surfaced);
                 }),
             )
@@ -282,6 +298,8 @@ async fn select_surfaced(
     selector: &MemorySelector,
     roots: &MemdirRoots,
     query: &str,
+    model: &str,
+    profile: Option<&str>,
     current_session_id: Option<&str>,
 ) -> Vec<SurfacedMemory> {
     let Some(mut snapshot) = scan_snapshot(roots.clone()).await else {
@@ -311,7 +329,10 @@ async fn select_surfaced(
         })
         .collect();
     let already: HashSet<PathBuf> = HashSet::new();
-    let Ok(selected) = selector.select_relevant(query, &files, &[], &already).await else {
+    let Ok(selected) = selector
+        .select_relevant(query, model, profile, &files, &[], &already)
+        .await
+    else {
         return Vec::new();
     };
     // Map each selected path back to its memdir entry → SurfacedMemory.
@@ -437,7 +458,12 @@ mod tests {
         let prefetch = MemoryPrefetch::new(selector, Arc::new(InlineRuntime), roots);
 
         let surfaced = prefetch
-            .start("how do I search files".into(), PathBuf::from("/work"))
+            .start(
+                "how do I search files".into(),
+                "test-model".into(),
+                None,
+                PathBuf::from("/work"),
+            )
             .await
             .take()
             .await;
@@ -497,7 +523,12 @@ mod tests {
         );
 
         let surfaced = prefetch
-            .start("how do I search files".into(), PathBuf::from("/work"))
+            .start(
+                "how do I search files".into(),
+                "test-model".into(),
+                None,
+                PathBuf::from("/work"),
+            )
             .await
             .take()
             .await;
@@ -541,6 +572,8 @@ mod tests {
         let surfaced = prefetch
             .start_for_session(
                 "continue the work".into(),
+                "test-model".into(),
+                None,
                 PathBuf::from("/work"),
                 Some(live_id.into()),
             )
@@ -571,7 +604,7 @@ mod tests {
         let prefetch = MemoryPrefetch::new(selector, Arc::new(InlineRuntime), roots);
 
         let surfaced = prefetch
-            .start("q".into(), PathBuf::from("/w"))
+            .start("q".into(), "test-model".into(), None, PathBuf::from("/w"))
             .await
             .take()
             .await;

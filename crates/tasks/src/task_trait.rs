@@ -95,6 +95,17 @@ pub trait Task: Send + Sync {
     ) -> Result<(), TaskError> {
         Err(TaskError::Unsupported)
     }
+
+    /// Accept a report into a typed peer queue without granting human resume
+    /// authority. Success acknowledges queue admission, not model consumption.
+    async fn send_peer(
+        &self,
+        _task_id: &str,
+        _envelope: lingxi_core::host::handback::HandbackEnvelope,
+        _ctx: TaskContext,
+    ) -> Result<(), TaskError> {
+        Err(TaskError::Unsupported)
+    }
 }
 
 /// Spawn-time input — one variant per task type.
@@ -335,6 +346,10 @@ pub struct TaskHandle {
     /// Prepared Fusion identity/duration/panel summary copied into the task
     /// row before `TaskCreated`. `None` for every non-Fusion task.
     pub(crate) fusion_prepared_summary: Option<FusionPreparedSummary>,
+    /// Resolved route of an in-process teammate, captured from its final
+    /// `SubagentContext` before the worker is published. This stays out of
+    /// task spawn input and public task rows.
+    pub(crate) teammate_model_route: Option<(String, Option<String>)>,
     /// One-shot worker activation owned by the registry handoff. Dropping an
     /// unactivated handle cancels handlers whose callback owns a readiness
     /// sender, so a cancelled registry spawn cannot launch partial work.
@@ -352,6 +367,7 @@ impl TaskHandle {
             task_id: task_id.into(),
             cleanup,
             fusion_prepared_summary: None,
+            teammate_model_route: None,
             activation: None,
             fusion_activation: None,
         }
@@ -361,6 +377,18 @@ impl TaskHandle {
     #[must_use]
     pub fn with_fusion_prepared_summary(mut self, summary: FusionPreparedSummary) -> Self {
         self.fusion_prepared_summary = Some(summary);
+        self
+    }
+
+    /// Attach a host-resolved in-process teammate model route for the task
+    /// registry's private snapshot facts.
+    #[must_use]
+    pub(crate) fn with_teammate_model_route(
+        mut self,
+        model: String,
+        profile: Option<String>,
+    ) -> Self {
+        self.teammate_model_route = Some((model, profile));
         self
     }
 

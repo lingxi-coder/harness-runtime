@@ -8,9 +8,9 @@
 //! Batch-8 commands: `/autocompact`, `/btw`, `/fork`, `/goal`, `/recap`,
 //! `/reload-skills`, `/skill-doctor`, `/stop`.
 
-use command_api::builtins::{register_all_builtin_commands, register_core_batch_8};
 use command_api::CommandRegistry;
 use command_api::RegistrySlashDispatcher;
+use command_api::builtins::{register_all_builtin_commands, register_core_batch_8};
 use lingxi_core::host::{SlashCommandDispatcher, SlashDispatchResult};
 use orchestrator::test_support::MockOrchestratorHandle;
 use std::path::PathBuf;
@@ -147,7 +147,7 @@ async fn autocompact_with_no_env_reports_auto_window() {
 #[tokio::test]
 async fn fork_without_prompt_copies_to_background_session() {
     // Ensure the default (agent-view enabled) surface regardless of ambient env.
-    std::env::remove_var("CLAUDE_CODE_DISABLE_AGENT_VIEW");
+    std::env::remove_var(branding::DISABLE_AGENT_VIEW_ENV);
     let (d, _h, root) = fresh("fork");
     assert_eq!(
         handled(&d, "/fork").await,

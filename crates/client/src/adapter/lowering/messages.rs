@@ -120,7 +120,7 @@ fn legacy_cron_slash_line(content: &[lingxi_core::types::ContentBlock]) -> Optio
     const PREFIX: &str = "The user explicitly invoked `/cron` to manage scheduled prompts.";
     const ARGUMENTS_MARKER: &str = "\nArguments: ";
 
-    let [lingxi_core::types::ContentBlock::Text { text }] = content else {
+    let [lingxi_core::types::ContentBlock::Text { text, .. }] = content else {
         return None;
     };
     if !text.starts_with(PREFIX) {
@@ -233,7 +233,7 @@ fn lower_transcript_inner(history: &[ConversationMessage]) -> Vec<MessageDto> {
                 let text = content
                     .iter()
                     .filter_map(|block| match block {
-                        lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
+                        lingxi_core::types::ContentBlock::Text { text, .. } => Some(text.as_str()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -262,7 +262,7 @@ fn lower_transcript_inner(history: &[ConversationMessage]) -> Vec<MessageDto> {
                 let summary = content
                     .iter()
                     .filter_map(|block| match block {
-                        lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
+                        lingxi_core::types::ContentBlock::Text { text, .. } => Some(text.as_str()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()

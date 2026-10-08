@@ -618,7 +618,8 @@ pub fn emit_user_prompt_log(prompt: &str, prompt_id: &str, message_uuid: &str) {
                 "prompt_length",
                 AttrValue::from(prompt.encode_utf16().count().to_string()),
             ),
-            ("prompt", AttrValue::from(body)),
+            ("prompt", AttrValue::from(body.clone())),
+            ("prompt_text", AttrValue::from(body)),
             ("prompt.id", AttrValue::from(prompt_id.to_string())),
             ("message.uuid", AttrValue::from(message_uuid.to_string())),
         ]);
@@ -743,7 +744,7 @@ fn tool_parameters(tool_name: &str, input: Option<&serde_json::Value>) -> Option
         "Skill" => {
             copy_string(&mut out, "skill_name", "skill");
         }
-        "Agent" | "Task" => {
+        "Agent" => {
             copy_string(&mut out, "subagent_type", "subagent_type");
         }
         _ => {}
@@ -1243,7 +1244,7 @@ fn metric_updates_for_event(name: &str, metadata: &LogEventMetadata) -> Vec<Metr
                 tool_name_for_event(name, metadata)
                     .as_ref()
                     .and_then(attr_str)
-                    .unwrap_or("Task"),
+                    .unwrap_or("Agent"),
                 name,
                 metadata,
             ));
@@ -1342,7 +1343,7 @@ fn tool_name_for_event(event_name: &str, metadata: &LogEventMetadata) -> Option<
     } else if event_name.contains("_mcp_") {
         "Mcp"
     } else if event_name.contains("_task_") {
-        "Task"
+        "Agent"
     } else if event_name.contains("_agent_") {
         "Agent"
     } else if event_name.contains("_edit_") {
@@ -2594,7 +2595,8 @@ mod tests {
         assert!(debug
             .counters
             .iter()
-            .any(|sample| sample.instrument == metrics::SUBAGENT_SPAWN));
+            .any(|sample| sample.instrument == metrics::SUBAGENT_SPAWN
+                && sample.attributes.get("tool_name") == Some(&AttrValue::from("Agent"))));
         clear_runtime();
     }
 
@@ -2666,6 +2668,10 @@ mod tests {
             Some(&AttrValue::from("<REDACTED>"))
         );
         assert_eq!(
+            record.attributes.get("prompt_text"),
+            record.attributes.get("prompt")
+        );
+        assert_eq!(
             record.attributes.get("prompt.id"),
             Some(&AttrValue::from("prompt-1"))
         );
@@ -2682,6 +2688,10 @@ mod tests {
         assert_eq!(
             record.attributes.get("prompt"),
             Some(&AttrValue::from("hello [REDACTED]"))
+        );
+        assert_eq!(
+            record.attributes.get("prompt_text"),
+            record.attributes.get("prompt")
         );
         clear_runtime();
     }

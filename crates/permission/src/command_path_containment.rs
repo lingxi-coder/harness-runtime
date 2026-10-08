@@ -1292,6 +1292,27 @@ fn working_dir_paths(roots: &FsRoots, additional: &[PathBuf]) -> Vec<PathBuf> {
 // validateCommandPaths — the per-command containment driver
 // ───────────────────────────────────────────────────────────────────────────
 
+/// Native a6t's global cB check, before child/path decisions. This verdict
+/// applies to the complete command; checking the interpreter alone loses it.
+pub(crate) fn check_code_on_stdin_read_block(command: &str) -> Option<PathConstraintAsk> {
+    let subs = crate::shell_command::split_command(command);
+    let has_heredoc = command.contains("<<");
+    let has_pipe = command.contains('|');
+    for (idx, sub) in subs.iter().enumerate() {
+        let stripped = crate::shell_command::strip_safe_wrappers(sub);
+        let tokens = split_argv(&stripped);
+        if !reads_code_from_stdin(&tokens) {
+            continue;
+        }
+        if has_heredoc || (idx > 0 && has_pipe) {
+            return Some(read_block_unanalyzable_ask(
+                "code on stdin cannot be checked against the read block",
+            ));
+        }
+    }
+    None
+}
+
 /// Check a bash `command` for per-command path-containment violations that must
 /// ASK even when an allow rule matches (claude-code `validateCommandPaths` run
 /// per subcommand by `checkPathConstraints`). Returns the FIRST violation in TS
@@ -1345,19 +1366,8 @@ pub fn check_command_path_containment(
         //       (/<<</.test(cmd) || /<<(?!<)/.test(cmd) || (i>0 && cmd.includes("|")))))
         //   return zU("code on stdin cannot be checked against the read block");
         // ```
-        let has_heredoc = command.contains("<<");
-        let has_pipe = command.contains('|');
-        for (idx, sub) in subs.iter().enumerate() {
-            let stripped = crate::shell_command::strip_safe_wrappers(sub);
-            let tokens = split_argv(&stripped);
-            if !reads_code_from_stdin(&tokens) {
-                continue;
-            }
-            if has_heredoc || (idx > 0 && has_pipe) {
-                return Some(read_block_unanalyzable_ask(
-                    "code on stdin cannot be checked against the read block",
-                ));
-            }
+        if let Some(ask) = check_code_on_stdin_read_block(command) {
+            return Some(ask);
         }
 
         for sub in &subs {

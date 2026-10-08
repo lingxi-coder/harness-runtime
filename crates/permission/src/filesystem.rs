@@ -57,7 +57,7 @@
 //! lexical form, matching claude-code's exception-swallowing resolver.
 
 use crate::rule::PermissionRuleSource;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 
 const PERMISSION_PATH_RESOLUTION_MAX_HOPS: usize = 64;
@@ -272,6 +272,192 @@ fn permission_paths_to_check(path: &Path, roots: &FsRoots) -> PermissionPathForm
         }
     }
     PermissionPathForms::Paths(out)
+}
+
+/// Native's synchronous permission-path walk (`Ro` → `Ia` → `Te`) stops
+/// after this many symlink hops. This is separate from the old containment
+/// resolver's 64-step best-effort loops and from the async changed-file `bge`
+/// set-size limit below.
+const NATIVE_PERMISSION_SYMLINK_HOP_LIMIT: usize = 64;
+
+/// Path spellings returned by Native's synchronous `Ro(e)` permission path
+/// resolution. An unresolved result retains the spellings seen before the
+/// resolver stopped; the direct Read-deny walk checks those partial spellings
+/// before Native later converts unresolved paths into an ask.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PermissionRulePathForms {
+    pub(crate) spellings: Vec<PathBuf>,
+    pub(crate) landing: Option<PathBuf>,
+    pub(crate) unresolved: bool,
+}
+
+/// Match explicit Read denies against Native's synchronous permission
+/// spellings (`Ro` → `Ia` → `Te`): requested spelling first, leaf-symlink
+/// targets as encountered, then the resolved landing. `Te` is hop-limited,
+/// not emitted-form-limited. On a loop or hop limit, Native returns its partial
+/// spelling set with `unresolved`; its `Ro` fallback may append a canonical
+/// target only when that fallback can resolve one.
+pub(crate) fn permission_rule_path_forms(path: &Path, roots: &FsRoots) -> PermissionRulePathForms {
+    let absolute = expand_path(&path.to_string_lossy(), roots);
+    resolve_native_permission_path_forms(&absolute)
+}
+
+fn resolve_native_permission_path_forms(path: &Path) -> PermissionRulePathForms {
+    let requested = normalize_lexically(path);
+    let mut spellings = vec![requested.clone()];
+    let mut seen_spellings = HashSet::from([requested.clone()]);
+    let (mut current, mut pending) = absolute_root_and_components(&requested);
+    let mut seen_links: HashSet<(PathBuf, Vec<std::ffi::OsString>)> = HashSet::new();
+    let mut symlink_hops = 0_usize;
+    let mut unresolved = false;
+    let mut exhausted_hop_budget = false;
+
+    while let Some(component) = pending.pop_front() {
+        if symlink_hops >= NATIVE_PERMISSION_SYMLINK_HOP_LIMIT {
+            unresolved = true;
+            exhausted_hop_budget = true;
+            break;
+        }
+        let candidate = current.join(&component);
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let tail = pending.iter().cloned().collect::<Vec<_>>();
+                if !seen_links.insert((candidate.clone(), tail.clone())) {
+                    unresolved = true;
+                    break;
+                }
+                symlink_hops += 1;
+                let target = match std::fs::read_link(&candidate) {
+                    Ok(target) => target,
+                    Err(_) => {
+                        unresolved = true;
+                        break;
+                    }
+                };
+                let is_leaf_link = tail.is_empty();
+                let mut next = if target.is_absolute() {
+                    target
+                } else {
+                    current.join(target)
+                };
+                for part in &tail {
+                    next.push(part);
+                }
+                let next = normalize_lexically(&next);
+                if is_leaf_link && seen_spellings.insert(next.clone()) {
+                    spellings.push(next.clone());
+                }
+                (current, pending) = absolute_root_and_components(&next);
+            }
+            Ok(_) => current.push(component),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                let mut landing = candidate;
+                for part in pending.drain(..) {
+                    landing.push(part);
+                }
+                let landing = normalize_lexically(&landing);
+                push_unique_path(&mut spellings, &mut seen_spellings, landing.clone());
+                return PermissionRulePathForms {
+                    spellings,
+                    landing: Some(landing),
+                    unresolved: false,
+                };
+            }
+            Err(_) => {
+                unresolved = true;
+                break;
+            }
+        }
+    }
+
+    if unresolved {
+        // Native `Qlr` only attempts its canonical fallback when the sync walk
+        // returned an unresolved result other than `Te`'s hop-limit sentinel.
+        // The common loop case reaches that fallback; over-budget paths do not.
+        if !exhausted_hop_budget {
+            if let Ok(canonical) = std::fs::canonicalize(&requested) {
+                push_unique_path(&mut spellings, &mut seen_spellings, canonical);
+            }
+        }
+        return PermissionRulePathForms {
+            spellings,
+            landing: None,
+            unresolved: true,
+        };
+    }
+
+    let landing = current;
+    push_unique_path(&mut spellings, &mut seen_spellings, landing.clone());
+    if let Ok(canonical) = std::fs::canonicalize(&requested) {
+        if canonical != landing {
+            push_or_move_path_to_end(&mut spellings, &mut seen_spellings, canonical);
+        }
+    }
+    PermissionRulePathForms {
+        spellings,
+        landing: Some(landing),
+        unresolved: false,
+    }
+}
+
+fn absolute_root_and_components(path: &Path) -> (PathBuf, VecDeque<std::ffi::OsString>) {
+    let mut root = PathBuf::new();
+    let mut pending = VecDeque::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => root.push(prefix.as_os_str()),
+            std::path::Component::RootDir => root.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !root.pop() {
+                    pending.push_back(component.as_os_str().to_os_string());
+                }
+            }
+            std::path::Component::Normal(part) => pending.push_back(part.to_os_string()),
+        }
+    }
+    (root, pending)
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf) {
+    if seen.insert(path.clone()) {
+        paths.push(path);
+    }
+}
+
+fn push_or_move_path_to_end(paths: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf) {
+    if let Some(index) = paths.iter().position(|entry| entry == &path) {
+        paths.remove(index);
+    } else {
+        seen.insert(path.clone());
+    }
+    paths.push(path);
+}
+
+
+/// Native `Vh` containment: every `To(path)` spelling must be inside some
+/// `To(working_dir)` spelling. The reminder calls this on already expanded
+/// route paths while evaluating restricted and outside-read holds.
+pub(crate) fn native_path_spellings_in_allowed_working_dirs(
+    spellings: &[PathBuf],
+    working_dirs: &[PathBuf],
+    roots: &FsRoots,
+) -> bool {
+    let working_spellings = working_dirs
+        .iter()
+        .flat_map(|working| permission_rule_path_forms(working, roots).spellings)
+        .collect::<Vec<_>>();
+    !working_spellings.is_empty()
+        && spellings.iter().all(|path| {
+            working_spellings
+                .iter()
+                .any(|working| path_in_working_path(path, working, roots))
+        })
 }
 
 fn path_resolution_must_fail_closed(path: &Path) -> bool {

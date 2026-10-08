@@ -7,6 +7,31 @@ use crate::types::ids::{MessageId, ToolUseId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+fn deserialize_present_nullable_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_present_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bool::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_present_nullable_value<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<Value>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<Value>::deserialize(deserializer).map(Some)
+}
+
 /// Whether a raw nested tool-result value represents provider-visible media.
 ///
 /// This is shared by the delegation collector and the final provider media cap
@@ -46,6 +71,14 @@ pub enum ContentBlock {
     Text {
         /// The text body.
         text: String,
+        /// Exact provider field presence. The outer option distinguishes an
+        /// absent key from a present key; the inner option preserves JSON null.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_nullable_value",
+            skip_serializing_if = "Option::is_none"
+        )]
+        citations: Option<Option<Value>>,
     },
     /// Display-safe text carrying an exact JS UTF-16 request-wire image.
     ///
@@ -58,6 +91,13 @@ pub enum ContentBlock {
         text: String,
         /// Exact UTF-16 code units that must be emitted on the provider wire.
         utf16_code_units: Vec<u16>,
+        /// Exact provider field presence. See [`ContentBlock::Text::citations`].
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_nullable_value",
+            skip_serializing_if = "Option::is_none"
+        )]
+        citations: Option<Option<Value>>,
     },
     /// A tool invocation requested by the assistant.
     ToolUse {
@@ -83,8 +123,14 @@ pub enum ContentBlock {
         /// Stringified output payload (the model-facing TEXT / display form, and
         /// the egress `tool_result.content` when [`content_blocks`] is `None`).
         content: String,
-        /// Whether the tool reported failure.
-        is_error: bool,
+        /// Whether the tool reported failure. `None` also preserves the native
+        /// omission of this optional field; `Some(false)` remains explicit.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_bool",
+            skip_serializing_if = "Option::is_none"
+        )]
+        is_error: Option<bool>,
         /// Verbatim provider id of the `ToolUse` this answers — copied from the
         /// paired [`ContentBlock::ToolUse::provider_id`] so the egress
         /// `tool_result.tool_use_id` matches the provider-issued `tool_use.id`.
@@ -394,6 +440,26 @@ pub struct CompactBoundaryMetadata {
     pub logical_parent_uuid: Option<String>,
 }
 
+impl ContentBlock {
+    /// Text a user-facing renderer may display from this block.
+    ///
+    /// Anthropic text blocks with unknown native fields stay as one raw
+    /// `ProviderContent` block for replay. Their `text` member remains visible
+    /// through this projection without synthesizing a second transcript block.
+    #[must_use]
+    pub fn visible_text(&self) -> Option<&str> {
+        match self {
+            Self::Text { text, .. } | Self::TextJsUtf16 { text, .. } => Some(text),
+            Self::ProviderContent { protocol, value }
+                if protocol == "anthropic_messages" && value["type"] == "text" =>
+            {
+                value.get("text").and_then(Value::as_str)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// A single message in a conversation, role-tagged for serde.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
@@ -457,6 +523,13 @@ pub enum ConversationMessage {
             skip_serializing_if = "Option::is_none"
         )]
         compact_metadata: Option<CompactBoundaryMetadata>,
+        /// Typed query-local model-fallback notice.
+        #[serde(
+            default,
+            rename = "modelFallback",
+            skip_serializing_if = "Option::is_none"
+        )]
+        model_fallback: Option<ModelFallbackMetadata>,
         /// Typed refusal-fallback metadata, on `subtype ==
         /// "model_refusal_fallback"` only.
         #[serde(
@@ -468,6 +541,36 @@ pub enum ConversationMessage {
     },
 }
 
+/// The current query's serving-model transition. User model settings are unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelFallbackMetadata {
+    /// Native trigger, such as `server_error` or `overloaded`.
+    pub trigger: String,
+    /// Failed serving model.
+    pub original_model: String,
+    /// Model serving this query after the transition.
+    pub fallback_model: String,
+}
+
+impl ModelFallbackMetadata {
+    /// Current SDK system envelope, independent of optional provider partial events.
+    #[must_use]
+    pub fn sdk_frame(
+        &self,
+        id: MessageId,
+        session_id: crate::types::SessionId,
+        content: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "type": "system", "subtype": "model_fallback", "uuid": id.as_uuid().to_string(),
+            "trigger": self.trigger, "original_model": self.original_model,
+            "fallback_model": self.fallback_model, "content": content,
+            "session_id": session_id.as_uuid().to_string(),
+        })
+    }
+}
+
 /// The `model_refusal_fallback` system message's payload.
 ///
 /// claude-code carries the refusal notice as a TYPED system message in the
@@ -477,13 +580,9 @@ pub enum ConversationMessage {
 /// earlier ones it superseded, which is what makes them filterable rather than
 /// merely stale.
 ///
-/// ## What this port does NOT carry, and why
-///
-/// Upstream's object also has `apiRefusalExplanation` and `sawCyberRefusal`.
-/// Neither has a source here — the cascade records a category but no
-/// explanation, and nothing classifies a cyber refusal — so they are omitted
-/// rather than serialized as permanent `null`s that read like a wired field.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Native optional fields survive persistence even when a local producer has
+/// no corresponding observation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefusalFallbackMetadata {
     /// What provoked the swap. `"refusal"` for the refusal cascade.
@@ -505,6 +604,12 @@ pub struct RefusalFallbackMetadata {
     /// The API's refusal category for this hop, when the provider gave one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_refusal_category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_refusal_explanation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saw_cyber_refusal: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neutralized_by_fork: Option<bool>,
     /// Earlier notices this one supersedes. A consumer rebuilding the
     /// conversation drops the messages named here rather than showing a swap
     /// the session has already moved past.
@@ -513,6 +618,31 @@ pub struct RefusalFallbackMetadata {
     /// The user message that was refused, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused_user_message_uuid: Option<String>,
+    /// Host-only provider-profile companion to the previous app-state route.
+    /// Resume applies it only when a notice in the route chain identifies the
+    /// same selected model. The outer option distinguishes absent metadata
+    /// from an explicitly profile-less route (`null`).
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_nullable_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub previous_profile: Option<Option<String>>,
+    /// Host-only provider-profile companion to the fallback model. Resume
+    /// applies it only when that fallback model was selected independently
+    /// from an assistant row or live route. The same outer/inner option
+    /// convention distinguishes absent metadata from an explicit null.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_nullable_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub serving_profile: Option<Option<String>>,
+    /// Host-only enqueue timestamp for the native queued notice. The JSONL
+    /// exporter maps this to the outer transcript `timestamp`; it is never a
+    /// refusal-metadata wire field.
+    #[serde(skip)]
+    pub notice_timestamp: Option<String>,
 }
 
 impl ConversationMessage {
@@ -521,7 +651,10 @@ impl ConversationMessage {
     pub fn user(id: MessageId, text: String) -> Self {
         Self::User {
             id,
-            content: vec![ContentBlock::Text { text }],
+            content: vec![ContentBlock::Text {
+                text,
+                citations: None,
+            }],
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
@@ -536,7 +669,10 @@ impl ConversationMessage {
     pub fn user_meta(id: MessageId, text: String) -> Self {
         Self::User {
             id,
-            content: vec![ContentBlock::Text { text }],
+            content: vec![ContentBlock::Text {
+                text,
+                citations: None,
+            }],
             is_meta: true,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
@@ -552,6 +688,7 @@ impl ConversationMessage {
             content: vec![ContentBlock::TextJsUtf16 {
                 text,
                 utf16_code_units,
+                citations: None,
             }],
             is_meta: true,
             is_compact_summary: false,
@@ -576,7 +713,10 @@ impl ConversationMessage {
     pub fn compact_summary(id: MessageId, text: String) -> Self {
         Self::User {
             id,
-            content: vec![ContentBlock::Text { text }],
+            content: vec![ContentBlock::Text {
+                text,
+                citations: None,
+            }],
             is_meta: false,
             is_compact_summary: true,
             is_visible_in_transcript_only: true,
@@ -595,6 +735,7 @@ impl ConversationMessage {
             content,
             subtype: Some("compact_boundary".to_string()),
             compact_metadata: Some(metadata),
+            model_fallback: None,
             refusal_fallback: None,
         }
     }
@@ -624,7 +765,10 @@ impl ConversationMessage {
     pub fn user_with_images(id: MessageId, text: String, images: Vec<ImageSource>) -> Self {
         let mut content = Vec::with_capacity(1 + images.len());
         if !text.is_empty() {
-            content.push(ContentBlock::Text { text });
+            content.push(ContentBlock::Text {
+                text,
+                citations: None,
+            });
         }
         for source in images {
             content.push(ContentBlock::Image { source });
@@ -647,7 +791,10 @@ impl ConversationMessage {
     ) -> Self {
         let mut content = Vec::new();
         if !text.is_empty() {
-            content.push(ContentBlock::Text { text });
+            content.push(ContentBlock::Text {
+                text,
+                citations: None,
+            });
         }
         for source in documents {
             content.push(ContentBlock::Document { source });
@@ -716,12 +863,7 @@ impl ConversationMessage {
         match self {
             Self::User { content, .. } | Self::Assistant { content, .. } => content
                 .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text { text } | ContentBlock::TextJsUtf16 { text, .. } => {
-                        Some(text.as_str())
-                    }
-                    _ => None,
-                })
+                .filter_map(ContentBlock::visible_text)
                 .collect::<Vec<_>>()
                 .join(""),
             Self::System { content, .. } => content.clone(),
@@ -785,6 +927,30 @@ mod tests {
     }
 
     #[test]
+    fn text_content_includes_native_anthropic_text_once() {
+        let message = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![
+                ContentBlock::ProviderContent {
+                    protocol: "anthropic_messages".into(),
+                    value: serde_json::json!({
+                        "type":"text",
+                        "text":"visible",
+                        "future_annotation":{"keep":true}
+                    }),
+                },
+                ContentBlock::ProviderContent {
+                    protocol: "openai_chat_completions".into(),
+                    value: serde_json::json!({"type":"text","text":"hidden"}),
+                },
+            ],
+            stop_reason: None,
+        };
+
+        assert_eq!(message.text_content(), "visible");
+    }
+
+    #[test]
     fn message_roundtrip_json() {
         let m = ConversationMessage::user(MessageId::new(), "hi".into());
         let s = serde_json::to_string(&m).unwrap();
@@ -820,7 +986,7 @@ mod tests {
         match &m {
             ConversationMessage::User { content, .. } => {
                 assert_eq!(content.len(), 2);
-                assert!(matches!(&content[0], ContentBlock::Text { text } if text == "look:"));
+                assert!(matches!(&content[0], ContentBlock::Text { text, .. } if text == "look:"));
                 assert!(matches!(&content[1], ContentBlock::Image { source } if *source == img));
             }
             _ => panic!("expected user message"),
@@ -971,6 +1137,7 @@ mod tests {
             content: "notice".to_string(),
             subtype: None,
             compact_metadata: None,
+            model_fallback: None,
             refusal_fallback: None,
         };
         assert_eq!(
@@ -1039,6 +1206,7 @@ mod tests {
             content: vec![
                 ContentBlock::Text {
                     text: "I'll read the file.".into(),
+                    citations: None,
                 },
                 ContentBlock::ToolUse {
                     id: ToolUseId::new(),
@@ -1106,11 +1274,113 @@ mod tests {
     }
 
     #[test]
+    fn text_citations_preserve_absence_null_and_value() {
+        for (input, expected) in [
+            (serde_json::json!({"type":"text","text":"x"}), None),
+            (
+                serde_json::json!({"type":"text","text":"x","citations":null}),
+                Some(serde_json::Value::Null),
+            ),
+            (
+                serde_json::json!({"type":"text","text":"x","citations":[]}),
+                Some(serde_json::json!([])),
+            ),
+        ] {
+            let block: ContentBlock = serde_json::from_value(input).unwrap();
+            let output = serde_json::to_value(&block).unwrap();
+            assert_eq!(output.get("citations"), expected.as_ref());
+        }
+    }
+
+    #[test]
+    fn conversation_message_json_retains_mod_presence_for_resume() {
+        let message = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![
+                ContentBlock::Text {
+                    text: "accepted Mod text".into(),
+                    citations: Some(None),
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: ToolUseId::from("toolu_01ABC"),
+                    content: "done".into(),
+                    is_error: None,
+                    provider_tool_use_id: None,
+                    content_blocks: None,
+                },
+            ],
+            stop_reason: None,
+        };
+        let stored = serde_json::to_value(&message).unwrap();
+        assert!(stored["content"][0].get("citations").is_some());
+        assert_eq!(stored["content"][0]["citations"], serde_json::Value::Null);
+        assert!(stored["content"][1].get("is_error").is_none());
+
+        let resumed: ConversationMessage = serde_json::from_value(stored).unwrap();
+        assert_eq!(resumed, message);
+    }
+
+    #[test]
+    fn tool_result_is_error_preserves_omission_and_explicit_false() {
+        let mut input = serde_json::json!({
+            "type":"tool_result",
+            "tool_use_id":"toolu_01ABC",
+            "content":"ok"
+        });
+        let absent: ContentBlock = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(
+            absent,
+            ContentBlock::ToolResult {
+                tool_use_id: ToolUseId::from("toolu_01ABC"),
+                content: "ok".into(),
+                is_error: None,
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }
+        );
+        assert!(serde_json::to_value(absent)
+            .unwrap()
+            .get("is_error")
+            .is_none());
+
+        input["is_error"] = serde_json::Value::Bool(false);
+        let explicit_false: ContentBlock = serde_json::from_value(input.clone()).unwrap();
+        assert!(matches!(
+            explicit_false,
+            ContentBlock::ToolResult {
+                is_error: Some(false),
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::to_value(explicit_false).unwrap()["is_error"],
+            false
+        );
+
+        input["is_error"] = serde_json::Value::Bool(true);
+        let explicit_true: ContentBlock = serde_json::from_value(input.clone()).unwrap();
+        assert!(matches!(
+            explicit_true,
+            ContentBlock::ToolResult {
+                is_error: Some(true),
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::to_value(explicit_true).unwrap()["is_error"],
+            true
+        );
+
+        input["is_error"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<ContentBlock>(input).is_err());
+    }
+
+    #[test]
     fn tool_result_provider_tool_use_id_skipped_when_none_preserved_when_some() {
         let none_block = ContentBlock::ToolResult {
             tool_use_id: ToolUseId::from("toolu_01ABC"),
             content: "ok".into(),
-            is_error: false,
+            is_error: Some(false),
             provider_tool_use_id: None,
             content_blocks: None,
         };
@@ -1120,7 +1390,7 @@ mod tests {
         let some_block = ContentBlock::ToolResult {
             tool_use_id: ToolUseId::new(),
             content: "ok".into(),
-            is_error: false,
+            is_error: Some(false),
             provider_tool_use_id: Some("toolu_01ABC".into()),
             content_blocks: None,
         };
@@ -1153,7 +1423,7 @@ mod tests {
         let block = ContentBlock::ToolResult {
             tool_use_id: ToolUseId::from("toolu_01ABC"),
             content: "ok".into(),
-            is_error: false,
+            is_error: Some(false),
             provider_tool_use_id: None,
             content_blocks: None,
         };

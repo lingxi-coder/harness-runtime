@@ -23,9 +23,9 @@ use crate::protocol::controls::ConversationControlsDto;
 use crate::protocol::listings::{
     AgentDto, AuthStateDto, ConfigurationDomainDto, ConfigurationEffectDto,
     ConfigurationOperationStatusDto, CoordinatorWorkerDto, DoctorReportDto, HookDto, McpServerDto,
-    MemoryEntryDto, ModelDetailsDto, ProviderModelCatalogEntryDto, SessionAgentSummaryDto,
-    SessionModeDto, SessionRowDto, SkillDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto,
-    TaskStatusDto,
+    MemoryEntryDto, ModelDetailsDto, ProviderModelCatalogEntryDto, SessionAgentMessageRowDto,
+    SessionAgentSummaryDto, SessionModeDto, SessionRowDto, SkillDto, SlashCommandDto,
+    StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use crate::protocol::local_apps::{
     AppCheckpointDto, AppErrorCodeDto, AppEventDto, AppRecordDto, AppRuntimeDetailsDto,
@@ -77,7 +77,7 @@ impl std::fmt::Debug for OpenAiOAuthSessionDto {
 // §0.9) and round-trip only.
 // Boxing the app payload would change the generated Swift/Kotlin protocol API.
 #[allow(clippy::large_enum_variant)]
-// UniFFI 0.28 stores an enum's variant/field documentation in the same
+// UniFFI 0.32.2 stores an enum's variant/field documentation in the same
 // fixed-size metadata buffer as its wire schema. Keep this high-cardinality
 // envelope undocumented at the derive site; the payload DTOs and protocol
 // snapshots remain the source of API documentation without risking a build
@@ -202,7 +202,7 @@ pub enum ClientEvent {
     SessionAgentTranscript {
         session_id: String,
         agent_id: String,
-        messages: Vec<MessageDto>,
+        messages: Vec<SessionAgentMessageRowDto>,
         next_message_index: u64,
         revision: u64,
     },
@@ -215,8 +215,15 @@ pub enum ClientEvent {
     SessionAgentMessage {
         session_id: String,
         agent_id: String,
-        message_index: u64,
-        message: MessageDto,
+        #[serde(flatten)]
+        row: SessionAgentMessageRowDto,
+    },
+
+    SessionAgentTombstone {
+        session_id: String,
+        agent_id: String,
+        message_uuid: String,
+        display_only: bool,
     },
 
     SessionList {
@@ -244,9 +251,9 @@ pub enum ClientEvent {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         unavailable_provider_ids: Vec<String>,
         storage_encrypted: bool,
-        /// Display-safe credential previews keyed by provider id. Values are
-        /// fixed masks plus at most the final four characters; plaintext
-        /// credentials never cross the client protocol.
+        // Display-safe credential previews keyed by provider id. Values are
+        // fixed masks plus at most the final four characters; plaintext
+        // credentials never cross the client protocol.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         credential_previews: HashMap<String, String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -285,7 +292,7 @@ pub enum ClientEvent {
         snapshot: StatusSnapshotDto,
     },
 
-    /// The layered settings read path (`RefreshListings{Settings}`).
+    // The layered settings read path (`RefreshListings{Settings}`).
     //
     // Every structured payload here is a JSON **String**, not a nested
     // object: `serde_json::Value` must never enter this crate (decision
@@ -299,59 +306,59 @@ pub enum ClientEvent {
     // decision §0.10 — no major bump): a client that predates them keeps
     // reading the two required payloads unchanged.
     SettingsSnapshot {
-        /// `{key: value}` — the merged effective settings.
+        // `{key: value}` — the merged effective settings.
         effective_json: String,
-        /// `{key: layer}` — which layer each effective value came from.
+        // `{key: layer}` — which layer each effective value came from.
         provenance_json: String,
-        /// `[{layer, path, exists, parsed, parse_error?}]` — the on-disk
-        /// state of every settings file layer, so the UI can show which file
-        /// backs a layer and whether it parsed. `parsed` reports JSON
-        /// validity only; it says nothing about OS write permission.
+        // `[{layer, path, exists, parsed, parse_error?}]` — the on-disk
+        // state of every settings file layer, so the UI can show which file
+        // backs a layer and whether it parsed. `parsed` reports JSON
+        // validity only; it says nothing about OS write permission.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         files_json: Option<String>,
-        /// `{key: value}` — the FILE-LAYER values as read at session start.
-        /// NOT the session's live configuration: no `cli` / `managed` / `env`
-        /// overlay is applied, so this is strictly "what the settings files
-        /// said at boot" and can differ from `effective_json` both because of
-        /// an on-disk edit not yet picked up AND because `effective_json`
-        /// carries the managed overlay that this field does not.
+        // `{key: value}` — the FILE-LAYER values as read at session start.
+        // NOT the session's live configuration: no `cli` / `managed` / `env`
+        // overlay is applied, so this is strictly "what the settings files
+        // said at boot" and can differ from `effective_json` both because of
+        // an on-disk edit not yet picked up AND because `effective_json`
+        // carries the managed overlay that this field does not.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         active_json: Option<String>,
-        /// Keys an administrator pinned through the managed-settings layer;
-        /// the UI must not offer to edit these.
+        // Keys an administrator pinned through the managed-settings layer;
+        // the UI must not offer to edit these.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         locked: Option<Vec<String>>,
-        /// `{layer: {key: value}}` — each FILE layer's OWN raw settings map,
-        /// unmerged. `effective_json` is a cross-layer merge and `active_json`
-        /// is the file-layer merge without the managed overlay; NEITHER can
-        /// stand in for "what does layer L's file itself say", which a
-        /// layered editor needs before it writes back to one layer: the
-        /// generic `update_settings` command replaces a key WHOLESALE in one
-        /// layer's file (`migrations/src/settings_update.rs`'s "top-level
-        /// REPLACE, not deep-merge" contract), so pre-merging a write against
-        /// the cross-layer `effective_json` view — which can carry another
-        /// layer's entries for an object-valued key like `providers` — would
-        /// silently fork that other layer's data into the one being saved.
-        /// Additive under decision §0.10 — no major bump.
+        // `{layer: {key: value}}` — each FILE layer's OWN raw settings map,
+        // unmerged. `effective_json` is a cross-layer merge and `active_json`
+        // is the file-layer merge without the managed overlay; NEITHER can
+        // stand in for "what does layer L's file itself say", which a
+        // layered editor needs before it writes back to one layer: the
+        // generic `update_settings` command replaces a key WHOLESALE in one
+        // layer's file (`migrations/src/settings_update.rs`'s "top-level
+        // REPLACE, not deep-merge" contract), so pre-merging a write against
+        // the cross-layer `effective_json` view — which can carry another
+        // layer's entries for an object-valued key like `providers` — would
+        // silently fork that other layer's data into the one being saved.
+        // Additive under decision §0.10 — no major bump.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layers_json: Option<String>,
-        /// The keys in `effective_json` whose value is a CROSS-LAYER union
-        /// rather than one layer's value. The engine deep-merges or
-        /// concat-dedups a specific set of keys (`hooks`, `permissions`,
-        /// `providers`, `enabledPlugins`, `trustedDirectories`, … — its
-        /// `settings::schema::MERGE_STRATEGIES` table), so when more than one
-        /// layer contributes, the effective value belongs to no single layer
-        /// and `provenance_json`'s entry for that key names only the
-        /// highest-priority CONTRIBUTOR. A client must therefore not render a
-        /// single-layer provenance badge for a key listed here; it says the
-        /// value is merged across layers instead.
-        ///
-        /// Only keys the merge actually unioned are listed: a deep-merge key
-        /// whose entries the winning layer entirely redefines is absent,
-        /// because for that key the winning layer's badge is honest. A list
-        /// of every key both layers mention would be useless.
-        ///
-        /// Additive under decision §0.10 — no major bump.
+        // The keys in `effective_json` whose value is a CROSS-LAYER union
+        // rather than one layer's value. The engine deep-merges or
+        // concat-dedups a specific set of keys (`hooks`, `permissions`,
+        // `providers`, `enabledPlugins`, `trustedDirectories`, … — its
+        // `settings::schema::MERGE_STRATEGIES` table), so when more than one
+        // layer contributes, the effective value belongs to no single layer
+        // and `provenance_json`'s entry for that key names only the
+        // highest-priority CONTRIBUTOR. A client must therefore not render a
+        // single-layer provenance badge for a key listed here; it says the
+        // value is merged across layers instead.
+        //
+        // Only keys the merge actually unioned are listed: a deep-merge key
+        // whose entries the winning layer entirely redefines is absent,
+        // because for that key the winning layer's badge is honest. A list
+        // of every key both layers mention would be useless.
+        //
+        // Additive under decision §0.10 — no major bump.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         merged_keys: Option<Vec<String>>,
     },
@@ -380,9 +387,9 @@ pub enum ClientEvent {
         status: TaskStatusDto,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin_session_id: Option<String>,
-        /// Failure reason accompanying a `failed` transition, when the
-        /// producing handler reported one. APPENDED field (additive default
-        /// `None`) — clients render it instead of a bare task id.
+        // Failure reason accompanying a `failed` transition, when the
+        // producing handler reported one. APPENDED field (additive default
+        // `None`) — clients render it instead of a bare task id.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -438,14 +445,14 @@ pub enum ClientEvent {
         app_id: Option<String>,
         code: AppErrorCodeDto,
         message: String,
-        /// Correlation key from the `CreateApp` (or other app command) that
-        /// failed, echoed verbatim so the caller that started the operation
-        /// can recognise its own failure. `None` for a failure the engine
-        /// synthesized with no originating request.
-        ///
-        /// Appended LAST: UniFFI encodes struct variants POSITIONALLY, so a
-        /// field inserted above `message` would be reinterpreted by a client
-        /// built against the previous bindings.
+        // Correlation key from the `CreateApp` (or other app command) that
+        // failed, echoed verbatim so the caller that started the operation
+        // can recognise its own failure. `None` for a failure the engine
+        // synthesized with no originating request.
+        //
+        // Appended LAST: UniFFI encodes struct variants POSITIONALLY, so a
+        // field inserted above `message` would be reinterpreted by a client
+        // built against the previous bindings.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
@@ -468,7 +475,7 @@ pub enum ClientEvent {
     },
 
     UsageUpdate {
-        /// Complete restored counters, including valid zero values; absent for live deltas.
+        // Complete restored counters, including valid zero values; absent for live deltas.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         is_snapshot: Option<bool>,
         input_tokens: u64,
@@ -496,7 +503,7 @@ pub enum ClientEvent {
         tasks: Vec<crate::protocol::tool_display::PlanTaskDto>,
     },
 
-    /// A paused workflow was replaced by a newly launched resumed run.
+    // A paused workflow was replaced by a newly launched resumed run.
     WorkflowResumed {
         previous_task_id: String,
         task: TaskRowDto,
@@ -513,23 +520,23 @@ pub enum ClientEvent {
         enabled: bool,
     },
 
-    /// Ask a client to perform one host-owned audio operation.
+    // Ask a client to perform one host-owned audio operation.
     AudioRequest {
-        /// Trusted owner, operation identity, budget, and requested operation.
+        // Trusted owner, operation identity, budget, and requested operation.
         request: AudioOperationRequestDto,
     },
-    /// Authoritative durable state for one mobile turn. Emitted on attach,
-    /// resume, recovery gating, and every terminal transition.
+    // Authoritative durable state for one mobile turn. Emitted on attach,
+    // resume, recovery gating, and every terminal transition.
     TurnRecoveryState {
         snapshot: TurnRecoverySnapshotDto,
     },
 
-    /// Sequenced retained copy of a turn event. It is emitted beside live
-    /// delivery and replayed after
-    /// [`ClientCommand::AttachTurn`](crate::protocol::commands::ClientCommand::AttachTurn).
-    /// `event_json` is the original serialized `ClientEvent`; keeping it a
-    /// string avoids a recursive UniFFI enum while preserving the exact wire
-    /// payload for future SSE/WebSocket transports.
+    // Sequenced retained copy of a turn event. It is emitted beside live
+    // delivery and replayed after
+    // [`ClientCommand::AttachTurn`](crate::protocol::commands::ClientCommand::AttachTurn).
+    // `event_json` is the original serialized `ClientEvent`; keeping it a
+    // string avoids a recursive UniFFI enum while preserving the exact wire
+    // payload for future SSE/WebSocket transports.
     TurnEventReplay {
         session_id: String,
         turn_id: u64,
@@ -541,17 +548,17 @@ pub enum ClientEvent {
         skills: Vec<SkillDto>,
     },
 
-    /// Authoritative global TypeScript LSP policy. `effective` is `off` when
-    /// the pinned runtime is unavailable even if the persisted request is
-    /// `auto` or `on`.
+    // Authoritative global TypeScript LSP policy. `effective` is `off` when
+    // the pinned runtime is unavailable even if the persisted request is
+    // `auto` or `on`.
     TypescriptLspModeChanged {
         requested: String,
         effective: String,
         available: bool,
     },
 
-    /// A context-preserving copy created in another session capability mode.
-    /// Kept at the end so existing UniFFI event ordinals remain stable.
+    // A context-preserving copy created in another session capability mode.
+    // Kept at the end so existing UniFFI event ordinals remain stable.
     SessionForked {
         source_session_id: String,
         session_id: String,
@@ -603,28 +610,28 @@ pub enum ClientEvent {
         providers: Vec<ProviderModelCatalogEntryDto>,
     },
 
-    /// Observed compaction lifecycle, including attempts that fail or are cancelled.
-    /// Connection-scoped so an idle manual `/compact` can publish live progress.
-    /// Appended to preserve every existing UniFFI enum ordinal.
+    // Observed compaction lifecycle, including attempts that fail or are cancelled.
+    // Connection-scoped so an idle manual `/compact` can publish live progress.
+    // Appended to preserve every existing UniFFI enum ordinal.
     CompactionStatus {
-        /// `preparing`, `summarizing`, `restoring`, `complete`, `skipped`, `error`, or `cancelled`.
-        /// A string allows clients to ignore future phases without decode failures.
+        // `preparing`, `summarizing`, `restoring`, `complete`, `skipped`, `error`, or `cancelled`.
+        // A string allows clients to ignore future phases without decode failures.
         phase: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    /// Authoritative scheduled task snapshot after a management operation.
+    // Authoritative scheduled task snapshot after a management operation.
     CronResult {
         request_id: String,
         jobs: Vec<CronJobDto>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    /// Retract the current or just-completed rejected assistant attempt.
+    // Retract the current or just-completed rejected assistant attempt.
     MessageRetracted {
         message_id: String,
     },
-    /// Correlate the streamed assistant response with its stable identity.
+    // Correlate the streamed assistant response with its stable identity.
     MessageIdentity {
         message_id: String,
     },
@@ -687,14 +694,188 @@ pub enum ClientEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    /// Cancel one pending audio operation without affecting other owners.
+    // Cancel one pending audio operation without affecting other owners.
     AudioCancel {
         identity: AudioOperationIdDto,
     },
-    /// Publish the latest support/readiness snapshot to the UI client.
+    // Publish the latest support/readiness snapshot to the UI client.
     AudioCapabilitiesChanged {
         capabilities: AudioCapabilitySnapshotDto,
     },
+    // Native accepted-fallback route receipt.
+    QueryModelChange {
+        // Model selected by the accepted response.
+        to_model: String,
+    },
+    // Host/client-only transient assistant-block key. Not a native SDK event.
+    AssistantBlockStart {
+        // Opaque key used to associate streamed deltas until stop-time identity.
+        block_key: u64,
+    },
+    // Host/client-only mapping to the UUID assigned at block completion.
+    // Not a native SDK event.
+    AssistantBlockIdentity {
+        // Opaque key previously emitted by `assistant_block_start`.
+        block_key: u64,
+        // Completed row UUID.
+        message_uuid: String,
+    },
+    // Native accepted-fallback row tombstone.
+    Tombstone {
+        // Complete row envelope available at the host boundary.
+        message: ServerFallbackTombstoneMessageDto,
+        // Native `displayOnly` flag. Native consumers may still remove the
+        // row from durable transcript storage when this is true.
+        display_only: bool,
+    },
+    // Native refusal-continuation event. The display flag is a host/client
+    // extension used by display-hook buffering and is not a native field.
+    RefusalContinuation {
+        // Native phase. Accepted fallback emits `Begin`.
+        phase: RefusalContinuationPhaseDto,
+        // Retained text passed through without modification.
+        salvage_text: String,
+        // Native concatenation rule. Accepted fallback emits `Exact`.
+        join: RefusalContinuationJoinDto,
+        // Original row UUIDs in native source order.
+        replaces_uuids: Vec<String>,
+        // Host/client display-hook policy extension; not in the native event.
+        display_salvage_text: bool,
+    },
+    // A TUI user-row token resolved to its persisted JSONL UUID.
+    // Appended to preserve existing UniFFI variant ordinals.
+    UserTranscriptRowIdentity {
+        // Internal token assigned before the persistence call completes.
+        row_token: String,
+        // UUID returned by the successful JSONL append.
+        uuid: String,
+    },
+    // Persisted top-level JSONL UUIDs for text blocks in one assistant response.
+    // Appended to preserve existing UniFFI variant ordinals.
+    AssistantTranscriptRowUuids {
+        // Internal response key used only to locate its rendered cells.
+        message_id: String,
+        // One slot per persisted text block; failed appends are `None`.
+        uuids: Vec<Option<String>>,
+    },
+    // One plain-text `$.ui.log` line; never model-facing conversation text.
+    // Appended to preserve existing UniFFI variant ordinals.
+    UiLog {
+        plugin: String,
+        text: String,
+    },
+    // Transient `$.ui.toast` notification; never transcript or model text.
+    // Appended to preserve existing UniFFI variant ordinals.
+    UiToast {
+        plugin: String,
+        text: String,
+        timeout_ms: u64,
+    },
+    // Per-plugin pinned status; null text clears it. Never transcript content.
+    UiStatus {
+        plugin: String,
+        text: Option<String>,
+    },
+    // Correlated reply to one Mod UI control command or local UI operation.
+    UiControlResult {
+        // Client-command correlator; it is not part of the Native payload.
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        // Canonical control or host-local operation response JSON.
+        response_json: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        // Host-only renderer metadata sidecar, separate from `response_json`.
+        metadata_json: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        // Correlated host/control failure; omitted on success.
+        error: Option<String>,
+    },
+    // Rendered client-module frame forwarded to the owning Product bridge.
+    UiClientFrame {
+        runtime_id: String,
+        frame_json: String,
+    },
+    // Native system invalidation. The event name is fixed by the source at the
+    // Product bridge boundary; `instances_json` preserves its targeted sites.
+    UiInvalidate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instances_json: Option<String>,
+        uuid: String,
+        session_id: String,
+    },
+}
+/// The provider-message portion of a fallback tombstone row. `content_json`
+/// retains every provider block without imposing the narrower display-block
+/// projection used by [`MessageDto`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ServerFallbackProviderMessageDto {
+    /// Provider-assigned inner message identifier, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Provider-selected model, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Provider stop reason, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    /// Serialized provider refusal stop details, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_details_json: Option<String>,
+    /// Serialized provider usage facts, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_json: Option<String>,
+    /// Serialized JSON array of the complete content blocks.
+    pub content_json: String,
+}
+
+/// Known outer and provider fields of a native tombstone row. The host source
+/// does not assign a `parentUuid`; timestamp and request fields are forwarded
+/// only when the completed row actually carries them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ServerFallbackTombstoneMessageDto {
+    /// Native row UUID.
+    pub uuid: String,
+    /// Native outer row kind, serialized under the native `type` key.
+    #[serde(rename = "type")]
+    pub message_type: String,
+    /// Native row-creation timestamp.
+    pub timestamp: String,
+    /// Request id associated with the row, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Serialized request-reference payload, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_ref_json: Option<String>,
+    /// Provider message envelope.
+    pub message: ServerFallbackProviderMessageDto,
+    /// Whether the row represents an API error, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_api_error_message: Option<bool>,
+    /// Native supersession metadata, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes_uuids: Option<Vec<String>>,
+}
+
+/// Refusal-continuation phase used by the native stitch event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RefusalContinuationPhaseDto {
+    /// Seed the pending stitch from retained refusal text.
+    Begin,
+}
+
+/// Refusal-continuation join rule used by the native stitch event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RefusalContinuationJoinDto {
+    /// Concatenate text with no inserted separator.
+    Exact,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -846,4 +1027,92 @@ pub struct CronJobDto {
     pub expires_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+}
+
+#[cfg(test)]
+mod session_agent_identity_contract_tests {
+    use super::*;
+    use crate::protocol::message::MessageBlockDto;
+
+    fn row(index: u64, uuid: &str) -> SessionAgentMessageRowDto {
+        SessionAgentMessageRowDto {
+            message_index: index,
+            message_uuid: uuid.into(),
+            message: MessageDto {
+                role: "assistant".into(),
+                blocks: vec![MessageBlockDto::Text {
+                    text: "declined".into(),
+                }],
+                images: vec![],
+                loop_wakeup: None,
+            },
+            api_error_json: Some(
+                "{\"isApiErrorMessage\":true,\"requestId\":\"event-request\"}".into(),
+            ),
+        }
+    }
+
+    #[test]
+    fn live_child_row_requires_uuid_and_preserves_complete_error_json() {
+        let event = ClientEvent::SessionAgentMessage {
+            session_id: "session".into(),
+            agent_id: "agent".into(),
+            row: row(7, "row-7"),
+        };
+        let encoded = serde_json::to_value(&event).unwrap();
+        assert_eq!(encoded["message_index"], 7);
+        assert_eq!(encoded["message_uuid"], "row-7");
+        assert!(encoded.get("row").is_none());
+        assert_eq!(
+            serde_json::from_value::<ClientEvent>(encoded.clone()).unwrap(),
+            event
+        );
+        let mut missing_identity = encoded;
+        missing_identity
+            .as_object_mut()
+            .unwrap()
+            .remove("message_uuid");
+        assert!(serde_json::from_value::<ClientEvent>(missing_identity).is_err());
+    }
+
+    #[test]
+    fn child_snapshot_retains_index_gaps_and_high_water_mark() {
+        let event = ClientEvent::SessionAgentTranscript {
+            session_id: "session".into(),
+            agent_id: "agent".into(),
+            messages: vec![row(7, "row-7"), row(12, "row-12")],
+            next_message_index: 20,
+            revision: 3,
+        };
+        let encoded = serde_json::to_value(&event).unwrap();
+        assert_eq!(encoded["messages"][0]["message_index"], 7);
+        assert_eq!(encoded["messages"][1]["message_index"], 12);
+        assert_eq!(encoded["next_message_index"], 20);
+        assert_eq!(
+            serde_json::from_value::<ClientEvent>(encoded).unwrap(),
+            event
+        );
+    }
+
+    #[test]
+    fn child_tombstone_carries_session_agent_uuid_and_display_flag() {
+        let event = ClientEvent::SessionAgentTombstone {
+            session_id: "session".into(),
+            agent_id: "agent".into(),
+            message_uuid: "row-7".into(),
+            display_only: true,
+        };
+        let encoded = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "type": "session_agent_tombstone", "session_id": "session",
+                "agent_id": "agent", "message_uuid": "row-7", "display_only": true
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ClientEvent>(encoded).unwrap(),
+            event
+        );
+    }
 }

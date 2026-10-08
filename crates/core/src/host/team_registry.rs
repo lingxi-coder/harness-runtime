@@ -17,6 +17,19 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::RwLock;
 
+/// Host-owned team-file activity writer. Query handlers report actual query
+/// entry and stop/failure boundaries; enqueueing a mailbox message alone does
+/// not imply a teammate is active.
+#[async_trait]
+pub trait TeamMemberActivityHandle: Send + Sync {
+    async fn set_active(
+        &self,
+        team_name: &str,
+        member_name: &str,
+        active: bool,
+    ) -> Result<(), String>;
+}
+
 /// Session-owned leader names for task-list resolution. The upstream store is
 /// host-scoped (`ds().taskList`); desktop hosts must not share one mutable name.
 static LEADER_TEAM_NAMES: RwLock<std::collections::BTreeMap<String, String>> =

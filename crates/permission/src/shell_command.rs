@@ -420,7 +420,8 @@ fn candidates(subcommand: &str, aggressive_env: bool, seed_original: bool) -> Ve
                 out.push(w);
             }
             if aggressive_env {
-                // Deny/ask path: strip ALL leading env vars (no blocklist).
+                // This is the legacy Eue-shaped fallback candidate, also present
+                // in Native 2.1.289 alongside its parser-derived argv candidate.
                 let e = strip_all_leading_env_vars(&c, None);
                 if seen.insert(e.clone()) {
                     out.push(e);
@@ -588,11 +589,32 @@ pub fn matches_excluded_pattern(pattern: &str, candidate: &str) -> bool {
 /// when wrapped or compounded.
 #[must_use]
 pub fn rule_matches_any_subcommand(rule_content: &str, command: &str) -> bool {
+    rule_matches_any_subcommand_with_candidates(rule_content, command, &[])
+}
+
+/// DENY/ASK aggregation with additional commands recovered from the current
+/// Bash AST. Native 2.1.289 T4 derives a candidate from `astCommand.argv` after
+/// removing leading assignments represented separately in `envVars`; this
+/// accepts those `argv.join(" ")` candidates while retaining the Eue text
+/// fallback in [`rule_matches_any_subcommand`].
+#[must_use]
+pub(crate) fn rule_matches_any_subcommand_with_candidates(
+    rule_content: &str,
+    command: &str,
+    ast_candidates: &[String],
+) -> bool {
     let rule = parse_shell_rule(rule_content);
     for sub in split_command(command) {
         for cand in candidates(&sub, true, true) {
             // deny/ask: no compound guard (skipCompoundCheck) — stay denied, and
             // wildcard rules always retry the `xargs`-wrapped form.
+            if rule_matches_candidate(&rule, &cand, false, true) {
+                return true;
+            }
+        }
+    }
+    for ast_command in ast_candidates {
+        for cand in candidates(ast_command, true, true) {
             if rule_matches_candidate(&rule, &cand, false, true) {
                 return true;
             }
@@ -981,16 +1003,18 @@ mod tests {
         );
     }
 
-    /// deny/ask path: a `Bash(bazel:*)` deny rule must catch env-prefixed forms
-    /// the OLD regex failed on, and must NOT match the `$`-expansion forms.
+    /// The text-only path is the Eue fallback shared with Native 2.1.289; AST
+    /// candidates are supplied by the policy layer when parsing is available.
     #[test]
     fn deny_catches_env_prefixed_bazel_faithfully() {
-        // \\.-escape: was under-stripped → deny failed.
         assert!(rule_matches_any_subcommand(
             "bazel:*",
             "FOO=a\\ b bazel build"
         ));
-        // concatenated segments: was unstripped → deny failed.
+        assert!(rule_matches_any_subcommand(
+            "bazel:*",
+            "FOO=bar bazel build"
+        ));
         assert!(rule_matches_any_subcommand(
             "bazel:*",
             "FOO='x'y\"z\" bazel build"
@@ -999,24 +1023,35 @@ mod tests {
             "bazel:*",
             "FOO=a\"b\" bazel build"
         ));
-        // standard form still caught.
-        assert!(rule_matches_any_subcommand(
-            "bazel:*",
-            "FOO=bar bazel build"
-        ));
-
-        // `$`/quoted-`$` forms are NOT stripped → the bazel deny does NOT match
-        // (faithful to TS: those stay sandboxed, not denied via env-strip).
+        // Native's Eue-shaped fallback retains expansion-bearing assignments.
         assert!(!rule_matches_any_subcommand(
             "bazel:*",
             "FOO=$VAR bazel build"
         ));
-        assert!(!rule_matches_any_subcommand(
-            "bazel:*",
+        assert_eq!(
+            strip_all_leading_env_vars("FOO=\"$x\" bazel build", None),
             "FOO=\"$x\" bazel build"
-        ));
+        );
     }
 
+    #[test]
+    fn parsed_argv_candidate_catches_expansion_bearing_assignment() {
+        for (command, ast_candidates) in [
+            (
+                "TZ=\"$HOME\" rm -rf build",
+                vec!["rm -rf build".to_string()],
+            ),
+            (
+                "LANG=staging; TZ=\"$HOME\" rm -rf build",
+                vec!["rm -rf build".to_string()],
+            ),
+        ] {
+            assert!(
+                rule_matches_any_subcommand_with_candidates("rm:*", command, &ast_candidates),
+                "deny/ask rule must match the Native-style argv candidate: {command}"
+            );
+        }
+    }
     /// excludedCommands path: env-prefixed forms decide identically to TS.
     /// `strip_env_and_wrappers_fixedpoint` uses `is_binary_hijack_var`, so the
     /// `bazel` candidate must surface (or not) exactly as the value regex allows.

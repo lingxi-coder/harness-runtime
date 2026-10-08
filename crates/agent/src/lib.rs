@@ -28,18 +28,6 @@
 // which records two near-misses where it said "dead" about live code.
 #![allow(dead_code)]
 
-/// Streaming assembly, re-exported from `llm-runtime`.
-///
-/// This module used to OWN the accumulator. It now lives in `llm-runtime`,
-/// beside the `HistoryEvent`/`HistoryResponse` it is defined in terms of, so other
-/// stream consumers (the mobile local-app generator) reuse the same assembly
-/// instead of growing a second one. The alias keeps every call site here
-/// unchanged.
-mod accumulator {
-    pub(crate) use llm_runtime::stream_accumulator::{
-        accumulate_stream_salvaging, response_to_stream_events,
-    };
-}
 pub mod agent_mcp_tools;
 pub mod api;
 pub mod builtins;
@@ -49,9 +37,16 @@ pub mod context;
 pub mod definition;
 pub mod display;
 pub mod fork;
+pub mod handback;
+mod handback_output;
 pub mod handle;
 pub mod hooks_trust;
+mod instructions;
 pub mod mcp_servers;
+mod mod_agent_offer;
+mod mod_prompt_attachment;
+mod mod_turn_complete;
+mod mod_turn_step;
 pub mod model_resolution;
 pub mod multi_dispatch;
 pub mod observer;
@@ -64,32 +59,27 @@ pub mod tool_resolver;
 pub mod transcript;
 pub mod worktree_policy;
 
-pub use api::{NearLimitCheckpointRequest, SubagentApiClient};
+pub use api::{NearLimitCheckpointRequest, SubagentApiClient, SubagentApiRequest};
 pub use builtins::{
     builtin_agent_definitions, fork_agent_definition, fusion_analyst_definition,
     fusion_panel_definition,
 };
 pub use catalog::{
     load_agents_from_dirs, parse_agent_from_json, parse_agent_markdown,
-    parse_agents_from_flag_json, parse_agents_from_flag_json_checked, parse_agents_from_json,
-    AgentLoadError,
+    parse_agents_from_flag_json_checked, parse_agents_from_json, AgentLoadError,
 };
 pub use color_manager::AgentColorManager;
 pub use context::SubagentContext;
 pub use definition::*;
 pub use display::AgentDisplay;
 pub use handle::{
-    agent_listing_entries, tools_denied_agent_types, tools_description,
+    agent_listing_candidates, agent_listing_entries, tools_denied_agent_types, tools_description,
     with_transcript_subdir_override, workflow_transcript_subdir_override, DefaultModelSelection,
-    PoolSubagentSpawner, ProviderFirstPartyResolver, RuntimeLink, StreamingSubagentSpawner,
+    DefaultModelSelectionProvider, PoolSubagentSpawner, RuntimeLink, StreamingSubagentSpawner,
 };
-// `agent_listing_delta` shared surface: the ONE `formatAgentLine` and the
-// `shouldInjectAgentListInMessages` gate live in the leaf `platform-api` crate (so
-// `tool-agent` can reach them without depending on this engine crate); re-export
-// them here under the `agent::` path the orchestrator + callers use.
-pub use lingxi_core::host::subagent_spawn::{
-    format_agent_line, should_inject_agent_list_in_messages,
-};
+pub use mod_agent_offer::{filter_agent_offer_candidates, AgentOfferContext};
+// Shared renderer for the current per-turn agent catalog reminder.
+pub use lingxi_core::host::subagent_spawn::format_agent_line;
 // Fork-subagent helpers live in the leaf `platform-api` crate (reachable by both
 // `tool-agent` and `agent`); re-export under `agent::` for ergonomic access.
 pub use lingxi_core::host::fork_subagent::{
@@ -97,7 +87,11 @@ pub use lingxi_core::host::fork_subagent::{
     is_in_fork_child, FORK_SUBAGENT_TYPE,
 };
 pub use mcp_servers::agent_mcp_specs_to_scoped_configs;
-pub use model_resolution::resolve_agent_model;
+pub use model_resolution::{
+    resolve_agent_model_with_context, resolve_skill_model_selection, resolve_user_model_selection,
+    resolve_user_specified_model, FamilyModelDefaults, ModelProviderKind, ModelResolutionContext,
+    ModelResolutionContextProvider, ModelResolutionError, ModelRouteFacts, ResolvedModelSelection,
+};
 pub use observer::{
     propagation_for_spawn, validate_observer_graph, ObserverPropagation, ObserverValidationError,
     DEFAULT_OBSERVER_FANOUT_DEPTH,

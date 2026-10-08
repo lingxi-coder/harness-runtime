@@ -77,6 +77,7 @@ impl LlmRequest {
             content: vec![wire::ContentBlock::Text {
                 text: text.into(),
                 thought_signature: None,
+                citations: None,
             }],
             native_options: Vec::new(),
         });
@@ -216,9 +217,20 @@ pub struct ProviderRequest {
     pub headers: BTreeMap<String, String>,
     /// JSON request body.
     pub body_json: Value,
+    /// Serialization semantics of the selected wire protocol.
+    pub json_encoding: lingxi_llm_client::exact_json::JsonEncoding,
+    /// Exact codec selected for this prepared provider body. Runtime-created
+    /// model requests set this before SDK serialization; standalone host
+    /// utility requests may leave it absent.
+    #[serde(skip)]
+    pub body_protocol: Option<lingxi_llm_client::protocol::ProtocolFamily>,
+    /// Trusted Native request kind passed through the SDK final body serializer.
+    #[serde(skip)]
+    pub anthropic_request_kind:
+        lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind,
     /// Exact UTF-16 overrides for specific JSON string leaves inside
-    /// [`body_json`], keyed by JSON Pointer. When empty, body serialization is
-    /// identical to `body_json.to_string()`.
+    /// [`body_json`], keyed by canonical JSON Pointer. The selected JSON encoding
+    /// also applies when no exact strings are present.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub json_string_overrides: BTreeMap<String, Vec<u16>>,
     /// Which transport should be used for streaming this request.
@@ -251,6 +263,9 @@ impl ProviderRequest {
             url: url.into(),
             headers: BTreeMap::new(),
             body_json,
+            json_encoding: Default::default(),
+            body_protocol: None,
+            anthropic_request_kind: Default::default(),
             json_string_overrides: BTreeMap::new(),
             stream_transport: ProviderStreamTransport::Http,
             body_bytes: None,
@@ -264,8 +279,14 @@ impl ProviderRequest {
         if let Some(body_bytes) = &self.body_bytes {
             return Ok(body_bytes.clone());
         }
-        lingxi_llm_client::exact_json::serialize(&self.body_json, &self.json_string_overrides)
-            .map_err(crate::upstream::error)
+        lingxi_llm_client::exact_json::serialize_for_request(
+            &self.body_json,
+            &self.json_string_overrides,
+            self.json_encoding,
+            self.body_protocol,
+            self.anthropic_request_kind,
+        )
+        .map_err(crate::upstream::error)
     }
 }
 
@@ -299,28 +320,11 @@ impl ProviderResponse {
 /// Extract cross-provider streaming control metadata from normalized headers.
 #[must_use]
 pub fn stream_provider_metadata_from_headers(headers: &BTreeMap<String, String>) -> Value {
-    let mut metadata = serde_json::Map::new();
-    for (name, value) in headers {
-        let key = name.to_ascii_lowercase();
-        if is_stream_metadata_header(&key) {
-            metadata.insert(key, Value::String(value.clone()));
-        }
-    }
-    if metadata.is_empty() {
-        Value::Null
-    } else {
-        Value::Object(metadata)
-    }
-}
-
-fn is_stream_metadata_header(name: &str) -> bool {
-    name == "openai-model"
-        || name == "x-models-etag"
-        || name == "x-reasoning-included"
-        || name == "x-request-id"
-        || name == "x-codex-turn-state"
-        || name == "retry-after"
-        || name.starts_with("x-ratelimit-")
+    let headers = headers
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    lingxi_llm_client::providers::response_headers::stream_metadata(&headers)
 }
 
 /// Validate request capabilities before transport I/O.

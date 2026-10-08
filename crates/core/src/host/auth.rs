@@ -5,6 +5,7 @@
 //! on the oauth crate (decoupling). See plan M5-11 Task 3.
 
 use async_trait::async_trait;
+use std::sync::Weak;
 use thiserror::Error;
 
 /// Successful-login payload returned by [`AuthHandle::login`] and
@@ -34,11 +35,26 @@ pub enum AuthError {
     ServerError(String),
 }
 
+/// Root-bound notification of an explicitly persisted account change.
+///
+/// Login and logout notify synchronously after credential storage succeeds.
+/// Ordinary token refresh and subscription updates do not change the account.
+pub trait AccountChangeObserver: Send + Sync {
+    /// Invalidate context belonging to this observer's root.
+    fn account_changed(&self);
+}
+
 /// Public auth surface — interactive sign-in / sign-out + current-user
 /// snapshot. The concrete impl wraps `lingxi-anthropic-oauth`'s
 /// SDK OAuth operations plus the host secret-storage layer.
 #[async_trait]
 pub trait AuthHandle: Send + Sync {
+    /// Observe account mutations at their successful persistence boundary.
+    ///
+    /// Registrations are weak: the observer's context owner controls its
+    /// lifetime, and auth wrappers must forward registration to their source.
+    fn register_account_change_observer(&self, observer: Weak<dyn AccountChangeObserver>);
+
     /// Run an interactive OAuth code-flow (PKCE) login. Blocks until the
     /// user completes the browser flow + redirects back, or the timeout
     /// elapses.

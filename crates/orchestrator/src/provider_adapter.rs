@@ -8,7 +8,7 @@
 //! by delegating each method 1:1 — the only orchestrator-domain logic kept here is
 //! the catalog→`ModelListing` projection and the `RateLimitSnapshot` mapping.
 
-use crate::conversation::{OrchestratorApiClient, StreamingApiClient};
+use crate::conversation::{OrchestratorApiClient, OrchestratorApiRequest, StreamingApiClient};
 use crate::model::rate_limit::{RateLimitInfo, RawUtilization};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -16,36 +16,60 @@ use lingxi_core::types::ConversationMessage;
 use llm_runtime::{HistoryEvent, HistoryResponse, LlmError, MediaDelegationAccounting};
 use std::sync::Arc;
 
-/// Subscriber-state seed for [`llm_runtime::ApiService`]'s 429 gate. Re-exported
-/// from llm-runtime so existing `orchestrator::provider_adapter::SubscriberState`
-/// import paths (the composition roots) keep resolving after the drive loop moved.
+tokio::task_local! {
+    static MOD_TURN_STEP_EFFORT: serde_json::Value;
+}
+
+/// Scope a Mod's effort rewrite to this model request. A session-wide setter
+/// would affect concurrently running side queries and background work.
+pub(crate) async fn with_mod_turn_step_effort<T>(
+    effort: Option<&str>,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    if let Some(effort) = effort {
+        MOD_TURN_STEP_EFFORT
+            .scope(
+                serde_json::Value::String(effort.to_owned()),
+                llm_runtime::with_mod_request_effort(effort, future),
+            )
+            .await
+    } else {
+        future.await
+    }
+}
+
+/// Current subscription seed used by composition roots when building the
+/// provider service; execution subsequently reads its live subscription slot.
 pub use llm_runtime::SubscriberState;
+
+/// Host resolver for the current source route's model, catalog, launch and
+/// feedback facts. The returned snapshot owns every fact needed after the
+/// provider stream has advanced to another serving model.
+pub type RefusalApiTextSnapshotSource = Arc<
+    dyn Fn(
+            &str,
+            Option<&str>,
+        ) -> Result<lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot, LlmError>
+        + Send
+        + Sync,
+>;
 
 /// Production adapter: a thin holder of [`llm_runtime::ApiService`] (which owns the
 /// provider drive loop) that implements the orchestrator's seam traits.
 pub struct ProviderApiAdapter {
     service: Arc<llm_runtime::ApiService>,
-    /// (M4 cc2.1.198) The session's initial effort level from CLI `--effort`
-    /// (binary: session state `thinkingConfig: SF(a.effort)` → request
-    /// `output_config.effort`). `None` (the default) keeps main-loop request
-    /// bodies byte-identical to before this field existed.
+    refusal_api_text_snapshot_source: Option<RefusalApiTextSnapshotSource>,
+    /// Explicit session level. An absent launch value inherits the admitted
+    /// settings table; an explicit automatic choice is held by the service.
     initial_effort: std::sync::RwLock<Option<serde_json::Value>>,
     /// (`/fast`) Session-scoped fast-mode toggle, shared (same `Arc`) with the
     /// [`ConversationOrchestrator`] so the handle's `set_fast_mode` flip is seen
-    /// here on the next turn. When set AND the active model carries the
-    /// canonical `fast_mode` capability, the MAIN-loop stream sends
+    /// here on the next turn. When set and the resolved route admits the
+    /// current native Fast policy, the MAIN-loop stream sends
     /// `speed:"fast"`. The
     /// default flag is always `false`, so bodies stay byte-identical until a
     /// live `/fast` toggle flips it.
     fast_mode: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
-
-/// Whether `model` carries the canonical registry's `fast_mode` capability.
-fn model_supports_fast_mode(model: &str) -> bool {
-    lingxi_core::host::model_capabilities::has_capability(
-        model,
-        lingxi_core::host::model_capabilities::ModelCapability::FastMode,
-    )
 }
 
 impl ProviderApiAdapter {
@@ -56,9 +80,33 @@ impl ProviderApiAdapter {
     pub fn new(service: Arc<llm_runtime::ApiService>) -> Self {
         Self {
             service,
+            refusal_api_text_snapshot_source: None,
             initial_effort: std::sync::RwLock::new(None),
             fast_mode: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Attach the embedding host's current refusal-fact resolver. Both main
+    /// and child API clients use this same source without deriving policy
+    /// from the model allowlist or from a provider endpoint.
+    #[must_use]
+    pub fn with_refusal_api_text_snapshot_source(
+        mut self,
+        source: RefusalApiTextSnapshotSource,
+    ) -> Self {
+        self.refusal_api_text_snapshot_source = Some(source);
+        self
+    }
+
+    fn resolved_refusal_api_text_snapshot(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<Option<lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot>, LlmError> {
+        self.refusal_api_text_snapshot_source
+            .as_ref()
+            .map(|source| source(model, profile))
+            .transpose()
     }
 
     /// (`/fast`) Share the session's fast-mode flag with this adapter (the same
@@ -80,11 +128,20 @@ impl ProviderApiAdapter {
     /// keep their own per-spawn effort resolution and are unaffected.
     #[must_use]
     pub fn with_initial_effort(mut self, effort: Option<serde_json::Value>) -> Self {
+        if let Some(value) = &effort {
+            self.service
+                .set_session_effort(lingxi_core::host::effort_table::SessionEffort::Level(
+                    value.clone(),
+                ));
+        }
         self.initial_effort = std::sync::RwLock::new(effort);
         self
     }
 
     fn current_effort(&self) -> Option<serde_json::Value> {
+        if let Ok(effort) = MOD_TURN_STEP_EFFORT.try_with(Clone::clone) {
+            return Some(effort);
+        }
         self.initial_effort
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -93,8 +150,9 @@ impl ProviderApiAdapter {
 
     fn build_scheduled_request(
         &self,
-        settings: crate::scheduled_turn::ScheduledSettings,
-        system: Option<&str>,
+        mut settings: crate::scheduled_turn::ScheduledSettings,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        skip_global_cache_for_system_prompt: bool,
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
         max_tokens: Option<u32>,
@@ -143,7 +201,10 @@ impl tool_api::McpTokenCounter for ProviderApiAdapter {
     ) -> Result<Option<u64>, String> {
         let blocks = match content {
             serde_json::Value::String(text) => {
-                vec![lingxi_core::types::ContentBlock::Text { text: text.clone() }]
+                vec![lingxi_core::types::ContentBlock::Text {
+                    text: text.clone(),
+                    citations: None,
+                }]
             }
             serde_json::Value::Array(values) => values
                 .iter()
@@ -156,6 +217,7 @@ impl tool_api::McpTokenCounter for ProviderApiAdapter {
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or_default()
                         .to_string(),
+                    citations: None,
                 })
                 .collect(),
             _ => return Ok(None),
@@ -179,6 +241,59 @@ impl tool_api::McpTokenCounter for ProviderApiAdapter {
 
 #[async_trait]
 impl OrchestratorApiClient for ProviderApiAdapter {
+    fn is_first_party_route(&self, model: &str, profile: Option<&str>) -> bool {
+        self.service
+            .is_first_party_route(model, profile)
+            .unwrap_or(false)
+    }
+
+    async fn credential_source(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<llm_runtime::CredentialSource, LlmError> {
+        self.service.credential_source(model, profile).await
+    }
+
+    fn native_computer_provider(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Option<lingxi_llm_client::protocol::computer::NativeComputerProvider> {
+        use lingxi_llm_client::protocol::{ProtocolFamily, computer::NativeComputerProvider};
+        match self.service.protocol_for_model(model, profile).ok()? {
+            ProtocolFamily::OpenAiResponses => Some(NativeComputerProvider::OpenAi),
+            ProtocolFamily::AnthropicMessages => Some(NativeComputerProvider::Anthropic),
+            ProtocolFamily::GeminiInteractions => Some(NativeComputerProvider::Gemini),
+            _ => None,
+        }
+    }
+
+    fn prompt_snapshot_source_vector(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        sections: &[lingxi_llm_client::providers::anthropic::system_prompt::SourceSection],
+    ) -> Vec<lingxi_llm_client::providers::anthropic::system_prompt::PromptText> {
+        self.service
+            .prompt_snapshot_source_vector(model, profile, sections)
+    }
+
+    fn refusal_api_text_snapshot(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<Option<lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot>, LlmError> {
+        self.resolved_refusal_api_text_snapshot(model, profile)
+    }
+
+    async fn validate_fast_enable(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<(), LlmError> {
+        self.service.validate_fast_enable(model, profile).await
+    }
     fn active_betas(&self) -> Vec<String> {
         self.service.active_custom_betas().to_vec()
     }
@@ -187,60 +302,93 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         self.service.set_thinking(thinking);
     }
 
-    fn set_effort(&self, effort: Option<serde_json::Value>) {
+    fn set_effort(&self, effort: lingxi_core::host::effort_table::SessionEffort) {
+        self.service.set_session_effort(effort.clone());
+        let effort = match effort {
+            lingxi_core::host::effort_table::SessionEffort::Level(value) => Some(value),
+            _ => None,
+        };
         *self
             .initial_effort
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = effort;
     }
 
-    async fn messages_create(
+    fn effort_command_snapshot(
         &self,
         model: &str,
         profile: Option<&str>,
-        system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-    ) -> Result<HistoryResponse, LlmError> {
-        if let Some(settings) = crate::scheduled_turn::current() {
-            return self
-                .service
-                .messages_create_side_query_with_thinking(
-                    &settings.model,
-                    Some(&settings.provider),
-                    system,
-                    msgs,
-                    tools,
-                    None,
-                    None,
-                    Vec::new(),
-                    Some(settings.thinking),
-                    settings.effort,
-                    None,
-                    Some("scheduled_task"),
-                )
-                .await;
-        }
-        self.service
-            .messages_create(model, profile, system, msgs, tools)
-            .await
+    ) -> Result<Option<lingxi_core::host::effort::EffortCommandSnapshot>, LlmError> {
+        self.service.effort_command_snapshot(model, profile)
     }
 
-    async fn messages_create_hook_prompt(
+    async fn messages_create_buffered_stream(
         &self,
-        model: &str,
-        profile: Option<&str>,
-        system: &str,
-        msgs: Vec<ConversationMessage>,
+        request: llm_runtime::MessagesCreateRequest,
     ) -> Result<HistoryResponse, LlmError> {
-        let stream = self.service.stream_json_schema_with_thinking(
-            model, profile, Some(system), msgs,
-            serde_json::json!({"type":"object","properties":{"ok":{"type":"boolean"},"reason":{"type":"string"},"impossible":{"type":"boolean"}},"required":["ok","reason"],"additionalProperties":false}),
-            None, None, Some(llm_runtime::model::thinking::ThinkingConfig::Disabled), None, Some("hook_prompt"),
-        ).await?;
-        llm_runtime::stream_accumulator::accumulate_stream_salvaging(stream)
-            .await
-            .map_err(|(_, error)| error)
+        self.service.messages_create_buffered_stream(request).await
+    }
+
+    async fn messages_create(
+        &self,
+        request: OrchestratorApiRequest,
+    ) -> Result<HistoryResponse, LlmError> {
+        match request {
+            OrchestratorApiRequest::Main(request) => {
+                if let Some(settings) = crate::scheduled_turn::current() {
+                    let llm_runtime::MessagesCreateRequest {
+                        model: _,
+                        profile: _,
+                        system,
+                        messages,
+                        tools,
+                        opts,
+                    } = request;
+                    let mut canonical = self.build_scheduled_request(
+                        settings,
+                        system.as_ref(),
+                        opts.skip_global_cache_for_system_prompt,
+                        messages,
+                        tools,
+                        opts.max_output_tokens,
+                    )?;
+                    canonical.input.controls.anthropic.context_hint = opts.context_hint;
+                    canonical.execution.context_hint_beta = opts.context_hint_beta;
+                    canonical.execution.model_attempt = opts.model_attempt;
+                    canonical
+                        .execution
+                        .set_request_dispatch_admission(opts.request_dispatch_admission);
+                    canonical.execution.failed_stream_outlasted_timeout =
+                        opts.failed_stream_outlasted_timeout;
+                    canonical.execution.stream_fallback =
+                        opts.initial_consecutive_overloaded.is_some();
+                    // Scheduled turns own route, reasoning and query source;
+                    // the caller owns this logical call's retry controls.
+                    return self
+                        .service
+                        .execute_non_stream_request(
+                            canonical,
+                            llm_runtime::NonStreamingRequestClass::Auxiliary,
+                            llm_runtime::NonStreamingRetryOptions {
+                                initial_consecutive_overloaded: opts.initial_consecutive_overloaded,
+                                fallback: opts.fallback,
+                            },
+                        )
+                        .await;
+                }
+                self.service.messages_create(request).await
+            }
+            OrchestratorApiRequest::HookPrompt(request) => {
+                let stream = self.service.stream_json_schema_with_thinking(
+                    &request.model, request.profile.as_deref(), Some(&request.system), request.messages,
+                    serde_json::json!({"type":"object","properties":{"ok":{"type":"boolean"},"reason":{"type":"string"},"impossible":{"type":"boolean"}},"required":["ok","reason"],"additionalProperties":false}),
+                    None, None, Some(llm_runtime::model::thinking::ThinkingConfig::Disabled), None, Some("hook_prompt"),
+                ).await?;
+                llm_runtime::stream_accumulator::accumulate_stream_salvaging(stream)
+                    .await
+                    .map_err(|(_, error)| error)
+            }
+        }
     }
 
     async fn count_tokens(
@@ -266,101 +414,6 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     ) -> Result<Option<u64>, LlmError> {
         self.service
             .count_tokens_exact(model, profile, system, msgs, tools)
-            .await
-    }
-
-    async fn messages_create_with_context_hint(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        context_hint: Option<serde_json::Value>,
-    ) -> Result<HistoryResponse, LlmError> {
-        if let Some(settings) = crate::scheduled_turn::current() {
-            let mut request = self.build_scheduled_request(settings, system, msgs, tools, None)?;
-            request.input.controls.anthropic.context_hint = context_hint;
-            return self.service.execute_side_query_request(request).await;
-        }
-        self.service
-            .messages_create_with_context_hint(model, profile, system, msgs, tools, context_hint)
-            .await
-    }
-
-    async fn messages_create_with_opts(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        max_tokens: u32,
-    ) -> Result<HistoryResponse, LlmError> {
-        if let Some(settings) = crate::scheduled_turn::current() {
-            let request =
-                self.build_scheduled_request(settings, system, msgs, tools, Some(max_tokens))?;
-
-            return self.service.execute_side_query_request(request).await;
-        }
-        self.service
-            .messages_create_with_opts(model, profile, system, msgs, tools, max_tokens)
-            .await
-    }
-
-    async fn messages_create_with_fallback(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        fallback_model: Option<&str>,
-        is_subscriber: bool,
-        is_enterprise: bool,
-    ) -> Result<HistoryResponse, LlmError> {
-        if let Some(settings) = crate::scheduled_turn::current() {
-            let request = self.build_scheduled_request(settings, system, msgs, tools, None)?;
-
-            return self.service.execute_side_query_request(request).await;
-        }
-        self.service
-            .messages_create_with_fallback(
-                model,
-                profile,
-                system,
-                msgs,
-                tools,
-                fallback_model,
-                is_subscriber,
-                is_enterprise,
-            )
-            .await
-    }
-
-    async fn messages_create_seeded(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        initial_consecutive_overloaded: u8,
-    ) -> Result<HistoryResponse, LlmError> {
-        if let Some(settings) = crate::scheduled_turn::current() {
-            let request = self.build_scheduled_request(settings, system, msgs, tools, None)?;
-
-            return self.service.execute_side_query_request(request).await;
-        }
-        self.service
-            .messages_create_seeded(
-                model,
-                profile,
-                system,
-                msgs,
-                tools,
-                initial_consecutive_overloaded,
-            )
             .await
     }
 
@@ -498,38 +551,18 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         &self,
         model: &str,
         profile: Option<&str>,
-        system: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
+        skip_global_cache_for_system_prompt: bool,
     ) -> Result<(), LlmError> {
         self.service
-            .prewarm_responses_websocket(model, profile, system, messages, tools)
+            .prewarm_responses_websocket(model, profile, system, messages, tools, skip_global_cache_for_system_prompt)
             .await
     }
 
     async fn close_responses_websocket_session(&self) -> Result<(), LlmError> {
         self.service.close_responses_websocket_session().await
-    }
-
-    fn native_computer_provider(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-    ) -> Option<lingxi_llm_client::protocol::computer::NativeComputerProvider> {
-        use lingxi_llm_client::protocol::{ProtocolFamily, computer::NativeComputerProvider};
-        match self.service.protocol_for_model(model, profile).ok()? {
-            ProtocolFamily::OpenAiResponses => Some(NativeComputerProvider::OpenAi),
-            ProtocolFamily::AnthropicMessages => Some(NativeComputerProvider::Anthropic),
-            ProtocolFamily::GeminiInteractions => Some(NativeComputerProvider::Gemini),
-            _ => None,
-        }
-    }
-
-    async fn messages_create_buffered_stream(
-        &self,
-        request: llm_runtime::MessagesCreateRequest,
-    ) -> Result<HistoryResponse, LlmError> {
-        self.service.messages_create_buffered_stream(request).await
     }
 }
 
@@ -860,10 +893,25 @@ fn provider_label(profile_name: &str) -> &str {
     }
 }
 
-/// Subagent API seam — delegates 1:1 to the service. Subagent calls never carry
-/// a provider profile, so `profile` is always `None`.
+/// Subagent API seam — forwards every owned request field to the provider service.
 #[async_trait]
 impl agent::SubagentApiClient for ProviderApiAdapter {
+    fn refusal_api_text_snapshot(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<Option<lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot>, LlmError> {
+        self.resolved_refusal_api_text_snapshot(model, profile)
+    }
+
+    fn resolve_mod_media_route(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Option<llm_runtime::MediaRoute> {
+        self.service.resolve_media_route(model, profile).ok()
+    }
+
     fn consume_pending_near_limit_wrap_up_hint(&self) -> bool {
         self.service.consume_pending_near_limit_wrap_up_hint()
     }
@@ -893,156 +941,22 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         tracing::debug!(event = "usage_limit_near_wrapup");
     }
 
-    async fn messages_create(
+    async fn stream(
         &self,
-        model: &str,
-        system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-    ) -> Result<HistoryResponse, LlmError> {
-        self.service
-            .messages_create(model, None, system, messages, tools)
-            .await
-    }
-
-    async fn messages_create_stream(
-        &self,
-        model: &str,
-        system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        // Subagent stream: fast mode is a main-loop-only tier, so `speed=None`.
-        self.service
-            .stream(model, None, system, messages, tools, effort, None)
-            .await
-    }
-
-    async fn messages_create_stream_forced(
-        &self,
-        model: &str,
-        system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        forced_tool: Option<&str>,
-        effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        self.service
-            .stream_forced(model, None, system, messages, tools, forced_tool, effort)
-            .await
-    }
-
-    // ── Provider-routed variants (dual-LLM dual-PROVIDER) ──────────────────
-    // These forward the per-spawn `profile` to the multi-provider service so a
-    // dual-LLM candidate's resolved provider is honored, instead of dropping the
-    // profile (which forced every subagent onto the default provider). The
-    // default-trait impls delegate to the profile-less methods above; these
-    // overrides are the single place the subagent path becomes provider-aware.
-
-    async fn messages_create_in(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-    ) -> Result<HistoryResponse, LlmError> {
-        self.service
-            .messages_create(model, profile, system, messages, tools)
-            .await
-    }
-
-    async fn messages_create_stream_in(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        // Subagent stream: fast mode is a main-loop-only tier, so `speed=None`.
-        self.service
-            .stream(model, profile, system, messages, tools, effort, None)
-            .await
-    }
-
-    async fn messages_create_stream_forced_in(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        forced_tool: Option<&str>,
-        effort: Option<serde_json::Value>,
-    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        self.service
-            .stream_forced(model, profile, system, messages, tools, forced_tool, effort)
-            .await
-    }
-
-    // ── Fusion / COGS opts-aware variants (WP2a item 2, F002 sub-claim 3) ──
-    // The default trait impls silently drop `opts` and fall back to the
-    // profile-routed methods above (`max_output_tokens` never reaches the
-    // wire, `query_source_label` never tags telemetry). These overrides are
-    // the only place a `SubagentApiCallOpts`-aware caller (Fusion panels)
-    // becomes wire-faithful: `opts.max_output_tokens` → the request's
-    // `max_tokens`, `opts.query_source_label` → `QuerySource` (the label is
-    // already the `sidequery::QuerySource::as_str()` wire form — see
-    // `SubagentSpawnRequest::query_source_label`'s own doc — so it is threaded
-    // through verbatim without re-depending on `sidequery` here).
-
-    async fn messages_create_stream_in_opts(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        effort: Option<serde_json::Value>,
-        opts: agent::api::SubagentApiCallOpts,
+        request: agent::api::SubagentApiRequest,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         self.service
             .stream_with_attempt_opts(
-                model,
-                profile,
-                system,
-                messages,
-                tools,
-                None,
-                effort,
-                opts.max_output_tokens,
-                opts.query_source_label.as_deref(),
-                opts.model_attempt,
-            )
-            .await
-    }
-
-    async fn messages_create_stream_forced_in_opts(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        forced_tool: Option<&str>,
-        effort: Option<serde_json::Value>,
-        opts: agent::api::SubagentApiCallOpts,
-    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
-        self.service
-            .stream_with_attempt_opts(
-                model,
-                profile,
-                system,
-                messages,
-                tools,
-                forced_tool,
-                effort,
-                opts.max_output_tokens,
-                opts.query_source_label.as_deref(),
-                opts.model_attempt,
+                &request.model,
+                request.profile.as_deref(),
+                request.system.as_deref(),
+                request.messages,
+                request.tools,
+                request.forced_tool.as_deref(),
+                request.effort,
+                request.opts.max_output_tokens,
+                request.opts.query_source_label.as_deref(),
+                request.opts.model_attempt,
             )
             .await
     }
@@ -1054,37 +968,85 @@ impl StreamingApiClient for ProviderApiAdapter {
         &self,
         model: &str,
         profile: Option<&str>,
-        system: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
+        query_source: &str,
+        skip_global_cache_for_system_prompt: bool,
+        request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
+    ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        self.stream_with_effort_override(
+            model,
+            profile,
+            system,
+            messages,
+            tools,
+            None,
+            query_source,
+            skip_global_cache_for_system_prompt,
+            request_dispatch_admission,
+        )
+        .await
+    }
+
+    async fn stream_with_effort_override(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        effort: Option<&str>,
+        query_source: &str,
+        skip_global_cache_for_system_prompt: bool,
+        request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
-            let request = self.build_scheduled_request(settings, system, messages, tools, None)?;
+            let request = self.build_scheduled_request(
+                settings,
+                system,
+                skip_global_cache_for_system_prompt,
+                messages,
+                tools,
+                None,
+            )?;
+            let mut request = request;
+            request
+                .execution
+                .set_request_dispatch_admission(request_dispatch_admission);
             return self.service.stream_request(request).await;
         }
         // (M4 cc2.1.198) The MAIN loop carries the session's initial effort
         // (CLI `--effort` → `output_config.effort`); `None` (no flag) keeps
         // the pre-M4 body byte-identical.
         // (/fast) When the shared fast-mode flag is set AND the active model
-        // carries the canonical fast-mode capability, send `speed:"fast"` — the
+        // passes the resolved route/environment gate, send `speed:"fast"` — the
         // service's `beta_context` reads it back to add the fast-mode beta.
         // `None` (flag off, or an unsupported model) keeps the body unchanged.
         let speed = if self.fast_mode.load(std::sync::atomic::Ordering::SeqCst)
-            && model_supports_fast_mode(model)
+            && self
+                .service
+                .fast_model_allowed(model, profile)
+                .unwrap_or(false)
         {
             Some("fast".to_string())
         } else {
             None
         };
         self.service
-            .stream(
+            .stream_with_system_prompt(
                 model,
                 profile,
                 system,
                 messages,
                 tools,
-                self.current_effort(),
+                effort
+                    .map(|effort| serde_json::Value::String(effort.to_owned()))
+                    .or_else(|| self.current_effort()),
                 speed,
+                skip_global_cache_for_system_prompt,
+                Some(query_source),
+                request_dispatch_admission,
             )
             .await
     }
@@ -1246,6 +1208,548 @@ mod tests {
         })
     }
 
+    struct OwnedRequestWireCapture {
+        requests: Mutex<Vec<llm_runtime::services::sdk::HttpRequest>>,
+    }
+
+    #[async_trait]
+    impl Transport for OwnedRequestWireCapture {
+        async fn send(
+            &self,
+            request: llm_runtime::services::sdk::HttpRequest,
+        ) -> Result<
+            llm_runtime::services::sdk::StreamResponse,
+            llm_runtime::services::sdk::protocol::LlmError,
+        > {
+            self.requests.lock().unwrap().push(request);
+            Err(
+                llm_runtime::services::sdk::protocol::LlmError::InvalidRequest {
+                    message: "captured owned request".into(),
+                },
+            )
+        }
+    }
+
+    fn owned_request_capture() -> Arc<OwnedRequestWireCapture> {
+        Arc::new(OwnedRequestWireCapture {
+            requests: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn scheduled_disabled_settings() -> crate::scheduled_turn::ScheduledSettings {
+        crate::scheduled_turn::ScheduledSettings {
+            model: "claude-sonnet-4-20250514".into(),
+            provider: "anthropic".into(),
+            reasoning: lingxi_core::host::ReasoningSelection::Disabled,
+            thinking: llm_runtime::model::thinking::ThinkingConfig::Disabled,
+            effort: Some(serde_json::json!("low")),
+        }
+    }
+
+    fn custom_test_system_prompt(
+        text: &str,
+    ) -> lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput {
+        lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::custom_prompt(
+            lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(text),
+        )
+    }
+
+    #[tokio::test]
+    async fn owned_main_and_scheduled_context_hint_preserve_final_headers_and_single_body_field() {
+        let capture = owned_request_capture();
+        let adapter = make_adapter(capture.clone());
+        adapter
+            .service
+            .set_thinking(llm_runtime::model::thinking::ThinkingConfig::Enabled {
+                budget_tokens: 2048,
+            });
+        let hint = serde_json::json!({"enabled": true, "target_tokens_saved": 75_000});
+        for scheduled in [false, true] {
+            for offer in [None, Some(hint.clone())] {
+                let mut request = llm_runtime::MessagesCreateRequest::new(
+                    "claude-sonnet-4-20250514",
+                    Some("anthropic"),
+                    Some(custom_test_system_prompt("system")),
+                    vec![ConversationMessage::user(
+                        lingxi_core::types::MessageId::new(),
+                        "hello".into(),
+                    )],
+                    Vec::new(),
+                );
+                crate::turn_loop::api_recovery::apply_main_request_options(
+                    &mut request,
+                    Some(4096),
+                    Some(compaction::context_hint::ContextHintRequestParams {
+                        beta: compaction::context_hint::CONTEXT_HINT_BETA_HEADER,
+                        body: offer
+                            .as_ref()
+                            .map(|hint| serde_json::json!({"context_hint": hint})),
+                    }),
+                    Some("claude-legacy-no-tools"),
+                );
+                assert_eq!(request.opts.max_output_tokens, Some(4096));
+                assert!(request.opts.context_hint_beta);
+                assert_eq!(request.opts.context_hint, offer);
+                assert_eq!(
+                    request.opts.fallback,
+                    llm_runtime::FallbackPolicy::Models(vec!["claude-legacy-no-tools".into()])
+                );
+                let call = adapter.messages_create(crate::OrchestratorApiRequest::Main(request));
+                let error = if scheduled {
+                    crate::scheduled_turn::SETTINGS
+                        .scope(scheduled_disabled_settings(), call)
+                        .await
+                } else {
+                    call.await
+                }
+                .unwrap_err();
+                assert!(
+                    matches!(error, LlmError::InvalidRequest { message } if message == "captured owned request")
+                );
+                let requests = capture.requests.lock().unwrap();
+                let wire = requests.last().unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&wire.body).unwrap();
+                assert_eq!(body["max_tokens"], 4096);
+                assert_eq!(body.get("context_hint"), offer.as_ref());
+                assert!(body.pointer("/context_hint/context_hint").is_none());
+                let beta = wire
+                    .headers
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
+                    .unwrap()
+                    .1
+                    .as_str();
+                assert_eq!(
+                    beta.split(',')
+                        .filter(|part| *part == compaction::context_hint::CONTEXT_HINT_BETA_HEADER)
+                        .count(),
+                    1
+                );
+                assert!(
+                    wire.headers
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case("x-api-key")),
+                    "capture must observe the authenticated, sealed request"
+                );
+                if scheduled {
+                    assert!(body.get("thinking").is_none());
+                    // The native 4.0 model rejects effort even when scheduled
+                    // settings select a level; context-hint policy still applies.
+                    assert!(body.pointer("/output_config/effort").is_none());
+                } else {
+                    assert_eq!(body["thinking"]["budget_tokens"], 2048);
+                }
+            }
+        }
+        let mut ordinary = llm_runtime::MessagesCreateRequest::new(
+            "claude-sonnet-4-20250514",
+            Some("anthropic"),
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        ordinary.opts.max_output_tokens = Some(4096);
+        let _ = adapter
+            .messages_create(crate::OrchestratorApiRequest::Main(ordinary))
+            .await
+            .unwrap_err();
+        let requests = capture.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        let wire = requests.last().unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&wire.body).unwrap();
+        assert_eq!(
+            body["thinking"]["budget_tokens"], 2048,
+            "scheduled settings must not change the main thinking policy"
+        );
+        assert!(body.get("context_hint").is_none());
+        assert!(
+            !wire
+                .headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
+                .any(|(_, value)| value
+                    .split(',')
+                    .any(|beta| beta == compaction::context_hint::CONTEXT_HINT_BETA_HEADER)),
+            "per-request beta activation must not leak into the next request"
+        );
+    }
+
+    #[tokio::test]
+    async fn main_nonstream_preserves_dispatch_admission_for_scheduled_and_ordinary_calls() {
+        for scheduled in [false, true] {
+            let capture = owned_request_capture();
+            let adapter = make_adapter(capture.clone());
+            let mut request = llm_runtime::MessagesCreateRequest::new(
+                "claude-sonnet-4-20250514",
+                Some("anthropic"),
+                None,
+                vec![ConversationMessage::user(
+                    lingxi_core::types::MessageId::new(),
+                    "hello".into(),
+                )],
+                Vec::new(),
+            );
+            request.opts.request_dispatch_admission =
+                Some(llm_runtime::RequestDispatchAdmission::new(|| false));
+            let call = adapter.messages_create(crate::OrchestratorApiRequest::Main(request));
+            let result = if scheduled {
+                crate::scheduled_turn::SETTINGS
+                    .scope(scheduled_disabled_settings(), call)
+                    .await
+            } else {
+                call.await
+            };
+
+            assert!(matches!(
+                result,
+                Err(LlmError::RequestDispatchRejected {
+                    prior_dispatch: false
+                })
+            ));
+            assert!(
+                capture.requests.lock().unwrap().is_empty(),
+                "{scheduled} Main nonstream denial must stop before SDK transport"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn main_stream_preserves_dispatch_admission_for_scheduled_and_ordinary_calls() {
+        for scheduled in [false, true] {
+            let capture = owned_request_capture();
+            let adapter = make_adapter(capture.clone());
+            let messages = vec![ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                "hello".into(),
+            )];
+            let stream = crate::conversation::StreamingApiClient::stream(
+                &adapter,
+                "claude-sonnet-4-20250514",
+                Some("anthropic"),
+                None,
+                messages,
+                Vec::new(),
+                "sdk",
+                false,
+                Some(llm_runtime::RequestDispatchAdmission::new(|| false)),
+            );
+            let result = if scheduled {
+                crate::scheduled_turn::SETTINGS
+                    .scope(scheduled_disabled_settings(), stream)
+                    .await
+            } else {
+                stream.await
+            };
+
+            assert!(matches!(
+                result,
+                Err(LlmError::RequestDispatchRejected {
+                    prior_dispatch: false
+                })
+            ));
+            assert!(
+                capture.requests.lock().unwrap().is_empty(),
+                "{scheduled} Main stream denial must stop before SDK transport"
+            );
+        }
+    }
+
+    fn dispatch_test_generation_guard(
+        generation: lingxi_core::host::CancellationToken,
+    ) -> Arc<dyn hooks::attachment::HookPublicationGuard> {
+        Arc::new(crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(
+            generation,
+            Arc::new(tokio::sync::Mutex::new(())),
+        ))
+    }
+
+    #[tokio::test]
+    async fn main_dispatch_does_not_reject_a_guarded_row_pruned_by_compact_boundary() {
+        let capture = owned_request_capture();
+        let adapter = make_adapter(capture.clone());
+        let generation = lingxi_core::host::CancellationToken::new();
+        let pruned_id = lingxi_core::types::MessageId::new();
+        let messages = vec![
+            ConversationMessage::user_meta(pruned_id, "stale guarded pre-boundary row".into()),
+            ConversationMessage::System {
+                id: lingxi_core::types::MessageId::new(),
+                content: "Conversation compacted".into(),
+                subtype: Some("compact_boundary".into()),
+                compact_metadata: None,
+                model_fallback: None,
+                refusal_fallback: None,
+            },
+            ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                "current post-boundary summary".into(),
+            ),
+        ];
+        let normalized =
+            llm_runtime::convert::normalize_messages_for_api(messages.clone());
+        assert_eq!(normalized.len(), 1);
+        assert!(!normalized.iter().any(|message| message.id() == pruned_id));
+        assert!(normalized[0]
+            .text_content()
+            .contains("current post-boundary summary"));
+
+        let guard = dispatch_test_generation_guard(generation.clone());
+        let admission = crate::prompt::async_hook_response::request_dispatch_admission(
+            &messages,
+            &[(pruned_id, guard)],
+        )
+        .expect("the pre-boundary row is guarded before host normalization");
+        generation.cancel();
+
+        let mut request = llm_runtime::MessagesCreateRequest::new(
+            "claude-sonnet-4-20250514",
+            Some("anthropic"),
+            None,
+            messages,
+            Vec::new(),
+        );
+        request.opts.request_dispatch_admission = Some(admission);
+        let result = adapter
+            .messages_create(crate::OrchestratorApiRequest::Main(request))
+            .await;
+
+        assert!(
+            !matches!(
+                &result,
+                Err(LlmError::RequestDispatchRejected { .. })
+            ),
+            "a guard for a source row removed by the final semantic history must not block the remaining request"
+        );
+        assert!(result.is_err(), "the in-memory transport records then rejects the request");
+        let requests = capture.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "the current Main request reaches SDK transport");
+        let wire = String::from_utf8(requests[0].body.to_vec()).expect("JSON request bytes");
+        assert!(!wire.contains("stale guarded pre-boundary row"), "pruned content is absent on wire");
+        assert!(wire.contains("current post-boundary summary"), "surviving content is sent");
+    }
+
+    #[tokio::test]
+    async fn stream_dispatch_keeps_a_stale_guard_for_content_merged_from_its_source_row() {
+        let capture = owned_request_capture();
+        let adapter = make_adapter(capture.clone());
+        let generation = lingxi_core::host::CancellationToken::new();
+        let first_id = lingxi_core::types::MessageId::new();
+        let guarded_id = lingxi_core::types::MessageId::new();
+        let messages = vec![
+            ConversationMessage::user(first_id, "ordinary user source".into()),
+            ConversationMessage::user_meta(guarded_id, "stale guarded hook reminder".into()),
+        ];
+        let normalized =
+            llm_runtime::convert::normalize_messages_for_api(messages.clone());
+        assert_eq!(normalized.len(), 1, "adjacent user rows merge");
+        assert_eq!(normalized[0].id(), first_id, "normalization retains the first user ID");
+        assert!(!normalized.iter().any(|message| message.id() == guarded_id));
+        assert!(normalized[0]
+            .text_content()
+            .contains("stale guarded hook reminder"), "the guarded source content survives the merge");
+
+        let guard = dispatch_test_generation_guard(generation.clone());
+        let admission = crate::prompt::async_hook_response::request_dispatch_admission(
+            &messages,
+            &[(guarded_id, guard)],
+        )
+        .expect("the merged source row is guarded before host normalization");
+        generation.cancel();
+
+        let result = crate::conversation::StreamingApiClient::stream(
+            &adapter,
+            "claude-sonnet-4-20250514",
+            Some("anthropic"),
+            None,
+            messages,
+            Vec::new(),
+            "sdk",
+            false,
+            Some(admission),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(LlmError::RequestDispatchRejected {
+                prior_dispatch: false
+            })
+        ));
+        assert!(
+            capture.requests.lock().unwrap().is_empty(),
+            "stale content merged into the final stream prompt must be rejected before SDK transport"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn owned_main_and_scheduled_seed_keep_the_ordered_fallback_threshold() {
+        let hint = serde_json::json!({"enabled": true, "target_tokens_saved": 75_000});
+        for scheduled in [false, true] {
+            for offer in [None, Some(hint.clone())] {
+                let overloaded = ProviderResponse::json(
+                    529,
+                    serde_json::json!({"type":"error", "error":{"type":"overloaded_error", "message":"Overloaded"}}),
+                );
+                let transport = Arc::new(FakeTransport {
+                    responses: Mutex::new(vec![
+                        FakeResponse::Ok(overloaded.clone()),
+                        FakeResponse::Ok(overloaded),
+                        FakeResponse::Ok(ProviderResponse::json(200, ok_response_json())),
+                    ]),
+                    seen: Mutex::new(Vec::new()),
+                });
+                let adapter = make_adapter(transport.clone());
+                adapter
+                    .service
+                    .set_thinking(llm_runtime::model::thinking::ThinkingConfig::Disabled);
+                let mut request = llm_runtime::MessagesCreateRequest::new(
+                    "claude-sonnet-4-20250514",
+                    Some("anthropic"),
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                );
+                request.opts.initial_consecutive_overloaded = Some(1);
+                crate::turn_loop::api_recovery::apply_main_request_options(
+                    &mut request,
+                    Some(4096),
+                    Some(compaction::context_hint::ContextHintRequestParams {
+                        beta: compaction::context_hint::CONTEXT_HINT_BETA_HEADER,
+                        body: offer
+                            .as_ref()
+                            .map(|hint| serde_json::json!({"context_hint": hint})),
+                    }),
+                    Some("claude-legacy-no-tools"),
+                );
+                assert_eq!(request.opts.max_output_tokens, Some(4096));
+                assert_eq!(request.opts.context_hint, offer);
+                assert!(request.opts.context_hint_beta);
+                assert_eq!(
+                    request.opts.fallback,
+                    llm_runtime::FallbackPolicy::Models(vec!["claude-legacy-no-tools".into()])
+                );
+                assert_eq!(request.opts.initial_consecutive_overloaded, Some(1));
+                let call = adapter.messages_create(crate::OrchestratorApiRequest::Main(request));
+                if scheduled {
+                    let mut settings = scheduled_disabled_settings();
+                    settings.effort = None;
+                    crate::scheduled_turn::SETTINGS.scope(settings, call).await
+                } else {
+                    call.await
+                }
+                .unwrap();
+                let seen = transport.seen.lock().unwrap();
+                assert_eq!(seen.len(), 3);
+                let models: Vec<_> = seen
+                    .iter()
+                    .map(|request| request.body_json["model"].as_str().unwrap())
+                    .collect();
+                assert_eq!(
+                    models,
+                    [
+                        "claude-sonnet-4-20250514",
+                        "claude-sonnet-4-20250514",
+                        "claude-legacy-no-tools"
+                    ],
+                    "the prior streaming 529 must consume the first overload slot"
+                );
+                for wire in seen.iter() {
+                    assert_eq!(wire.body_json["max_tokens"], 4096);
+                    assert_eq!(wire.body_json.get("context_hint"), offer.as_ref());
+                    assert!(wire
+                        .body_json
+                        .pointer("/context_hint/context_hint")
+                        .is_none());
+                    let beta = wire
+                        .headers
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
+                        .unwrap()
+                        .1
+                        .as_str();
+                    assert_eq!(
+                        beta.split(',')
+                            .filter(
+                                |part| *part == compaction::context_hint::CONTEXT_HINT_BETA_HEADER
+                            )
+                            .count(),
+                        1
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_main_schema_and_hook_policy_remain_separate_inside_a_schedule() {
+        let capture = owned_request_capture();
+        let adapter = make_adapter_with_session_tool_choice(
+            capture.clone(),
+            Some(llm_runtime::ToolChoice::Tool {
+                name: "StructuredOutput".into(),
+            }),
+            "claude-sonnet-4-6",
+        );
+        adapter
+            .service
+            .set_thinking(llm_runtime::model::thinking::ThinkingConfig::Disabled);
+        let tool = serde_json::json!({"name":"StructuredOutput", "description":"schema", "input_schema":{"type":"object", "properties":{}}});
+        let main = llm_runtime::MessagesCreateRequest::new(
+            "claude-sonnet-4-6",
+            Some("anthropic"),
+            None,
+            Vec::new(),
+            vec![tool],
+        );
+        let main_error = adapter
+            .messages_create(crate::OrchestratorApiRequest::Main(main))
+            .await
+            .unwrap_err();
+        let hook = crate::HookPromptRequest::new(
+            "claude-sonnet-4-6",
+            Some("anthropic"),
+            "evaluate hook",
+            Vec::new(),
+        );
+        let hook_error = crate::scheduled_turn::SETTINGS
+            .scope(
+                scheduled_disabled_settings(),
+                adapter.messages_create(crate::OrchestratorApiRequest::HookPrompt(hook)),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&main_error, LlmError::InvalidRequest { message } if message == "captured owned request"),
+            "main request must reach the capture transport: {main_error:?}",
+        );
+        assert!(
+            matches!(&hook_error, LlmError::InvalidRequest { message } if message == "captured owned request"),
+            "hook request must reach the capture transport: {hook_error:?}",
+        );
+        let requests = capture.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            2,
+            "both requests must reach the sealed transport"
+        );
+        let main: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(
+            main["tool_choice"],
+            serde_json::json!({"type":"tool", "name":"StructuredOutput"})
+        );
+        let hook: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert!(hook.get("tool_choice").is_none());
+        assert!(hook.get("thinking").is_none());
+        assert_eq!(hook["output_config"]["format"]["type"], "json_schema");
+        assert_eq!(
+            hook["output_config"]["format"]["schema"]["required"],
+            serde_json::json!(["ok", "reason"])
+        );
+        assert!(
+            hook["output_config"].get("effort").is_none(),
+            "hook evaluation must not inherit scheduled effort"
+        );
+    }
+
     #[tokio::test]
     async fn scheduled_settings_reach_wire_without_changing_adapter_defaults() {
         let transport = FakeTransport::always(ProviderResponse {
@@ -1273,6 +1777,7 @@ mod tests {
                     None,
                     Vec::new(),
                     Vec::new(),
+                    "sdk", false, None,
                 ),
             )
             .await;
@@ -1283,9 +1788,194 @@ mod tests {
         assert_eq!(adapter.current_effort(), Some(serde_json::json!("low")));
     }
 
+    #[tokio::test]
+    async fn query_fallback_route_overrides_scheduled_main_only() {
+        let capture = owned_request_capture();
+        let adapter = make_adapter(capture.clone());
+        let route = crate::query_model::ModelRoute {
+            model: "claude-legacy-no-tools".into(),
+            profile: Some("anthropic".into()),
+        };
+        let scheduled = scheduled_disabled_settings();
+        crate::scheduled_turn::SETTINGS
+            .scope(
+                scheduled.clone(),
+                crate::query_model::ROUTE.scope(Some(route), async {
+                    let _ = adapter
+                        .stream(
+                            "caller-cannot-override-scheduled",
+                            None,
+                            None,
+                            Vec::new(),
+                            Vec::new(),
+                            "sdk", false, None,
+                        )
+                        .await;
+                    let request = llm_runtime::MessagesCreateRequest::new(
+                        "caller-cannot-override-scheduled",
+                        None,
+                        None,
+                        Vec::new(),
+                        Vec::new(),
+                    );
+                    let _ = adapter
+                        .messages_create(crate::OrchestratorApiRequest::Main(request))
+                        .await;
+                    let hook = crate::HookPromptRequest::new(
+                        "claude-sonnet-4-20250514",
+                        Some("anthropic"),
+                        "fixture hook",
+                        Vec::new(),
+                    );
+                    let _ = adapter
+                        .messages_create(crate::OrchestratorApiRequest::HookPrompt(hook))
+                        .await;
+                }),
+            )
+            .await;
+        crate::scheduled_turn::SETTINGS
+            .scope(
+                scheduled,
+                adapter.stream(
+                    "untrusted-caller",
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    "sdk", false, None,
+                ),
+            )
+            .await
+            .ok();
+        let requests = capture.requests.lock().unwrap();
+        let models: Vec<String> = requests
+            .iter()
+            .map(|r| {
+                serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["model"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            models,
+            [
+                "claude-legacy-no-tools",
+                "claude-legacy-no-tools",
+                "claude-sonnet-4-20250514",
+                "claude-sonnet-4-20250514"
+            ]
+        );
+        assert!(crate::query_model::current().is_none());
+    }
+
     /// Build the thin `ProviderApiAdapter` over an `ApiService` constructed exactly
     /// as the original `make_adapter` did (a single anthropic profile, ApiKey auth).
-    fn make_adapter(transport: Arc<dyn Transport>) -> ProviderApiAdapter {
+    pub(super) fn make_adapter(transport: Arc<dyn Transport>) -> ProviderApiAdapter {
+        make_adapter_with_session_tool_choice(transport, None, "claude-sonnet-4-20250514")
+    }
+
+    #[test]
+    fn main_and_child_refusal_snapshots_share_current_route_facts_without_transport() {
+        use lingxi_core::host::refusal_api_text::{
+            RefusalApiTextSnapshot, RefusalBrandCopyOwned, RefusalProviderKind,
+        };
+
+        let capture = owned_request_capture();
+        let routes = Arc::new(Mutex::new(Vec::new()));
+        let feedback = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let adapter =
+            make_adapter(capture.clone()).with_refusal_api_text_snapshot_source(Arc::new({
+                let routes = routes.clone();
+                let feedback = feedback.clone();
+                move |model, profile| {
+                    routes
+                        .lock()
+                        .unwrap()
+                        .push((model.to_owned(), profile.map(str::to_owned)));
+                    Ok(RefusalApiTextSnapshot {
+                        serving_model: Some(model.to_owned()),
+                        model_eligible: true,
+                        display_label: Some("Claude Sonnet 5".into()),
+                        model_family: Some("sonnet".into()),
+                        fable_copy_suppressed: false,
+                        opus_5_5_exception: false,
+                        help_url: Some("https://support.claude.com/en/articles/8106465".into()),
+                        provider: RefusalProviderKind::FirstParty,
+                        interactive: true,
+                        feedback_eligible: feedback.load(std::sync::atomic::Ordering::SeqCst),
+                        brand: RefusalBrandCopyOwned {
+                            api_error_prefix: "API Error".into(),
+                            product_name: format!("{} Code", branding::PRODUCT_NAME),
+                            generic_model_label: branding::PRODUCT_NAME.into(),
+                        },
+                    })
+                }
+            }));
+
+        let main =
+            OrchestratorApiClient::refusal_api_text_snapshot(&adapter, "claude-sonnet-5", Some(""))
+                .unwrap()
+                .unwrap();
+        feedback.store(false, std::sync::atomic::Ordering::SeqCst);
+        let child = agent::SubagentApiClient::refusal_api_text_snapshot(
+            &adapter,
+            "claude-sonnet-5[1m]",
+            None,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(main.serving_model.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(child.serving_model.as_deref(), Some("claude-sonnet-5[1m]"));
+        assert!(main.feedback_eligible);
+        assert!(!child.feedback_eligible);
+        let main_text = main.format(Some("cyber"), Some("req_main")).unwrap();
+        let child_text = child.format(Some("cyber"), Some("req_child")).unwrap();
+        assert!(main_text.contains("Send feedback with /feedback"));
+        assert!(!child_text.contains("Send feedback with /feedback"));
+        assert!(main_text.ends_with("Request ID: req_main"));
+        assert!(child_text.ends_with("Request ID: req_child"));
+        assert_eq!(
+            *routes.lock().unwrap(),
+            [
+                ("claude-sonnet-5".to_owned(), Some(String::new())),
+                ("claude-sonnet-5[1m]".to_owned(), None),
+            ]
+        );
+        assert!(capture.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn refusal_snapshot_absence_and_resolution_failure_are_not_synthetic_facts() {
+        let capture = owned_request_capture();
+        let adapter = make_adapter(capture.clone());
+        assert!(OrchestratorApiClient::refusal_api_text_snapshot(
+            &adapter,
+            "claude-sonnet-5",
+            Some("anthropic"),
+        )
+        .unwrap()
+        .is_none());
+        let adapter = adapter.with_refusal_api_text_snapshot_source(Arc::new(|_, _| {
+            Err(LlmError::ModelUnavailable)
+        }));
+        assert!(matches!(
+            OrchestratorApiClient::refusal_api_text_snapshot(&adapter, "unavailable", None),
+            Err(LlmError::ModelUnavailable)
+        ));
+        assert!(matches!(
+            agent::SubagentApiClient::refusal_api_text_snapshot(&adapter, "unavailable", None),
+            Err(LlmError::ModelUnavailable)
+        ));
+        assert!(capture.requests.lock().unwrap().is_empty());
+    }
+
+    fn make_adapter_with_session_tool_choice(
+        transport: Arc<dyn Transport>,
+        main_choice: Option<llm_runtime::ToolChoice>,
+        request_model: &str,
+    ) -> ProviderApiAdapter {
         std::env::set_var("ADAPTER_TEST_KEY", "test-key");
         let client = Arc::new(
             ModelRuntime::from_config(ClientConfig {
@@ -1302,8 +1992,8 @@ mod tests {
                     },
                     models: vec![
                         ModelProfile {
-                            display_model: "claude-sonnet-4-20250514".to_string(),
-                            request_model: "claude-sonnet-4-20250514".to_string(),
+                            display_model: request_model.to_string(),
+                            request_model: request_model.to_string(),
                             billing_model: "claude-sonnet-4".to_string(),
                             aliases: vec!["claude".to_string()],
                             description: None,
@@ -1312,6 +2002,8 @@ mod tests {
                                 streaming: true,
                                 tools: true,
                                 reasoning: true,
+                                // This fixture exercises native schema requests as well as tools.
+                                structured_output: true,
                                 ..Default::default()
                             },
                         },
@@ -1342,7 +2034,7 @@ mod tests {
             })
             .expect("client"),
         );
-        ProviderApiAdapter::new(Arc::new(ApiService::new(
+        let service = ApiService::new(
             client,
             transport,
             SubscriberState::default(),
@@ -1354,7 +2046,12 @@ mod tests {
             "0.0.0",
             None,
             None,
-        )))
+        );
+        let service = match main_choice {
+            Some(choice) => service.with_forced_tool_choice(choice),
+            None => service,
+        };
+        ProviderApiAdapter::new(Arc::new(service))
     }
 
     #[tokio::test]
@@ -1430,6 +2127,7 @@ mod tests {
                 },
                 lingxi_core::types::ContentBlock::Text {
                     text: "old answer".into(),
+                    citations: None,
                 },
             ],
             stop_reason: Some("end_turn".into()),
@@ -1441,11 +2139,13 @@ mod tests {
                 false,
                 OrchestratorApiClient::messages_create(
                     adapter.as_ref(),
-                    "claude-sonnet-4-20250514",
-                    None,
-                    None,
-                    vec![old.clone()],
-                    vec![],
+                    crate::OrchestratorApiRequest::Main(llm_runtime::MessagesCreateRequest::new(
+                        "claude-sonnet-4-20250514",
+                        None,
+                        None,
+                        vec![old.clone()],
+                        vec![],
+                    )),
                 ),
             );
             tokio::pin!(call);
@@ -1555,6 +2255,7 @@ mod tests {
                 },
                 lingxi_core::types::ContentBlock::Text {
                     text: "answer".into(),
+                    citations: None,
                 },
             ],
             stop_reason: Some("end_turn".into()),
@@ -1566,22 +2267,26 @@ mod tests {
                 a.clone(),
                 OrchestratorApiClient::messages_create(
                     &adapter,
-                    "claude-sonnet-4-20250514",
-                    None,
-                    Some("reject-session"),
-                    vec![old.clone()],
-                    vec![]
+                    crate::OrchestratorApiRequest::Main(llm_runtime::MessagesCreateRequest::new(
+                        "claude-sonnet-4-20250514",
+                        None,
+                        Some(custom_test_system_prompt("reject-session")),
+                        vec![old.clone()],
+                        vec![]
+                    ))
                 )
             ),
             scope_thinking_recovery(
                 b.clone(),
                 OrchestratorApiClient::messages_create(
                     &adapter,
-                    "claude-sonnet-4-20250514",
-                    None,
-                    Some("healthy-session"),
-                    vec![old.clone()],
-                    vec![]
+                    crate::OrchestratorApiRequest::Main(llm_runtime::MessagesCreateRequest::new(
+                        "claude-sonnet-4-20250514",
+                        None,
+                        Some(custom_test_system_prompt("healthy-session")),
+                        vec![old.clone()],
+                        vec![]
+                    ))
                 )
             ),
         );
@@ -1598,6 +2303,7 @@ mod tests {
                 },
                 lingxi_core::types::ContentBlock::Text {
                     text: "fresh answer".into(),
+                    citations: None,
                 },
             ],
             stop_reason: Some("end_turn".into()),
@@ -1612,22 +2318,26 @@ mod tests {
                 a.clone(),
                 OrchestratorApiClient::messages_create(
                     &adapter,
-                    "claude-sonnet-4-20250514",
-                    None,
-                    Some("next-a"),
-                    history.clone(),
-                    vec![]
+                    crate::OrchestratorApiRequest::Main(llm_runtime::MessagesCreateRequest::new(
+                        "claude-sonnet-4-20250514",
+                        None,
+                        Some(custom_test_system_prompt("next-a")),
+                        history.clone(),
+                        vec![]
+                    ))
                 )
             ),
             scope_thinking_recovery(
                 b.clone(),
                 OrchestratorApiClient::messages_create(
                     &adapter,
-                    "claude-sonnet-4-20250514",
-                    None,
-                    Some("next-b"),
-                    history,
-                    vec![]
+                    crate::OrchestratorApiRequest::Main(llm_runtime::MessagesCreateRequest::new(
+                        "claude-sonnet-4-20250514",
+                        None,
+                        Some(custom_test_system_prompt("next-b")),
+                        history,
+                        vec![]
+                    ))
                 )
             ),
         );
@@ -1734,45 +2444,46 @@ mod tests {
         let adapter = make_adapter(transport.clone());
         let seam: Arc<dyn agent::SubagentApiClient> = Arc::new(adapter);
         let result = seam
-            .messages_create(
-                "claude-sonnet-4-20250514",
-                Some("sys"),
-                Vec::new(),
-                Vec::new(),
-            )
+            .stream(agent::api::SubagentApiRequest {
+                model: "claude-sonnet-4-20250514".into(),
+                profile: None,
+                system: Some("sys".into()),
+                messages: Vec::new(),
+                tools: Vec::new(),
+                forced_tool: None,
+                effort: None,
+                opts: agent::api::SubagentApiCallOpts::default(),
+            })
             .await;
         // May succeed or fail with UnsupportedCapability if stream not configured,
         // but must not panic.
         let _ = result;
     }
 
-    /// WP2a item 2 (F002 sub-claim 3): `messages_create_stream_in_opts` /
-    /// `messages_create_stream_forced_in_opts` must thread
-    /// `SubagentApiCallOpts::max_output_tokens` onto the WIRE request's
-    /// `max_tokens` — the trait DEFAULTS silently drop `opts` and fall back to
-    /// the profile-routed methods, which never touch it. `FakeTransport`'s
-    /// `open_stream` records the request even though it always errors (no
-    /// scripted `StreamingResponse`), so this asserts purely on what reached
-    /// the transport, not on a successful round-trip.
+    /// The owned request carries the output ceiling for both ordinary and
+    /// forced-tool calls. FakeTransport records stream-opening requests before
+    /// returning its scripted transport error, so the assertions inspect the
+    /// real wire body without requiring a successful model response.
     #[tokio::test]
-    async fn opts_variants_thread_max_output_tokens_onto_the_wire() {
+    async fn subagent_stream_request_threads_output_limit_onto_the_wire() {
         let auto_transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let auto_seam: Arc<dyn agent::SubagentApiClient> =
             Arc::new(make_adapter(auto_transport.clone()));
         let auto_error = auto_seam
-            .messages_create_stream_in_opts(
-                "claude-sonnet-4-20250514",
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-                None,
-                agent::api::SubagentApiCallOpts {
+            .stream(agent::api::SubagentApiRequest {
+                model: "claude-sonnet-4-20250514".into(),
+                profile: None,
+                system: None,
+                messages: Vec::new(),
+                tools: Vec::new(),
+                forced_tool: None,
+                effort: None,
+                opts: agent::api::SubagentApiCallOpts {
                     max_output_tokens: Some(777),
                     model_attempt: None,
                     query_source_label: Some("fusion_panel".to_string()),
                 },
-            )
+            })
             .await
             .err();
         let auto_seen = auto_transport.seen.lock().unwrap();
@@ -1792,20 +2503,20 @@ mod tests {
         let forced_seam: Arc<dyn agent::SubagentApiClient> =
             Arc::new(make_adapter(forced_transport.clone()));
         let _ = forced_seam
-            .messages_create_stream_forced_in_opts(
-                "claude-sonnet-4-20250514",
-                None,
-                None,
-                Vec::new(),
-                vec![serde_json::json!({"name":"StructuredOutput","description":"Return structured output","input_schema":{"type":"object","properties":{}}})],
-                Some("StructuredOutput"),
-                None,
-                agent::api::SubagentApiCallOpts {
+            .stream(agent::api::SubagentApiRequest {
+                model: "claude-sonnet-4-20250514".into(),
+                profile: None,
+                system: None,
+                messages: Vec::new(),
+                tools: vec![serde_json::json!({"name":"StructuredOutput","description":"Return structured output","input_schema":{"type":"object","properties":{}}})],
+                forced_tool: Some("StructuredOutput".into()),
+                effort: None,
+                opts: agent::api::SubagentApiCallOpts {
                     max_output_tokens: Some(321),
                     model_attempt: None,
                     query_source_label: Some("fusion_panel".to_string()),
                 },
-            )
+            })
             .await;
         let forced_seen = forced_transport.seen.lock().unwrap();
         let forced_request = forced_seen
@@ -1820,6 +2531,154 @@ mod tests {
             "forced opts-aware wire max_tokens must equal the requested ceiling; body: {}",
             forced_request.body_json
         );
+    }
+
+    #[tokio::test]
+    async fn child_tool_choice_is_request_local_on_shared_main_structured_output_service() {
+        struct CaptureWire {
+            bodies: Mutex<Vec<Vec<u8>>>,
+        }
+        #[async_trait]
+        impl Transport for CaptureWire {
+            async fn send(
+                &self,
+                request: llm_runtime::services::sdk::HttpRequest,
+            ) -> Result<
+                llm_runtime::services::sdk::StreamResponse,
+                llm_runtime::services::sdk::protocol::LlmError,
+            > {
+                self.bodies.lock().unwrap().push(request.body.to_vec());
+                Err(
+                    llm_runtime::services::sdk::protocol::LlmError::InvalidRequest {
+                        message: "captured tool-choice request".into(),
+                    },
+                )
+            }
+        }
+
+        let transport = Arc::new(CaptureWire {
+            bodies: Mutex::new(Vec::new()),
+        });
+        let adapter = make_adapter_with_session_tool_choice(
+            transport.clone(),
+            Some(llm_runtime::ToolChoice::Tool {
+                name: "StructuredOutput".into(),
+            }),
+            "claude-sonnet-4-20250514",
+        );
+        // This fixture model rejects forced tools with manual thinking.
+        // Select a valid main structured-output session for all four requests.
+        adapter
+            .service
+            .set_thinking(llm_runtime::model::thinking::ThinkingConfig::Disabled);
+        let child_seam: &dyn agent::SubagentApiClient = &adapter;
+        let tool = |name| {
+            serde_json::json!({
+                "name": name,
+                "description": "Test tool",
+                "input_schema": {"type": "object", "properties": {}}
+            })
+        };
+        let cases = [
+            ("ordinary-child", None, vec!["Read"], 111),
+            ("fusion-panel", None, vec!["Read", "PanelResult"], 222),
+            (
+                "designated-child",
+                Some("PanelResult"),
+                vec!["Read", "PanelResult"],
+                333,
+            ),
+        ];
+        for (index, (label, forced_tool, tool_names, ceiling)) in cases.into_iter().enumerate() {
+            let error = child_seam
+                .stream(agent::api::SubagentApiRequest {
+                    model: "claude-sonnet-4-20250514".into(),
+                    profile: Some("anthropic".into()),
+                    system: Some("child-system".into()),
+                    messages: vec![ConversationMessage::user(
+                        lingxi_core::types::MessageId::new(),
+                        label.into(),
+                    )],
+                    tools: tool_names.iter().map(|name| tool(*name)).collect(),
+                    forced_tool: forced_tool.map(str::to_string),
+                    effort: None,
+                    opts: agent::api::SubagentApiCallOpts {
+                        max_output_tokens: Some(ceiling),
+                        model_attempt: None,
+                        query_source_label: Some(label.into()),
+                    },
+                })
+                .await
+                .err()
+                .expect("the capture transport returns a terminal scripted error");
+            assert!(matches!(
+                error,
+                LlmError::InvalidRequest { message }
+                    if message == "captured tool-choice request"
+            ));
+            let bodies = transport.bodies.lock().unwrap();
+            assert_eq!(bodies.len(), index + 1, "one actual dispatch per child");
+            let body: serde_json::Value = serde_json::from_slice(&bodies[index]).unwrap();
+            assert_eq!(body["model"], "claude-sonnet-4-20250514");
+            assert_eq!(body["max_tokens"], ceiling);
+            assert_eq!(body["messages"][0]["content"][0]["text"], label);
+            let actual_tools = body["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(actual_tools, tool_names, "no hidden main schema tool");
+            match forced_tool {
+                Some(name) => assert_eq!(
+                    body["tool_choice"],
+                    serde_json::json!({"type": "tool", "name": name})
+                ),
+                None => assert!(
+                    body.get("tool_choice").is_none(),
+                    "{label} must omit tool_choice from the actual wire body: {body}"
+                ),
+            }
+        }
+
+        let main_error = StreamingApiClient::stream(
+            &adapter,
+            "claude-sonnet-4-20250514",
+            Some("anthropic"),
+            Some(&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::custom_prompt(
+                lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
+                    "main-system",
+                ),
+            )),
+            vec![ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                "main-turn".into(),
+            )],
+            vec![tool("Read"), tool("StructuredOutput")],
+            "sdk", false, None,
+        )
+        .await
+        .err()
+        .expect("the main request reaches the same capture transport");
+        let bodies = transport.bodies.lock().unwrap();
+        let captured_main = bodies
+            .get(3)
+            .map(|body| serde_json::from_slice::<serde_json::Value>(body).unwrap());
+        assert!(
+            matches!(
+                &main_error,
+                LlmError::InvalidRequest { message } if message == "captured tool-choice request"
+            ),
+            "main error: {main_error:?}; captured main request: {captured_main:?}; actual dispatch count: {}",
+            bodies.len()
+        );
+        assert_eq!(bodies.len(), 4);
+        let main_body: serde_json::Value = serde_json::from_slice(&bodies[3]).unwrap();
+        assert_eq!(
+            main_body["tool_choice"],
+            serde_json::json!({"type": "tool", "name": "StructuredOutput"})
+        );
+        assert_eq!(main_body["tools"][1]["name"], "StructuredOutput");
     }
 
     /// The trait default (used by mocks / non-routing impls) is the byte/4
@@ -1878,13 +2737,15 @@ mod tests {
 
         let adapter = make_adapter(transport);
         let llm_result = adapter
-            .messages_create(
-                "claude-sonnet-4-20250514",
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-            )
+            .messages_create(crate::OrchestratorApiRequest::Main(
+                llm_runtime::MessagesCreateRequest::new(
+                    "claude-sonnet-4-20250514",
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ))
             .await;
 
         // Clean up before any assert that might panic.
@@ -1997,13 +2858,15 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, response_json));
         let adapter = make_adapter_with_estimator(transport);
         let resp = adapter
-            .messages_create(
-                "claude-sonnet-4-20250514",
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-            )
+            .messages_create(crate::OrchestratorApiRequest::Main(
+                llm_runtime::MessagesCreateRequest::new(
+                    "claude-sonnet-4-20250514",
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ))
             .await
             .expect("ok");
         let cost = resp.cost.expect("cost must be Some for a priced model");
@@ -2093,7 +2956,15 @@ mod tests {
             Some(estimator),
         )));
         let resp = adapter
-            .messages_create("claude-future-9999", None, None, Vec::new(), Vec::new())
+            .messages_create(crate::OrchestratorApiRequest::Main(
+                llm_runtime::MessagesCreateRequest::new(
+                    "claude-future-9999",
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ))
             .await
             .expect("ok");
         assert!(
@@ -2119,13 +2990,15 @@ mod tests {
         // make_adapter wires None estimator (ApiService::new default path)
         let adapter = make_adapter(transport);
         let resp = adapter
-            .messages_create(
-                "claude-sonnet-4-20250514",
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-            )
+            .messages_create(crate::OrchestratorApiRequest::Main(
+                llm_runtime::MessagesCreateRequest::new(
+                    "claude-sonnet-4-20250514",
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ))
             .await
             .expect("ok");
         assert!(resp.cost.is_none(), "no estimator → cost must be None");
@@ -2163,13 +3036,15 @@ mod tests {
         });
         let adapter = make_adapter(transport);
         let _ = adapter
-            .messages_create(
-                "claude-sonnet-4-20250514",
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-            )
+            .messages_create(crate::OrchestratorApiRequest::Main(
+                llm_runtime::MessagesCreateRequest::new(
+                    "claude-sonnet-4-20250514",
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ))
             .await
             .expect("ok");
 
@@ -2200,13 +3075,15 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         let _ = adapter
-            .messages_create(
-                "claude-sonnet-4-20250514",
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-            )
+            .messages_create(crate::OrchestratorApiRequest::Main(
+                llm_runtime::MessagesCreateRequest::new(
+                    "claude-sonnet-4-20250514",
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ))
             .await
             .expect("ok");
 
@@ -2218,34 +3095,21 @@ mod tests {
     }
 
     #[test]
-    fn model_supports_fast_mode_gates_on_opus_fast_tier() {
-        // The 2.1.220 catalog blob @225785080 lists `fast_mode` for opus-4-7:
-        // `capabilities:["effort","max_effort","xhigh_effort",
-        // "adaptive_thinking","context_management","fast_mode"]`. The previous
-        // comment here asserted the opposite ("2.1.219 removed opus-4-7 from
-        // fast mode") and the assertion below encoded it — a specific-sounding
-        // claim about the oracle that the oracle does not support. The
-        // env-block prompt agrees: "available on Opus 5/4.8/4.7." (@113736244).
-        assert!(model_supports_fast_mode("claude-opus-4-8"));
-        assert!(model_supports_fast_mode("claude-opus-4-7"));
-        assert!(model_supports_fast_mode("claude-opus-5"));
-        assert!(model_supports_fast_mode("CLAUDE-OPUS-4-8"));
-        assert!(model_supports_fast_mode("us.anthropic.claude-opus-5-v1:0"));
-        assert!(!model_supports_fast_mode("claude-sonnet-4-20250514"));
-        assert!(!model_supports_fast_mode("claude-opus-4-1"));
-        assert!(!model_supports_fast_mode("gpt-5.2"));
-    }
-
-    #[test]
     fn live_effort_replaces_and_clears_the_startup_value() {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport).with_initial_effort(Some(serde_json::json!("low")));
         assert_eq!(adapter.current_effort(), Some(serde_json::json!("low")));
 
-        OrchestratorApiClient::set_effort(&adapter, Some(serde_json::json!("high")));
+        OrchestratorApiClient::set_effort(
+            &adapter,
+            lingxi_core::host::effort_table::SessionEffort::Level(serde_json::json!("high")),
+        );
         assert_eq!(adapter.current_effort(), Some(serde_json::json!("high")));
 
-        OrchestratorApiClient::set_effort(&adapter, None);
+        OrchestratorApiClient::set_effort(
+            &adapter,
+            lingxi_core::host::effort_table::SessionEffort::Default,
+        );
         assert_eq!(adapter.current_effort(), None);
     }
     struct HostedSdkTransport {
@@ -2559,6 +3423,10 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "provider_adapter_cache_test.rs"]
+mod prompt_cache_tests;
 
 #[async_trait::async_trait]
 impl tool_api::HostedWebSearchClient for ProviderApiAdapter {

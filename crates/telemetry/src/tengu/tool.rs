@@ -105,11 +105,11 @@ pub const WEB_SEARCH_STARTED: &str = "tengu_tool_web_search_started";
 pub const WEB_SEARCH_COMPLETED: &str = "tengu_tool_web_search_completed";
 /// `tengu_tool_web_search_failed` — `WebSearch` tool errored (HTTP, parse, etc.) (M4-03).
 pub const WEB_SEARCH_FAILED: &str = "tengu_tool_web_search_failed";
-/// `tengu_tool_task_dispatched` — Task tool spawned a subagent.
+/// `tengu_tool_task_dispatched` — Agent tool spawned a subagent.
 pub const TASK_DISPATCHED: &str = "tengu_tool_task_dispatched";
-/// `tengu_tool_task_completed` — Task subagent returned successfully.
+/// `tengu_tool_task_completed` — Agent subagent returned successfully.
 pub const TASK_COMPLETED: &str = "tengu_tool_task_completed";
-/// `tengu_tool_task_failed` — Task subagent errored.
+/// `tengu_tool_task_failed` — Agent subagent errored.
 pub const TASK_FAILED: &str = "tengu_tool_task_failed";
 /// `tengu_tool_notebook_started` — `NotebookEdit` tool began editing a notebook.
 pub const NOTEBOOK_STARTED: &str = "tengu_tool_notebook_started";

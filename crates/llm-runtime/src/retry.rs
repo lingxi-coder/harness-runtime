@@ -16,6 +16,7 @@ impl RetryPolicy {
             LlmError::Transport { .. }
             | LlmError::TransportTimeout { .. }
             | LlmError::ProviderInternal
+            | LlmError::ProviderTimeout { .. }
             | LlmError::Overloaded { .. } => RetryDecision::Retry { after: None },
             LlmError::RateLimited { retry_after, .. } => RetryDecision::Retry {
                 after: *retry_after,
@@ -30,6 +31,7 @@ impl RetryPolicy {
             | LlmError::OAuthRefreshDead
             | LlmError::PermissionDenied { .. }
             | LlmError::InvalidRequest { .. }
+            | LlmError::RequestDispatchRejected { .. }
             | LlmError::QuotaExceeded
             | LlmError::ContextOverflow { .. }
             | LlmError::RequestTooLarge
@@ -112,34 +114,15 @@ impl ResponseMetadata {
 ///
 /// Header names match case-insensitively so non-normalized maps work too.
 pub(crate) fn retry_after_from_headers(headers: &BTreeMap<String, String>) -> Option<Duration> {
-    if let Some(value) = header_value(headers, "retry-after-ms") {
-        if let Ok(milliseconds) = value.trim().parse::<u64>() {
-            return Some(Duration::from_millis(milliseconds));
-        }
-    }
-    if let Some(value) = header_value(headers, "retry-after") {
-        let trimmed = value.trim();
-        // Delta-seconds form: all ASCII digits.
-        if let Ok(secs) = trimmed.parse::<u64>() {
-            return Some(Duration::from_secs(secs));
-        }
-        // IMF-fixdate form: parse via httpdate, then date − now (clamped ≥0).
-        if let Ok(target) = httpdate::parse_http_date(trimmed) {
-            let now = std::time::SystemTime::now();
-            let duration = target.duration_since(now).unwrap_or(Duration::ZERO);
-            return Some(duration);
-        }
-    }
-    None
-}
-
-fn header_value<'headers>(
-    headers: &'headers BTreeMap<String, String>,
-    name: &str,
-) -> Option<&'headers str> {
-    headers.get(name).map(String::as_str).or_else(|| {
-        headers
-            .iter()
-            .find_map(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value.as_str()))
-    })
+    let headers = headers
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    lingxi_llm_client::providers::response_headers::ProviderResponseHeaders::decode(
+        lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
+        "anthropic",
+        &headers,
+        std::time::SystemTime::now(),
+    )
+    .retry_after
 }

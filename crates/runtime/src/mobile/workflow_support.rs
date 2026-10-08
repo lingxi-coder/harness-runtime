@@ -1455,6 +1455,57 @@ impl DeferredToolInvoker {
 
 #[async_trait::async_trait]
 impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
+    async fn cleanup_computer_inputs(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        origin_session_id: Option<lingxi_core::types::SessionId>,
+    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
+        match self.inner.get() {
+            Some(inner) => {
+                inner
+                    .cleanup_computer_inputs(agent_id, origin_session_id)
+                    .await
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn tool_is_concurrency_safe(&self, name: &str, input: &serde_json::Value) -> Option<bool> {
+        self.inner
+            .get()
+            .and_then(|invoker| invoker.tool_is_concurrency_safe(name, input))
+    }
+
+    fn permission_mode(&self) -> Option<String> {
+        self.inner
+            .get()
+            .and_then(|invoker| invoker.permission_mode())
+    }
+
+    async fn invoke_supplied_detailed(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+        workspace_lease_token: Option<u64>,
+        supplied: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<
+        lingxi_core::host::tool_invoker::ToolInvocationResult,
+        lingxi_core::host::tool_invoker::ToolInvokerError,
+    > {
+        match self.inner.get() {
+            Some(invoker) => {
+                invoker
+                    .invoke_supplied_detailed(name, input, ctx, workspace_lease_token, supplied)
+                    .await
+            }
+            None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
+                "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
+                    .to_string(),
+            )),
+        }
+    }
+
     async fn invoke_detailed(
         &self,
         name: &str,
@@ -1523,20 +1574,6 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-    async fn cleanup_computer_inputs(
-        &self,
-        agent_id: lingxi_core::types::AgentId,
-        origin_session_id: Option<lingxi_core::types::SessionId>,
-    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
-        match self.inner.get() {
-            Some(inner) => {
-                inner
-                    .cleanup_computer_inputs(agent_id, origin_session_id)
-                    .await
-            }
-            None => Ok(()),
-        }
     }
 }
 
@@ -7288,6 +7325,32 @@ mod workspace_lease_forwarding_tests {
 
     #[async_trait::async_trait]
     impl ToolInvoker for RecordingInvoker {
+        fn permission_mode(&self) -> Option<String> {
+            Some("plan".into())
+        }
+
+        async fn invoke_supplied_detailed(
+            &self,
+            name: &str,
+            input: serde_json::Value,
+            ctx: SubagentInvocationContext,
+            workspace_lease_token: Option<u64>,
+            supplied: Arc<dyn std::any::Any + Send + Sync>,
+        ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError>
+        {
+            assert_eq!(
+                supplied.downcast_ref::<String>().map(String::as_str),
+                Some("private child tool")
+            );
+            let mut result = self
+                .invoke_detailed(name, input, ctx, workspace_lease_token)
+                .await?;
+            result.turn_end = Some(lingxi_core::host::tool_invoker::ToolResultTurnEnd {
+                source: lingxi_core::host::tool_invoker::ToolResultTurnEndSource::Tool,
+            });
+            Ok(result)
+        }
+
         async fn invoke_detailed(
             &self,
             _name: &str,
@@ -7301,6 +7364,14 @@ mod workspace_lease_forwarding_tests {
                 is_error: true,
                 data: serde_json::json!({"error": "contract validation failed"}),
                 model_content: Some("contract validation failed".into()),
+                turn_end: None,
+                new_messages: Vec::new(),
+                context_modifier: None,
+                mcp_meta: None,
+                context: lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                    serde_json::Value::Array(Vec::new()),
+                ),
+                context_state: None,
             })
         }
 
@@ -7356,11 +7427,38 @@ mod workspace_lease_forwarding_tests {
         assert_eq!(*seen.lock().unwrap(), Some(Some(77)));
     }
 
+    #[tokio::test]
+    async fn deferred_invoker_preserves_private_child_tool_and_live_mode() {
+        let seen = Arc::new(StdMutex::new(None));
+        let deferred = super::DeferredToolInvoker::new();
+        deferred.set(Arc::new(RecordingInvoker { seen: seen.clone() }));
+        assert_eq!(deferred.permission_mode().as_deref(), Some("plan"));
+        let result = deferred
+            .invoke_supplied_detailed(
+                "SubagentHandback",
+                serde_json::json!({}),
+                bare_ctx(),
+                Some(91),
+                Arc::new("private child tool".to_string()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.turn_end.unwrap().source,
+            lingxi_core::host::tool_invoker::ToolResultTurnEndSource::Tool
+        );
+        assert_eq!(*seen.lock().unwrap(), Some(Some(91)));
+    }
+
     fn bare_ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            input_projection: None,
+            cancellation_token: lingxi_core::host::CancellationToken::new(),
             permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
+            instruction_context: None,
+            fork_context: None,
             tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             agent_name: None,
             team_name: None,
@@ -7374,6 +7472,11 @@ mod workspace_lease_forwarding_tests {
             observer: None,
             parent_model: None,
             parent_model_profile: None,
+            agent_spawn_provenance: Default::default(),
+            tool_context_state: None,
+            assistant_message: None,
+            same_turn_tool_uses: Vec::new(),
+            current_history: Vec::new(),
             mode_override: None,
             request_source: None,
             frozen_command_denies: Vec::new(),

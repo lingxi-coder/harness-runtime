@@ -17,6 +17,7 @@
 use crate::auth::anthropic::callback::{CallbackError, CallbackListener};
 use crate::auth::anthropic::login::{prepare_exchanged_tokens, ExchangedTokens, OAuthError};
 use async_trait::async_trait;
+use lingxi_core::host::auth::AccountChangeObserver;
 use lingxi_core::host::Clock;
 use lingxi_core::host::{AuthError, AuthHandle, LoginInfo};
 use lingxi_llm_client::auth::oauth::anthropic::{
@@ -27,7 +28,7 @@ use lingxi_llm_client::auth::oauth::anthropic::{
 };
 use lingxi_llm_client::transport::Transport;
 use secret::CredentialManager;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 /// Login-flow deadline (trait contract: §login docs).
@@ -62,6 +63,7 @@ pub struct OAuthHandle {
     credentials: Arc<CredentialManager>,
     clock: Arc<dyn Clock>,
     browser_open: BrowserOpener,
+    account_observers: Mutex<Vec<Weak<dyn AccountChangeObserver>>>,
 }
 
 /// Options shared by the top-level `auth login` flow and the interactive
@@ -105,6 +107,7 @@ impl OAuthHandle {
             credentials,
             clock,
             browser_open: Arc::new(real_browser_open),
+            account_observers: Mutex::new(Vec::new()),
         }
     }
 
@@ -114,6 +117,21 @@ impl OAuthHandle {
     pub fn with_browser_opener(mut self, opener: BrowserOpener) -> Self {
         self.browser_open = opener;
         self
+    }
+
+    fn notify_account_changed(&self) {
+        let observers: Vec<_> = {
+            let mut registered = self
+                .account_observers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let observers = registered.iter().filter_map(Weak::upgrade).collect();
+            registered.retain(|observer| observer.strong_count() != 0);
+            observers
+        };
+        for observer in observers {
+            observer.account_changed();
+        }
     }
 
     /// Build an authorization URL for a native host callback.
@@ -168,6 +186,8 @@ impl OAuthHandle {
             )
             .await
             .map_err(|e| AuthError::ServerError(format!("persist: {e}")))?;
+
+        self.notify_account_changed();
 
         Ok(LoginInfo { email, org_id })
     }
@@ -352,6 +372,8 @@ impl OAuthHandle {
             .await
             .map_err(|e| AuthError::ServerError(format!("persist: {e}")))?;
 
+        self.notify_account_changed();
+
         // (6b) Resolve the subscription tier (claude-code `getOauthAccountInfo`,
         // written at login from the profile + roles endpoints), then BOTH
         // persist it into the stored credential (claude-code keeps
@@ -421,6 +443,17 @@ impl OAuthHandle {
 
 #[async_trait]
 impl AuthHandle for OAuthHandle {
+    fn register_account_change_observer(&self, observer: Weak<dyn AccountChangeObserver>) {
+        let mut registered = self
+            .account_observers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        registered.retain(|observer| observer.strong_count() != 0);
+        if !registered.iter().any(|existing| existing.ptr_eq(&observer)) {
+            registered.push(observer);
+        }
+    }
+
     async fn login(&self) -> Result<LoginInfo, AuthError> {
         match tokio::time::timeout(
             LOGIN_TIMEOUT,
@@ -438,7 +471,9 @@ impl AuthHandle for OAuthHandle {
         self.credentials
             .delete_oauth_tokens()
             .await
-            .map_err(|e| AuthError::ServerError(format!("logout: {e}")))
+            .map_err(|e| AuthError::ServerError(format!("logout: {e}")))?;
+        self.notify_account_changed();
+        Ok(())
     }
 
     async fn current_user(&self) -> Option<LoginInfo> {
@@ -495,6 +530,10 @@ fn real_browser_open(url: &str) -> Result<(), AuthError> {
         .map(|_| ())
         .map_err(|e| AuthError::ServerError(format!("could not open browser: {e}")))
 }
+
+#[cfg(test)]
+#[path = "account_observer_test.rs"]
+mod account_observer_tests;
 
 #[cfg(test)]
 mod tests {

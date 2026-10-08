@@ -66,7 +66,7 @@ use command_api::builtins::{
 };
 use lingxi_core::host::AuthHandle;
 use lingxi_core::settings::enterprise::{
-    check_org_membership, ForceLoginOrgPin, OrgMembershipCheck,
+    ForceLoginOrgPin, OrgMembershipCheck, check_org_membership,
 };
 use llm_runtime::auth::openai as openai_oauth;
 use llm_runtime::services::sdk;
@@ -376,6 +376,12 @@ mod oauth_connect_tests {
     struct OkAuth;
     #[async_trait]
     impl AuthHandle for OkAuth {
+        fn register_account_change_observer(
+            &self,
+            _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+        ) {
+        }
+
         async fn login(&self) -> Result<LoginInfo, AuthError> {
             Ok(LoginInfo {
                 email: "me@example.com".into(),
@@ -411,6 +417,12 @@ mod oauth_connect_tests {
     }
     #[async_trait]
     impl AuthHandle for RecordingAuth {
+        fn register_account_change_observer(
+            &self,
+            _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+        ) {
+        }
+
         async fn login(&self) -> Result<LoginInfo, AuthError> {
             Ok(LoginInfo {
                 email: self.email.clone(),
@@ -428,6 +440,12 @@ mod oauth_connect_tests {
     struct CancelAuth;
     #[async_trait]
     impl AuthHandle for CancelAuth {
+        fn register_account_change_observer(
+            &self,
+            _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+        ) {
+        }
+
         async fn login(&self) -> Result<LoginInfo, AuthError> {
             Err(AuthError::Cancelled)
         }
@@ -451,11 +469,12 @@ mod oauth_connect_tests {
         // Unset pin override keeps the test hermetic (no managed-settings read).
         let d = EngineOAuthConnect::new(Arc::new(OkAuth), Arc::new(OkChatGpt))
             .with_org_pin_override(ForceLoginOrgPin::Unset);
-        assert!(d
-            .login("anthropic")
-            .await
-            .unwrap()
-            .contains("me@example.com"));
+        assert!(
+            d.login("anthropic")
+                .await
+                .unwrap()
+                .contains("me@example.com")
+        );
         assert!(d.login("openai-chatgpt").await.unwrap().contains("chatgpt"));
         // Unknown provider → a clear error, never a panic.
         assert!(matches!(
@@ -496,11 +515,12 @@ mod oauth_connect_tests {
         let auth = Arc::new(RecordingAuth::new("me@example.com", "any_org"));
         let d = EngineOAuthConnect::new(auth.clone(), Arc::new(OkChatGpt))
             .with_org_pin_override(ForceLoginOrgPin::Unset);
-        assert!(d
-            .login("anthropic")
-            .await
-            .unwrap()
-            .contains("me@example.com"));
+        assert!(
+            d.login("anthropic")
+                .await
+                .unwrap()
+                .contains("me@example.com")
+        );
         assert!(!auth.was_logged_out());
     }
 
@@ -695,19 +715,20 @@ mod tests {
             Err(ConnectError::Cancelled) => {}
             other => panic!("expected Cancelled, got {other:?}"),
         }
-        assert!(cm
-            .get_provider_key("deepseek")
-            .await
-            .expect("read")
-            .is_none());
+        assert!(
+            cm.get_provider_key("deepseek")
+                .await
+                .expect("read")
+                .is_none()
+        );
     }
 
     use command_api::builtins::CopilotConnectDriver;
-    use sdk::auth::oauth::copilot::{CopilotLogin, COPILOT_CLIENT_ID};
+    use sdk::auth::oauth::copilot::{COPILOT_CLIENT_ID, CopilotLogin};
     use sdk::transport::{
         HttpRequest as SdkHttpRequest, HttpResponse as SdkHttpResponse, StreamResponse, Transport,
     };
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     struct ScriptedCopilotTransport {
         device: Value,
@@ -807,11 +828,12 @@ mod tests {
             Err(ConnectError::DeviceFailed(e)) => assert_eq!(e, "access_denied"),
             other => panic!("expected DeviceFailed, got {other:?}"),
         }
-        assert!(cm
-            .get_provider_key("github-copilot")
-            .await
-            .expect("read")
-            .is_none());
+        assert!(
+            cm.get_provider_key("github-copilot")
+                .await
+                .expect("read")
+                .is_none()
+        );
     }
 
     #[test]

@@ -6,10 +6,10 @@
 
 use crate::mode::PermissionMode;
 use crate::rule::PermissionRule;
+use indexmap::IndexMap;
 use lingxi_core::types::RequestId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::time::SystemTime;
 
 /// The decision returned by `PermissionPolicy::authorize`.
@@ -89,8 +89,10 @@ pub enum PermissionDecisionReason {
     },
     /// A composite call (e.g. piped bash) — per-subcommand reasons.
     SubcommandResults {
-        /// Map from subcommand identifier to its individual result.
-        reasons: HashMap<String, Box<PermissionResult>>,
+        /// Subcommand results in producer order. Claude Code walks the native
+        /// `Map` in insertion order and reports the first rule whose behavior
+        /// matches the enclosing decision, so this must not be a hash map.
+        reasons: IndexMap<String, Box<PermissionResult>>,
     },
     /// A custom external permission-prompt tool returned the decision.
     PermissionPromptTool {

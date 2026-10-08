@@ -14,6 +14,10 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 
 use futures_util::stream::unfold;
+use lingxi_core::host::mcp_result::{
+    drive_modern_request, JsonrpcMcpResultIo, McpInputRequiredOptions, McpResultError,
+    McpResultProgress,
+};
 use lingxi_core::host::{
     McpConfiguredToolPolicyDto, McpNegotiatedProtocol, McpNotificationDto, McpNotificationStream,
     McpPermissionCeiling, McpPromptDto, McpProtocolEra, McpResourceContentDto, McpResourceDto,
@@ -121,25 +125,137 @@ fn retryable_list_connection_error(error: &jsonrpc::ConnectionError) -> bool {
     }
 }
 
-/// Maximum character length for free-form text fields sourced from MCP
-/// servers (tool/prompt descriptions, server `instructions`). Mirrors
-/// claude-code `services/mcp/client.ts:1163-1166`.
+/// Default UTF-16 length limit for free-form MCP descriptions/instructions.
+/// Claude Code 2.1.286 `sB()` permits a positive configured override.
 pub const MAX_MCP_DESCRIPTION_LENGTH: usize = 2048;
 
-/// Truncate `text` to at most `MAX_MCP_DESCRIPTION_LENGTH` Unicode scalar
-/// values. If truncation happens, appends the literal suffix
-/// `"\u{2026} [truncated]"` (U+2026 horizontal ellipsis + space + the
-/// English word `[truncated]`) — matching claude-code's exact wording so
-/// downstream tooling can detect the marker.
-///
+fn mcp_description_length_limit() -> usize {
+    let key = format!("{}MAX_MCP_DESCRIPTION_LENGTH", branding::ENV_PREFIX);
+    mcp_description_length_limit_from_env(std::env::var(key).ok().as_deref())
+}
+
+fn mcp_description_length_limit_from_env(value: Option<&str>) -> usize {
+    let parsed = value.and_then(|value| {
+        let value = value.trim_matches(|character| {
+            matches!(character,
+                '\u{0009}'..='\u{000d}' | ' ' | '\u{00a0}' | '\u{1680}'
+                    | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}'
+                    | '\u{205f}' | '\u{3000}' | '\u{feff}'
+            )
+        });
+        let digits = value.strip_prefix('+').unwrap_or(value);
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        // The oracle's typed env table uses int({ min: 1, digitsOnly: true }).
+        // A finite positive limit larger than usize never truncates any Rust
+        // string, so saturate it rather than reverting to the default cap.
+        let number = digits.parse::<f64>().ok()?;
+        if !number.is_finite() || number < 1.0 {
+            return None;
+        }
+        Some(digits.parse::<usize>().unwrap_or(usize::MAX))
+    });
+    parsed.unwrap_or(MAX_MCP_DESCRIPTION_LENGTH)
+}
+
+/// Truncate using the configured UTF-16 code-unit budget, preserving complete
+/// Unicode scalar values. Claude Code 2.1.286 `Yr`/`re` drops a high surrogate
+/// at the cut and appends the exact `"… [truncated]"` suffix outside the budget.
 /// Returns a borrowed `Cow` when no truncation is required.
 #[must_use]
 pub fn truncate_description(text: &str) -> Cow<'_, str> {
-    if text.chars().count() <= MAX_MCP_DESCRIPTION_LENGTH {
-        return Cow::Borrowed(text);
+    truncate_description_at_limit(text, mcp_description_length_limit())
+}
+
+fn truncate_description_at_limit(text: &str, limit: usize) -> Cow<'_, str> {
+    let mut remaining = limit;
+    for (offset, character) in text.char_indices() {
+        let units = character.len_utf16();
+        if units > remaining {
+            return Cow::Owned(format!("{}… [truncated]", &text[..offset]));
+        }
+        remaining -= units;
     }
-    let head: String = text.chars().take(MAX_MCP_DESCRIPTION_LENGTH).collect();
-    Cow::Owned(format!("{head}\u{2026} [truncated]"))
+    Cow::Borrowed(text)
+}
+
+#[cfg(test)]
+mod description_truncation_tests {
+    use super::*;
+
+    #[test]
+    fn description_limit_matches_typed_positive_integer_env() {
+        for value in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("-1"),
+            Some("1.5"),
+            Some("2e3"),
+            Some("12chars"),
+        ] {
+            assert_eq!(
+                mcp_description_length_limit_from_env(value),
+                2048,
+                "{value:?}"
+            );
+        }
+        for (value, expected) in [
+            ("1", 1),
+            ("  +4  ", 4),
+            ("\u{feff}+4\u{00a0}", 4),
+            ("0002", 2),
+            ("8192", 8192),
+        ] {
+            assert_eq!(mcp_description_length_limit_from_env(Some(value)), expected);
+        }
+        assert_eq!(
+            mcp_description_length_limit_from_env(Some("18446744073709551616")),
+            usize::MAX
+        );
+        assert_eq!(
+            mcp_description_length_limit_from_env(Some(&"9".repeat(400))),
+            2048
+        );
+    }
+
+    #[test]
+    fn description_truncation_counts_utf16_and_drops_a_split_surrogate_pair() {
+        for (text, limit, expected) in [
+            ("a😀b", 1, "a… [truncated]"),
+            ("a😀b", 2, "a… [truncated]"),
+            ("a😀b", 3, "a😀… [truncated]"),
+            ("a😀b", 4, "a😀b"),
+            ("😀", 1, "… [truncated]"),
+            ("e\u{301}好", 2, "e\u{301}… [truncated]"),
+            ("", 0, ""),
+        ] {
+            assert_eq!(truncate_description_at_limit(text, limit), expected);
+        }
+        let text = "😀".repeat(1025);
+        assert_eq!(
+            truncate_description_at_limit(&text, 2048),
+            format!("{}… [truncated]", "😀".repeat(1024))
+        );
+    }
+
+    #[test]
+    fn description_truncation_preserves_boundary_and_larger_override() {
+        let text = "a".repeat(4096);
+        assert!(matches!(
+            truncate_description_at_limit(&text, 4096),
+            Cow::Borrowed(_)
+        ));
+        assert_eq!(
+            truncate_description_at_limit(&text, 2048),
+            format!("{}… [truncated]", "a".repeat(2048))
+        );
+        assert!(matches!(
+            truncate_description_at_limit("é😀", 3),
+            Cow::Borrowed(_)
+        ));
+    }
 }
 
 /// Strip dangerous Unicode categories from a single string — a 1:1 port of
@@ -331,7 +447,10 @@ fn decode_server_capabilities(raw: &serde_json::Value) -> ServerCapabilitiesDto 
     }
 }
 
-pub(crate) fn modern_meta(version: &str) -> serde_json::Value {
+pub(crate) fn modern_meta(
+    version: &str,
+    elicitation: lingxi_core::host::McpElicitationMode,
+) -> serde_json::Value {
     serde_json::json!({
         "io.modelcontextprotocol/protocolVersion": version,
         "io.modelcontextprotocol/clientInfo": {
@@ -341,10 +460,7 @@ pub(crate) fn modern_meta(version: &str) -> serde_json::Value {
             "description": "An agentic coding tool",
             "websiteUrl": crate::MCP_WEBSITE_URL,
         },
-        "io.modelcontextprotocol/clientCapabilities": {
-            "roots": {},
-            "elicitation": {},
-        },
+        "io.modelcontextprotocol/clientCapabilities": lingxi_core::host::mcp_client_capabilities(elicitation),
     })
 }
 
@@ -354,6 +470,7 @@ fn modern_request_requires_meta(method: &str) -> bool {
         "tools/list"
             | "tools/call"
             | "subscriptions/listen"
+            | "completion/complete"
             | "prompts/list"
             | "prompts/get"
             | "resources/list"
@@ -372,6 +489,8 @@ fn modern_request_requires_result_type(method: &str) -> bool {
 /// One instance per server connection; owns its `Connection` and inbound
 /// handler registrations.
 pub struct McpClient {
+    /// Same frozen capability authority used by the owning connection attempt.
+    elicitation: lingxi_core::host::McpElicitationCapabilities,
     /// claude-code `transportErrorState.pendingElicitations` — how many
     /// elicitations this connection has OPEN right now. Shared with the
     /// registered `elicitation/create` handler, which owns the increment and
@@ -475,7 +594,7 @@ impl McpClient {
     /// Build a new client wrapping a JSON-RPC `Connection`.
     ///
     /// Registers two inbound request handlers required by the
-    /// `{roots:{listChanged:true}, elicitation:{}}` capability advertisement:
+    /// roots and form/URL elicitation capability advertisement:
     ///
     /// * `roots/list` -> [`RootsListHandler`] returning `file://<cwd>`.
     /// * `elicitation/create` -> [`ElicitationCreateHandler`] returning
@@ -569,6 +688,7 @@ impl McpClient {
 
         Self {
             elicitation_pending,
+            elicitation: lingxi_core::host::McpElicitationCapabilities::default(),
             server_name,
             cwd,
             connection,
@@ -620,6 +740,11 @@ impl McpClient {
     #[must_use]
     pub fn with_transport_kind(mut self, kind: McpTransportKind) -> Self {
         self.transport_kind = kind;
+        if lingxi_core::host::McpElicitationCapabilities::for_transport(kind).legacy
+            == lingxi_core::host::McpElicitationMode::Bare
+        {
+            self.elicitation.legacy = lingxi_core::host::McpElicitationMode::Bare;
+        }
         self
     }
 
@@ -645,6 +770,38 @@ impl McpClient {
         self
     }
 
+    /// Install the host's current capability authority without recomputing feature gates.
+    #[must_use]
+    pub fn with_elicitation_capabilities(
+        mut self,
+        elicitation: lingxi_core::host::McpElicitationCapabilities,
+    ) -> Self {
+        self.elicitation = elicitation;
+        self
+    }
+
+    pub(crate) fn elicitation_capabilities(&self) -> lingxi_core::host::McpElicitationCapabilities {
+        self.elicitation
+    }
+
+    /// Adopt the handshake already performed by the host transport. Repeating
+    /// initialize here would invalidate modern negotiated connections.
+    #[must_use]
+    pub fn with_handshake_state(
+        mut self,
+        capabilities: ServerCapabilitiesDto,
+        metadata: Option<&lingxi_core::host::McpServerMetadataDto>,
+    ) -> Self {
+        *self.raw_server_capabilities.get_mut() = metadata
+            .and_then(|metadata| metadata.raw_capabilities.as_ref())
+            .cloned();
+        *self.server_capabilities.get_mut() = Some(capabilities);
+        *self.server_instructions.get_mut() = metadata
+            .and_then(|metadata| metadata.instructions.as_deref())
+            .map(|instructions| truncate_description(instructions).into_owned());
+        self
+    }
+
     fn modern(&self) -> bool {
         self.negotiated.era == McpProtocolEra::Modern
     }
@@ -654,7 +811,7 @@ impl McpClient {
             return params;
         }
         let mut object = params.as_object().cloned().unwrap_or_default();
-        let mut required = modern_meta(&self.negotiated.version)
+        let mut required = modern_meta(&self.negotiated.version, self.elicitation.modern)
             .as_object()
             .cloned()
             .unwrap_or_default();
@@ -670,27 +827,112 @@ impl McpClient {
         serde_json::Value::Object(object)
     }
 
-    fn validate_response(
+    async fn request_result(
         &self,
         method: &str,
-        value: &mut serde_json::Value,
-    ) -> Result<(), McpClientError> {
-        if !self.modern() || !modern_request_requires_result_type(method) {
-            return Ok(());
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, McpResultError> {
+        let params = self.request_params(method, params);
+        if self.modern() && modern_request_requires_result_type(method) {
+            drive_modern_request(
+                &JsonrpcMcpResultIo {
+                    connection: self.connection.clone(),
+                    client_capabilities: modern_meta(
+                        &self.negotiated.version,
+                        self.elicitation.modern,
+                    )["io.modelcontextprotocol/clientCapabilities"]
+                        .clone(),
+                },
+                method,
+                params,
+                McpInputRequiredOptions::default(),
+            )
+            .await
+        } else {
+            self.connection
+                .call(method, params)
+                .await
+                .map_err(McpResultError::Connection)
         }
-        let Some(object) = value.as_object_mut() else {
-            return Err(McpClientError::Deserialize(
-                "modern MCP reply must be an object envelope".into(),
-            ));
+    }
+
+    async fn call_modern_tool(
+        &self,
+        tool: &str,
+        input: serde_json::Value,
+        timeout: std::time::Duration,
+        tool_use_id: Option<&str>,
+        on_progress: Option<McpProgressCallback>,
+    ) -> Result<McpToolResultDto, McpClientError> {
+        let mut params = serde_json::json!({"name":tool,"arguments":input});
+        if let Some(id) = tool_use_id {
+            params["_meta"] = serde_json::json!({"claudecode/toolUseId":id});
+        }
+        let params = self.request_params("tools/call", params);
+        let last_activity = Arc::new(std::sync::Mutex::new(tokio::time::Instant::now()));
+        let callback = on_progress
+            .filter(|_| tool_use_id.is_some())
+            .map(|callback| {
+                let activity = last_activity.clone();
+                Arc::new(move |event: McpResultProgress| {
+                    if let Ok(mut instant) = activity.lock() {
+                        *instant = tokio::time::Instant::now();
+                    }
+                    callback(McpProgressEvent {
+                        progress: event.progress,
+                        total: event.total,
+                        message: event.message,
+                    });
+                }) as lingxi_core::host::mcp_result::McpResultProgressCallback
+            });
+        let options = McpInputRequiredOptions {
+            per_request_timeout: timeout,
+            max_total_timeout: Some(timeout),
+            on_progress: callback,
+            ..Default::default()
         };
-        match object.remove("resultType") {
-            Some(serde_json::Value::String(result_type)) if result_type == "complete" => Ok(()),
-            Some(serde_json::Value::String(result_type)) => Err(McpClientError::Deserialize(
-                format!("unsupported modern MCP resultType: {result_type}"),
-            )),
-            Some(_) | None => Err(McpClientError::Deserialize(
-                "modern MCP reply missing resultType".into(),
-            )),
+        let io = JsonrpcMcpResultIo {
+            connection: self.connection.clone(),
+            client_capabilities: modern_meta(&self.negotiated.version, self.elicitation.modern)
+                ["io.modelcontextprotocol/clientCapabilities"]
+                .clone(),
+        };
+        let request = drive_modern_request(&io, "tools/call", params, options);
+        let idle_timeout = mcp_tool_idle_timeout_for(self.config_timeout_ms, self.transport_kind);
+        let value = if idle_timeout.is_zero() {
+            request
+                .await
+                .map_err(|e| self.tool_result_error(e, tool, timeout))?
+        } else {
+            tokio::select! {
+                value=request=>value.map_err(|e|self.tool_result_error(e,tool,timeout))?,
+                idle=idle_watchdog(idle_timeout,last_activity,self.server_name.clone(),tool.to_owned())=>return idle,
+            }
+        };
+        serde_json::from_value::<ToolCallResponse>(value)
+            .map(|resp| McpToolResultDto {
+                content: resp.content,
+                is_error: resp.is_error,
+                meta: resp.meta,
+                structured_content: resp.structured_content,
+            })
+            .map_err(|e| McpClientError::Deserialize(e.to_string()))
+    }
+
+    fn tool_result_error(
+        &self,
+        error: McpResultError,
+        tool: &str,
+        timeout: std::time::Duration,
+    ) -> McpClientError {
+        if matches!(&error,McpResultError::Sdk(error) if error.code == "REQUEST_TIMEOUT") {
+            McpClientError::Timeout {
+                server: self.server_name.clone(),
+                tool: tool.to_owned(),
+                secs: timeout.as_secs().max(1),
+            }
+        } else {
+            mcp_client_error_from_result(error)
         }
     }
 
@@ -745,14 +987,23 @@ impl McpClient {
     ///   * `"method":"initialize"`
     ///   * `"clientInfo":{"name":"lingxi", ...}`
     ///   * `"protocolVersion":"2025-11-25"`
-    ///   * `"capabilities":{"roots":{"listChanged":true},"elicitation":{}}`
+    ///   * `"capabilities":{"roots":{"listChanged":true},"elicitation":{"form":{},"url":{}}}`
+    ///     for the current ordinary transport default; an explicit Bare
+    ///     initialize choice uses an empty elicitation object.
     ///
     /// On success, the parsed [`ServerCapabilitiesDto`] is both returned
     /// and stored in [`McpClient::server_capabilities`]; the optional
     /// `instructions` string is truncated (see [`truncate_description`])
     /// and stored in [`McpClient::server_instructions`].
     pub async fn initialize(&self) -> Result<ServerCapabilitiesDto, McpClientError> {
-        let params = InitializeParams::default();
+        let mut params = InitializeParams::default();
+        params.capabilities.elicitation = self
+            .elicitation
+            .legacy
+            .wire()
+            .as_object()
+            .expect("elicitation capability is an object")
+            .clone();
         let resp: InitializeResponse = self
             .connection
             .call("initialize", &params)
@@ -769,16 +1020,16 @@ impl McpClient {
         // (client.ts:1163-1166: if > MAX_MCP_DESCRIPTION_LENGTH, slice
         // + "\u{2026} [truncated]").
         if let Some(raw) = resp.instructions {
-            let orig_len = raw.chars().count();
-            let truncated = truncate_description(&raw).into_owned();
-            if orig_len > MAX_MCP_DESCRIPTION_LENGTH {
+            let orig_len = raw.encode_utf16().count();
+            let limit = mcp_description_length_limit();
+            let truncated = truncate_description_at_limit(&raw, limit).into_owned();
+            if orig_len > limit {
                 tracing::warn!(
                     target: "lingxi_mcp::client",
                     server = %self.server_name,
                     from = orig_len,
-                    to = MAX_MCP_DESCRIPTION_LENGTH,
-                    "Server instructions truncated from {orig_len} to {} chars",
-                    MAX_MCP_DESCRIPTION_LENGTH,
+                    to = limit,
+                    "Server instructions truncated from {orig_len} to {limit} UTF-16 units",
                 );
             }
             *self.server_instructions.write().await = Some(truncated);
@@ -820,11 +1071,7 @@ impl McpClient {
                 if let Some(cursor) = cursor.as_deref() {
                     params["cursor"] = serde_json::Value::String(cursor.to_string());
                 }
-                let mut raw_value: serde_json::Value = match self
-                    .connection
-                    .call(method, self.request_params(method, params))
-                    .await
-                {
+                let raw_value: serde_json::Value = match self.request_result(method, params).await {
                     Ok(value) => value,
                     Err(error) => {
                         if !aggregate_tools && page_count > 0 && !emitted_error {
@@ -837,7 +1084,8 @@ impl McpClient {
                             );
                             emitted_error = true;
                         }
-                        if retryable_list_connection_error(&error) {
+                        if matches!(&error, McpResultError::Connection(rpc) if retryable_list_connection_error(rpc))
+                        {
                             if let Some(delay) = MCP_LIST_RETRY_DELAYS.get(retry_index).copied() {
                                 retry_index += 1;
                                 tracing::debug!(
@@ -851,7 +1099,7 @@ impl McpClient {
                                 continue 'retry;
                             }
                         }
-                        return Err(mcp_client_error_from_rpc(&error));
+                        return Err(mcp_client_error_from_result(error));
                     }
                 };
 
@@ -859,18 +1107,6 @@ impl McpClient {
                 // arrives, before schema decoding. A malformed second page is
                 // therefore reported as pageCount=2 with only page-one items.
                 page_count += 1;
-                if let Err(error) = self.validate_response(method, &mut raw_value) {
-                    if !aggregate_tools && !emitted_error {
-                        emit_list_paginated(
-                            method,
-                            Some(page_count),
-                            items.len(),
-                            "error",
-                            Some("pages"),
-                        );
-                    }
-                    return Err(error);
-                }
                 let (page_items, next_cursor) = match decode(raw_value) {
                     Ok(page) => page,
                     Err(error) => {
@@ -1214,6 +1450,12 @@ impl McpClient {
             })?
             .to_string();
 
+        if self.modern() {
+            return self
+                .call_modern_tool(&tool_name, input, timeout, tool_use_id, on_progress)
+                .await;
+        }
+
         // MCP.3: assemble the request `_meta`. claude-code stamps
         // `_meta: { "claudecode/toolUseId": <id> }` onto the tools/call request
         // (`client.ts:1840-1843` builds `meta`; `:3096` forwards it as `_meta`).
@@ -1341,18 +1583,15 @@ impl McpClient {
                         secs,
                     }),
                     Ok(Err(e)) => Err(mcp_client_error_from_rpc(&e)),
-                    Ok(Ok(mut value)) => {
-                        match self.validate_response("tools/call", &mut value) {
-                            Err(error) => Err(error),
-                            Ok(()) => serde_json::from_value::<ToolCallResponse>(value)
+                    Ok(Ok(value)) => {
+                        serde_json::from_value::<ToolCallResponse>(value)
                                 .map(|resp| McpToolResultDto {
                                     content: resp.content,
                                     is_error: resp.is_error,
                                     meta: resp.meta,
                                     structured_content: resp.structured_content,
                                 })
-                                .map_err(|e| McpClientError::Deserialize(e.to_string())),
-                        }
+                                .map_err(|e| McpClientError::Deserialize(e.to_string()))
                     },
                 },
                 idle = idle_watchdog(idle_timeout, last_activity.clone(), server, idle_tool) => idle,
@@ -1365,17 +1604,14 @@ impl McpClient {
                     secs,
                 }),
                 Ok(Err(e)) => Err(mcp_client_error_from_rpc(&e)),
-                Ok(Ok(mut value)) => match self.validate_response("tools/call", &mut value) {
-                    Err(error) => Err(error),
-                    Ok(()) => serde_json::from_value::<ToolCallResponse>(value)
-                        .map(|resp| McpToolResultDto {
-                            content: resp.content,
-                            is_error: resp.is_error,
-                            meta: resp.meta,
-                            structured_content: resp.structured_content,
-                        })
-                        .map_err(|e| McpClientError::Deserialize(e.to_string())),
-                },
+                Ok(Ok(value)) => serde_json::from_value::<ToolCallResponse>(value)
+                    .map(|resp| McpToolResultDto {
+                        content: resp.content,
+                        is_error: resp.is_error,
+                        meta: resp.meta,
+                        structured_content: resp.structured_content,
+                    })
+                    .map_err(|e| McpClientError::Deserialize(e.to_string())),
             }
         };
 
@@ -1423,12 +1659,10 @@ impl McpClient {
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value, McpClientError> {
         let params = serde_json::json!({ "name": name, "arguments": arguments });
-        let mut value: serde_json::Value = self
-            .connection
-            .call("prompts/get", self.request_params("prompts/get", params))
+        let value: serde_json::Value = self
+            .request_result("prompts/get", params)
             .await
-            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
-        self.validate_response("prompts/get", &mut value)?;
+            .map_err(mcp_client_error_from_result)?;
         Ok(value)
     }
 
@@ -1457,15 +1691,10 @@ impl McpClient {
     /// of the server's `contents` array (the protocol allows multiple but
     /// claude-code always reads the first).
     pub async fn read_resource(&self, uri: &str) -> Result<McpResourceContentDto, McpClientError> {
-        let mut raw_value: serde_json::Value = self
-            .connection
-            .call(
-                "resources/read",
-                self.request_params("resources/read", serde_json::json!({ "uri": uri })),
-            )
+        let raw_value: serde_json::Value = self
+            .request_result("resources/read", serde_json::json!({ "uri": uri }))
             .await
-            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
-        self.validate_response("resources/read", &mut raw_value)?;
+            .map_err(mcp_client_error_from_result)?;
         let resp: ResourceReadResponse = serde_json::from_value(raw_value)
             .map_err(|e| McpClientError::Deserialize(e.to_string()))?;
         resp.contents
@@ -1498,15 +1727,10 @@ impl McpClient {
         uri: &str,
         output_dir: &std::path::Path,
     ) -> Result<Vec<lingxi_core::host::McpResourceContentsRich>, McpClientError> {
-        let mut raw_value: serde_json::Value = self
-            .connection
-            .call(
-                "resources/read",
-                self.request_params("resources/read", serde_json::json!({ "uri": uri })),
-            )
+        let raw_value: serde_json::Value = self
+            .request_result("resources/read", serde_json::json!({ "uri": uri }))
             .await
-            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
-        self.validate_response("resources/read", &mut raw_value)?;
+            .map_err(mcp_client_error_from_result)?;
         let resp: ResourceReadRichResponse = serde_json::from_value(raw_value)
             .map_err(|e| McpClientError::Deserialize(e.to_string()))?;
         let raw: Vec<crate::mcp_output_storage::RawResourceContent> = resp
@@ -1584,17 +1808,15 @@ impl McpClient {
             if let Some(c) = cursor.as_deref() {
                 params["cursor"] = serde_json::Value::String(c.to_string());
             }
-            let mut raw_value: serde_json::Value = match self
-                .connection
-                .call(
-                    "resources/directory/read",
-                    self.request_params("resources/directory/read", params),
-                )
+            let raw_value: serde_json::Value = match self
+                .request_result("resources/directory/read", params)
                 .await
             {
                 Ok(r) => r,
                 Err(e) => {
-                    if page > 0 && is_invalid_params(&e) {
+                    if page > 0
+                        && matches!(&e, McpResultError::Connection(rpc) if is_invalid_params(rpc))
+                    {
                         tracing::warn!(
                             target: "lingxi_mcp::client",
                             server = %self.server_name,
@@ -1607,7 +1829,6 @@ impl McpClient {
                     return Err(McpClientError::Rpc(e.to_string()));
                 }
             };
-            self.validate_response("resources/directory/read", &mut raw_value)?;
             let resp: DirectoryReadResponse = serde_json::from_value(raw_value)
                 .map_err(|e| McpClientError::Deserialize(e.to_string()))?;
             out.extend(resp.resources);
@@ -2285,6 +2506,9 @@ CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT (ms) globally (0 disables)."
         /// HTTP-400 stale-session phrases; never emitted as telemetry.
         message: String,
     },
+    /// Native modern SDK or locally registered handler failure.
+    #[error(transparent)]
+    Result(#[from] McpResultError),
     /// Server returned a syntactically valid response that did not match
     /// the expected DTO shape.
     #[error("malformed response: {0}")]
@@ -2353,6 +2577,13 @@ fn has_stale_session_phrase(message: &str) -> bool {
     message.contains("server not initialized")
         || message.contains("no valid session id")
         || message.contains("mcp-session-id header is required")
+}
+
+fn mcp_client_error_from_result(error: McpResultError) -> McpClientError {
+    match error {
+        McpResultError::Connection(rpc) => mcp_client_error_from_rpc(&rpc),
+        error => McpClientError::Result(error),
+    }
 }
 
 fn mcp_client_error_from_rpc(error: &jsonrpc::ConnectionError) -> McpClientError {
@@ -2584,6 +2815,8 @@ mod constructor_tests {
             "id": request["id"].clone(),
             "result": {
                 "resultType": "complete",
+                "ttlMs": 0,
+                "cacheScope": "private",
                 "tools": []
             }
         });

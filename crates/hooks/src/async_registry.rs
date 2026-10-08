@@ -13,7 +13,8 @@
 //! output in this same registry, so configured and runtime-selected async hooks
 //! share timeout, completion, persistence, and re-wake behavior.
 
-use crate::response::{HookOutcome, HookResult};
+use crate::attachment::HookPublicationGuard;
+use crate::response::{ExactHookText, HookOutcome, HookResult};
 use lingxi_core::host::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 use lingxi_core::types::HookId;
 use std::collections::HashMap;
@@ -21,7 +22,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 /// Default async-hook timeout (15s) — matches claude-code
 /// `registerPendingAsyncHook` (`utils/hooks/AsyncHookRegistry.ts:51`):
@@ -36,19 +37,42 @@ pub type HookWork = Pin<Box<dyn Future<Output = HookResult> + Send + 'static>>;
 /// Finalizer invoked exactly once with the registry's winning result,
 /// including a timeout synthesized by the registry itself.
 pub type HookCompletion = Box<
-    dyn FnOnce(HookResult) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + 'static,
+    dyn FnOnce(HookResult) -> Pin<Box<dyn Future<Output = HookResult> + Send + 'static>>
+        + Send
+        + 'static,
 >;
+
+/// A completed async-hook result retains the generation that admitted it until
+/// the session consumer drains it. Producer-side fencing alone cannot reject a
+/// completion already buffered when reset starts.
+#[derive(Clone)]
+pub struct HookCompletionEnvelope {
+    pub hook_id: HookId,
+    pub result: HookResult,
+    pub hook_event: Option<String>,
+    pub publication_guard: Option<Arc<dyn HookPublicationGuard>>,
+}
+
+impl HookCompletionEnvelope {
+    /// Whether this completion may still be delivered to a later prompt.
+    #[must_use]
+    pub fn is_current(&self) -> bool {
+        self.publication_guard
+            .as_ref()
+            .is_none_or(|guard| guard.is_current())
+    }
+}
 
 /// Registry of currently-running non-blocking hooks.
 ///
 /// Each `spawn` call hands the hook off to the runtime spawner and stores the
 /// resulting handle so the engine can cancel or join it later. Completed hooks
-/// publish a `(HookId, HookResult)` tuple on `completion_tx` so the engine can
-/// fold the result back into the originating session.
+/// publish `(HookId, HookResult, hook event)` on `completion_tx` so the engine
+/// can fold the result back into the originating session with provenance.
 pub struct AsyncHookRegistry {
     runtime: Arc<dyn RuntimeSpawner>,
     in_flight: Arc<Mutex<HashMap<HookId, BackgroundTaskHandle>>>,
-    completion_tx: mpsc::Sender<(HookId, HookResult)>,
+    completion_tx: mpsc::Sender<HookCompletionEnvelope>,
 }
 
 impl AsyncHookRegistry {
@@ -57,7 +81,7 @@ impl AsyncHookRegistry {
     #[must_use]
     pub fn new(
         runtime: Arc<dyn RuntimeSpawner>,
-        completion_tx: mpsc::Sender<(HookId, HookResult)>,
+        completion_tx: mpsc::Sender<HookCompletionEnvelope>,
     ) -> Self {
         Self {
             runtime,
@@ -91,8 +115,9 @@ impl AsyncHookRegistry {
         hook_id: HookId,
         async_timeout: Option<Duration>,
         work: HookWork,
+        publication_guard: Option<Arc<dyn HookPublicationGuard>>,
     ) -> Result<BackgroundTaskHandle, RuntimeError> {
-        self.spawn_with_completion(hook_id, async_timeout, work, None)
+        self.spawn_with_completion(hook_id, async_timeout, work, None, publication_guard)
             .await
     }
 
@@ -110,9 +135,17 @@ impl AsyncHookRegistry {
         async_timeout: Option<Duration>,
         work: HookWork,
         completion: Option<HookCompletion>,
+        publication_guard: Option<Arc<dyn HookPublicationGuard>>,
     ) -> Result<BackgroundTaskHandle, RuntimeError> {
-        self.spawn_with_completion_and_rewake(hook_id, async_timeout, work, completion, None)
-            .await
+        self.spawn_with_completion_and_rewake(
+            hook_id,
+            async_timeout,
+            work,
+            completion,
+            None,
+            publication_guard,
+        )
+        .await
     }
 
     /// Spawn a non-blocking hook and optionally mark its terminal result for a
@@ -126,6 +159,32 @@ impl AsyncHookRegistry {
         work: HookWork,
         completion: Option<HookCompletion>,
         rewake_message: Option<String>,
+        publication_guard: Option<Arc<dyn HookPublicationGuard>>,
+    ) -> Result<BackgroundTaskHandle, RuntimeError> {
+        self.spawn_with_completion_and_rewake_for_event(
+            hook_id,
+            async_timeout,
+            work,
+            completion,
+            rewake_message,
+            None,
+            publication_guard,
+        )
+        .await
+    }
+
+    /// Carry the originating settings-hook event with this individual run.
+    /// Hook IDs can run concurrently, so provenance belongs on the completion
+    /// record rather than in a side map keyed by the hook definition.
+    pub async fn spawn_with_completion_and_rewake_for_event(
+        &self,
+        hook_id: HookId,
+        async_timeout: Option<Duration>,
+        work: HookWork,
+        completion: Option<HookCompletion>,
+        rewake_message: Option<String>,
+        hook_event: Option<String>,
+        publication_guard: Option<Arc<dyn HookPublicationGuard>>,
     ) -> Result<BackgroundTaskHandle, RuntimeError> {
         let timeout =
             async_timeout.unwrap_or_else(|| Duration::from_millis(DEFAULT_ASYNC_HOOK_TIMEOUT_MS));
@@ -146,15 +205,52 @@ impl AsyncHookRegistry {
             if let Some(message) = rewake_message.as_deref() {
                 mark_async_rewake(&mut result, message);
             }
-            if let Some(completion) = completion {
-                completion(result.clone()).await;
-            }
             // Drop the in-flight entry before publishing so a draining engine
             // never observes a completed-but-still-tracked hook.
             in_flight.lock().await.remove(&hook_id);
+            // Durable finalization and Native Fse output normalization are an
+            // admitted commit: reset waits until the file/attachment pair is
+            // complete, and the exact normalized response that follows is the
+            // one consumed by the later async-hook reminder. The channel send
+            // remains separately cancellable so receiver backpressure cannot
+            // hold reset.
+            if let Some(guard) = publication_guard.as_ref() {
+                if let Some(completion) = completion {
+                    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+                    let mutation = async move {
+                        let _ = result_tx.send(completion(result).await);
+                    };
+                    if !guard.commit_if_current(Box::pin(mutation)).await {
+                        return;
+                    }
+                    let Ok(completed) = result_rx.await else {
+                        return;
+                    };
+                    result = completed;
+                }
+            } else {
+                if let Some(completion) = completion {
+                    result = completion(result).await;
+                }
+            }
+            // The envelope retains the guard so a receiver can reject it if
+            // reset happens after channel admission but before consumption.
+            let envelope = HookCompletionEnvelope {
+                hook_id,
+                result,
+                hook_event,
+                publication_guard: publication_guard.clone(),
+            };
             // Best-effort publish: a closed receiver (engine torn down) is not
-            // an error for a fire-and-forget hook.
-            let _ = completion_tx.send((hook_id, result)).await;
+            // an error for a fire-and-forget hook. Reset cancels a blocked send.
+            let send = async move {
+                let _ = completion_tx.send(envelope).await;
+            };
+            if let Some(guard) = publication_guard.as_ref() {
+                let _ = guard.publish_if_current(Box::pin(send)).await;
+            } else {
+                send.await;
+            }
         });
 
         // Hold the in-flight lock across spawn + insert so the spawned task's
@@ -203,10 +299,15 @@ fn mark_async_rewake(result: &mut HookResult, configured: &str) {
     } else {
         configured.trim()
     };
-    let message: String = raw.chars().take(MAX_REWAKE_MESSAGE_CHARS).collect();
+    let message = ExactHookText::from_text(raw).truncate_well_formed(MAX_REWAKE_MESSAGE_CHARS);
     let response = result.response.get_or_insert_with(Default::default);
     response.additional_context = Some(match response.additional_context.take() {
-        Some(existing) if !existing.trim().is_empty() => format!("{existing}\n{message}"),
+        Some(existing) if !existing.trim_js().is_empty() => {
+            let mut combined = existing;
+            combined.push_text("\n");
+            combined.push(&message);
+            combined
+        }
         _ => message,
     });
     response.async_rewake = true;
@@ -230,8 +331,8 @@ mod tests {
     use super::*;
     use crate::response::HookOutcome;
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use tokio::sync::Notify;
 
     /// Tokio-backed [`RuntimeSpawner`] for these unit tests. The hooks crate
@@ -249,6 +350,13 @@ mod tests {
                 next_id: AtomicU64::new(1),
                 handles: StdMutex::new(HashMap::new()),
             })
+        }
+
+        async fn join(&self, handle: &BackgroundTaskHandle) {
+            let task = self.handles.lock().unwrap().remove(&handle.task_id);
+            if let Some(task) = task {
+                let _ = task.await;
+            }
         }
     }
 
@@ -279,6 +387,72 @@ mod tests {
         }
     }
 
+    struct TestPublicationGuard {
+        root: lingxi_core::host::CancellationToken,
+        publication_lock: Arc<tokio::sync::Mutex<()>>,
+        publish_entered: Option<Arc<Notify>>,
+    }
+
+    impl HookPublicationGuard for TestPublicationGuard {
+        fn is_current(&self) -> bool {
+            !self.root.is_cancelled()
+        }
+
+        fn generation_cancellation_token(&self) -> Option<lingxi_core::host::CancellationToken> {
+            Some(self.root.clone())
+        }
+
+        fn publish_if_current<'a>(
+            &'a self,
+            publication: Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            let root = self.root.clone();
+            let lock = Arc::clone(&self.publication_lock);
+            let publish_entered = self.publish_entered.clone();
+            Box::pin(async move {
+                let _lease = tokio::select! {
+                    biased;
+                    () = root.cancelled() => return false,
+                    lease = lock.lock_owned() => lease,
+                };
+                if root.is_cancelled() {
+                    return false;
+                }
+                let publication = async move {
+                    if let Some(entered) = publish_entered {
+                        entered.notify_one();
+                    }
+                    publication.await;
+                };
+                tokio::select! {
+                    biased;
+                    () = root.cancelled() => false,
+                    () = publication => true,
+                }
+            })
+        }
+
+        fn commit_if_current<'a>(
+            &'a self,
+            mutation: Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            let root = self.root.clone();
+            let lock = Arc::clone(&self.publication_lock);
+            Box::pin(async move {
+                let _lease = tokio::select! {
+                    biased;
+                    () = root.cancelled() => return false,
+                    lease = lock.lock_owned() => lease,
+                };
+                if root.is_cancelled() {
+                    return false;
+                }
+                mutation.await;
+                true
+            })
+        }
+    }
+
     fn ok_result(stdout: &str) -> HookResult {
         HookResult {
             outcome: HookOutcome::Success,
@@ -306,7 +480,7 @@ mod tests {
         });
 
         let handle = reg
-            .spawn(hook_id, Some(Duration::from_secs(30)), work)
+            .spawn(hook_id, Some(Duration::from_secs(30)), work, None)
             .await
             .expect("spawn must succeed");
         assert_eq!(handle.task_name, "async_hook");
@@ -318,7 +492,11 @@ mod tests {
         // Release the hook; its result must arrive on completion_tx and the
         // in-flight entry must clear.
         gate.notify_one();
-        let (got_id, got) = rx.recv().await.expect("completion must publish");
+        let HookCompletionEnvelope {
+            hook_id: got_id,
+            result: got,
+            ..
+        } = rx.recv().await.expect("completion must publish");
         assert_eq!(got_id, hook_id);
         assert!(matches!(got.outcome, HookOutcome::Success));
         assert_eq!(got.stdout, "done");
@@ -334,6 +512,124 @@ mod tests {
         assert!(
             !reg.is_in_flight(hook_id).await,
             "in-flight entry must clear on completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn obsolete_background_hook_completion_never_reenters_the_session() {
+        let runtime = TestRuntime::new();
+        let (tx, mut rx) = mpsc::channel(2);
+        let reg = AsyncHookRegistry::new(runtime.clone(), tx);
+        let root = lingxi_core::host::CancellationToken::new();
+        let guard: Arc<dyn HookPublicationGuard> = Arc::new(TestPublicationGuard {
+            root: root.clone(),
+            publication_lock: Arc::new(tokio::sync::Mutex::new(())),
+            publish_entered: None,
+        });
+        let finalized = Arc::new(AtomicBool::new(false));
+        let finalized_for_callback = Arc::clone(&finalized);
+        let completion: HookCompletion = Box::new(move |result| {
+            Box::pin(async move {
+                finalized_for_callback.store(true, Ordering::SeqCst);
+                result
+            })
+        });
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (work_finished_tx, work_finished_rx) = tokio::sync::oneshot::channel();
+        let work: HookWork = Box::pin(async move {
+            release_rx.await.expect("test releases late work");
+            let _ = work_finished_tx.send(());
+            ok_result("late result")
+        });
+        let hook_id = HookId::new();
+        let handle = reg
+            .spawn_with_completion_and_rewake_for_event(
+                hook_id,
+                Some(Duration::from_secs(30)),
+                work,
+                Some(completion),
+                None,
+                Some("PostToolUse".into()),
+                Some(guard),
+            )
+            .await
+            .expect("spawn");
+
+        assert!(reg.is_in_flight(hook_id).await);
+        root.cancel();
+        release_tx.send(()).expect("release work");
+        work_finished_rx
+            .await
+            .expect("work reached its late completion");
+        runtime.join(&handle).await;
+
+        assert!(
+            !finalized.load(Ordering::SeqCst),
+            "an obsolete result must not run its external finalizer"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "an obsolete async hook result must not re-enter the session channel"
+        );
+        assert_eq!(reg.in_flight_len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn reset_cancels_backpressured_completion_send_after_durable_finalize() {
+        let runtime = TestRuntime::new();
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(HookCompletionEnvelope {
+            hook_id: HookId::new(),
+            result: ok_result("occupies the channel"),
+            hook_event: None,
+            publication_guard: None,
+        })
+        .expect("fill the one-slot completion channel");
+        let reg = AsyncHookRegistry::new(runtime.clone(), tx);
+        let root = lingxi_core::host::CancellationToken::new();
+        let publication_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let send_started = Arc::new(Notify::new());
+        let guard: Arc<dyn HookPublicationGuard> = Arc::new(TestPublicationGuard {
+            root: root.clone(),
+            publication_lock: Arc::clone(&publication_lock),
+            publish_entered: Some(Arc::clone(&send_started)),
+        });
+        let (finalized_tx, finalized_rx) = tokio::sync::oneshot::channel();
+        let completion: HookCompletion = Box::new(move |result| {
+            Box::pin(async move {
+                let _ = finalized_tx.send(());
+                result
+            })
+        });
+        let hook_id = HookId::new();
+        let handle = reg
+            .spawn_with_completion_and_rewake_for_event(
+                hook_id,
+                Some(Duration::from_secs(30)),
+                Box::pin(async { ok_result("persisted before blocked send") }),
+                Some(completion),
+                None,
+                Some("PostToolUse".into()),
+                Some(guard),
+            )
+            .await
+            .expect("spawn");
+
+        finalized_rx
+            .await
+            .expect("durable finalizer completed before the blocked channel send");
+        send_started.notified().await;
+        root.cancel();
+        runtime.join(&handle).await;
+
+        assert_eq!(rx.try_recv().unwrap().result.stdout, "occupies the channel");
+        assert!(
+            rx.try_recv().is_err(),
+            "stale completion send was cancelled"
+        );
+        assert!(
+            publication_lock.clone().try_lock_owned().is_ok(),
+            "reset must not remain blocked behind completion-channel backpressure"
         );
     }
 
@@ -355,6 +651,7 @@ mod tests {
         let completion: HookCompletion = Box::new(move |result| {
             Box::pin(async move {
                 finalized_for_callback.lock().unwrap().push(result.outcome);
+                result
             })
         });
         reg.spawn_with_completion(
@@ -362,11 +659,16 @@ mod tests {
             Some(Duration::from_millis(10)),
             work,
             Some(completion),
+            None,
         )
         .await
         .expect("spawn must succeed");
 
-        let (got_id, got) = rx.recv().await.expect("timeout must publish a result");
+        let HookCompletionEnvelope {
+            hook_id: got_id,
+            result: got,
+            ..
+        } = rx.recv().await.expect("timeout must publish a result");
         assert_eq!(got_id, hook_id);
         assert!(
             matches!(got.outcome, HookOutcome::Timeout),
@@ -391,9 +693,9 @@ mod tests {
         let hook_id = HookId::new();
         let work: HookWork = Box::pin(async move { ok_result("fast") });
 
-        reg.spawn(hook_id, None, work).await.expect("spawn");
+        reg.spawn(hook_id, None, work, None).await.expect("spawn");
 
-        let (_id, got) = rx.recv().await.expect("result");
+        let HookCompletionEnvelope { result: got, .. } = rx.recv().await.expect("result");
         assert!(matches!(got.outcome, HookOutcome::Success));
         assert_eq!(got.stdout, "fast");
     }
@@ -417,15 +719,19 @@ mod tests {
             work,
             None,
             Some("continue now".into()),
+            None,
         )
         .await
         .expect("spawn");
 
-        let (_, got) = rx.recv().await.expect("completion");
+        let HookCompletionEnvelope { result: got, .. } = rx.recv().await.expect("completion");
         let response = got.response.expect("rewake response");
         assert!(response.async_rewake);
         assert_eq!(
-            response.additional_context.as_deref(),
+            response
+                .additional_context
+                .as_ref()
+                .map(|text| text.display.as_str()),
             Some("hook output\ncontinue now")
         );
     }
@@ -447,21 +753,22 @@ mod tests {
             work,
             None,
             Some(oversized),
+            None,
         )
         .await
         .expect("spawn");
 
-        let (_, got) = rx.recv().await.expect("timeout completion");
+        let HookCompletionEnvelope { result: got, .. } =
+            rx.recv().await.expect("timeout completion");
         assert!(matches!(got.outcome, HookOutcome::Timeout));
         let response = got.response.expect("timeout rewake response");
         assert!(response.async_rewake);
         assert_eq!(
             response
                 .additional_context
-                .as_deref()
+                .as_ref()
                 .expect("bounded message")
-                .chars()
-                .count(),
+                .len_utf16(),
             MAX_REWAKE_MESSAGE_CHARS
         );
     }

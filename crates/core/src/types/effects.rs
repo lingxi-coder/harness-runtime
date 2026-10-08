@@ -8,6 +8,7 @@
 
 use crate::types::ids::{RequestId, SessionId, ToolUseId};
 use crate::types::secret::{RedactableContent, SecureStorageData};
+use crate::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -26,8 +27,10 @@ pub enum Effect {
     SendApiRequest {
         /// Correlation ID used to match streaming events back to this request.
         request_id: RequestId,
-        /// Provider-shape body (Anthropic JSON for now; `OpenAI` in Plan 4 expansion).
-        request_body: Value,
+        /// Provider-shape body with exact JavaScript string/key sidecars.
+        /// Keep this projection typed until the host serializes the provider
+        /// request with [`Utf16JsonProjection::to_json_string`].
+        request_body: Utf16JsonProjection,
     },
 
     // — Render (UI / TUI / SDK consumers) —
@@ -179,12 +182,38 @@ mod tests {
         // comparing the JSON strings instead.
         let e = Effect::SendApiRequest {
             request_id: RequestId::nil(),
-            request_body: serde_json::json!({"model": "claude-opus-4-6"}),
+            request_body: Utf16JsonProjection::plain(
+                serde_json::json!({"model": "claude-opus-4-6"}),
+            ),
         };
         let s = serde_json::to_string(&e).unwrap();
         let e2: Effect = serde_json::from_str(&s).unwrap();
         let s2 = serde_json::to_string(&e2).unwrap();
         assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn send_api_request_roundtrip_preserves_exact_utf16_body() {
+        let body = Utf16JsonProjection::parse(
+            r#"{"messages":[{"role":"user","content":"x\ud800"}]}"#,
+        )
+        .unwrap();
+        let encoded = body.to_json_string().unwrap();
+        let effect = Effect::SendApiRequest {
+            request_id: RequestId::nil(),
+            request_body: body,
+        };
+        let wire = serde_json::to_string(&effect).unwrap();
+        let Effect::SendApiRequest { request_body, .. } =
+            serde_json::from_str(&wire).unwrap()
+        else {
+            panic!("send API effect");
+        };
+        assert_eq!(request_body.to_json_string().unwrap(), encoded);
+        assert_eq!(
+            request_body.string_units("/messages/0/content"),
+            Some(vec![u16::from(b'x'), 0xD800])
+        );
     }
 
     #[test]

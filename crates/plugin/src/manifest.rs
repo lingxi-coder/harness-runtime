@@ -303,6 +303,10 @@ pub struct PluginComponents {
     pub monitors: Vec<PluginMonitor>,
     /// Inline hook definitions.
     pub hooks: Vec<HookDefinition>,
+    /// The single programmatic hooks module declared by `hooks/hooks.json`.
+    /// Its path is resolved against that file and confined to the plugin root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mod_module: Option<PathBuf>,
     /// Whether `plugin.json` declared `hooks`, even if it normalized to zero
     /// live hook definitions.
     #[serde(default)]

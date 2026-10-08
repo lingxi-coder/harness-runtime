@@ -1,53 +1,12 @@
 //! `anthropic-beta` header constants + the per-model / per-request beta gate.
 //!
-//! **Source of truth**: the v2.1.185 binary's `xLr`/`e5` assembler (the
-//! minified `getBetas(model)` path), reverse-engineered byte-for-byte against
-//! `/opt/homebrew/.../claude-code-darwin-arm64/claude`. Earlier revisions of
-//! this module assembled the header from `Provider × Endpoint` ONLY and emitted
-//! the full constant set on every request — which both **over-emitted**
-//! request-conditional betas (`web-search`, `structured-outputs`, `context-1m`,
-//! `effort`, `task-budgets`, `fast-mode`, `advisor-tool`; over-emitting can
-//! 400), emitted one **fabricated** beta (`token-efficient-tools-2026-03-28`,
-//! 0 occurrences in the binary), and **missed** two real ones
-//! (`thinking-token-count-2026-05-13`, `mid-conversation-system-2026-04-07`).
+//! Claude Code 2.1.287 built-in `aN/uN/eZ/vqo` model gates and current
+//! request feature additions. Native model ordering is chronological (`av/lr`),
+//! not substring matching. Environment and feature admission remain host-owned.
 //!
-//! The binary computes the set with `e5(model)` — a per-model, per-capability,
-//! per-request gate. This module ports that gate for the first-party
-//! (`Provider::Anthropic`) path LingXi actually drives, mapping each predicate
-//! to LingXi state:
-//!
-//! | binary predicate | meaning | LingXi mapping |
-//! |---|---|---|
-//! | `isHaiku` | model id has `haiku` | [`is_haiku`] |
-//! | `gkt(e)` | model supports thinking | firstParty ⇒ `!claude-3-` ([`thinking_capable`]) |
-//! | `KWu(e)` | ctx-management capable | firstParty ⇒ `!claude-3-` ([`context_management_capable`]) |
-//! | `T_(e)` | 1M context active | model id contains `[1m]` ([`context_1m_active`]) |
-//! | `nhn(e)` | mid-conversation-system | model not in the older-exclusion list ([`mid_conversation_system`]) |
-//! | `BO()` | experimental betas on | `!CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` ([`BetaContext::experimental_on`]) |
-//! | `kr()` | `!isInteractive` (SDK) | [`BetaContext::interactive`] |
-//! | `ZAn()` | `showThinkingSummaries` | [`BetaContext::show_thinking_summaries`] |
-//!
-//! **Bounded divergences (documented, not gaps):**
-//! - **oauth-2025-04-20** stays driven by the subscriber flag through
-//!   [`apply_beta_header_with_auth`] (the binary's `VEe` push uses `iE()`
-//!   token-presence; LingXi already threads `is_subscriber`, so the existing
-//!   mechanism is preserved rather than duplicated).
-//! - **cache-editing beta/session latch** is intentionally absent here. Claude
-//!   Code arms cache editing only with an additional once-per-session beta
-//!   latch plus cross-call pinned state; LingXi's request mutator remains
-//!   fail-closed in `ApiService::should_use_cache_editing()` until that full
-//!   protocol is wired, so this assembler emits no cache-editing-specific beta.
-//! - The per-feature betas `effort` / `task-budgets` / `advisor-tool` /
-//!   `web-search` / `structured-outputs` are emitted by the binary ONLY when the
-//!   request carries that param (they live outside `xLr`, added at the
-//!   request-build layer). LingXi's first-party `messages.create` body never
-//!   carries those keys, so they are correctly omitted. `fast-mode` rides only
-//!   when the request body sets `speed: "fast"` ([`BetaContext::fast_mode`]).
-//! - `narration_summaries` (`summarize-connector-text`) is behind the
-//!   `pewter_owl_header` server flag (default off) — never emitted.
-//!
-//! Constants are emitted in `xLr` declaration order and comma-joined with no
-//! spaces, matching the binary.
+//! `betas_2_1_287.json` executes the pinned native source with no served catalog,
+//! dynamic flags, HIPAA taint, subscriber or beta-denial state. Those stateful
+//! gates and `awn` per-turn controls still need end-to-end acceptance.
 
 #![forbid(unsafe_code)]
 
@@ -132,6 +91,8 @@ pub const BEDROCK_EXTRA_PARAMS_HEADERS: &[&str] =
 pub enum Provider {
     /// Direct Anthropic API (the binary's `firstParty`).
     Anthropic,
+    /// Azure Foundry Claude models (distinct native beta gates).
+    Foundry,
     /// Google Cloud Vertex AI Anthropic models.
     Vertex,
     /// AWS Bedrock Anthropic models.
@@ -165,9 +126,12 @@ pub struct BetaContext {
     /// The request body sets `speed: "fast"`. Gates `fast-mode`. Defaults
     /// to `false`.
     pub fast_mode: bool,
-    /// The request body sets `output_config.effort`. Gates the [`EFFORT`] beta.
+    /// Native YMe selects the automatic effort beta, including supported main defaults.
     /// Defaults to `false`.
     pub effort: bool,
+    /// Automatic format admitted before explicit extra-body merging.
+    pub structured_output: bool,
+    pub request_kind: lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind,
     /// Request uses ToolSearch/deferred schemas. Appends the first-party
     /// `advanced-tool-use` beta after the ordinary model betas.
     pub tool_search: bool,
@@ -187,6 +151,8 @@ impl BetaContext {
             show_thinking_summaries: false,
             fast_mode: false,
             effort: false,
+            structured_output: false,
+            request_kind: Default::default(),
             tool_search: false,
             context_hint: false,
         }
@@ -220,6 +186,21 @@ impl BetaContext {
         self
     }
 
+    #[must_use]
+    pub fn with_structured_output(mut self, on: bool) -> Self {
+        self.structured_output = on;
+        self
+    }
+
+    #[must_use]
+    pub fn with_request_kind(
+        mut self,
+        kind: lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind,
+    ) -> Self {
+        self.request_kind = kind;
+        self
+    }
+
     /// Builder: set dynamic ToolSearch usage for this request.
     #[must_use]
     pub fn with_tool_search(mut self, on: bool) -> Self {
@@ -238,77 +219,174 @@ impl BetaContext {
     /// for the first-party path; `$Be()` is `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`
     /// (HIPAA compliance taint is out of single-process scope here).
     fn experimental_on(&self) -> bool {
-        !env_truthy("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS")
+        !crate::structured_output::experimental_betas_disabled()
     }
 }
 
-/// Normalize a model id for the substring gates (lowercase; the binary's `Fo`).
-fn norm(model: &str) -> String {
-    model.to_ascii_lowercase()
-}
-
-/// The binary's `isHaiku` — model id contains `haiku`.
-fn is_haiku(model: &str) -> bool {
-    norm(model).contains("haiku")
-}
-
-/// The binary's `gkt(e)` for the first-party path: thinking-capable unless a
-/// `claude-3-*` model.
-fn thinking_capable(model: &str) -> bool {
-    !norm(model).contains("claude-3-")
-}
-
-/// The binary's `KWu(e)` for the first-party path: context-management-capable
-/// unless a `claude-3-*` model.
-fn context_management_capable(model: &str) -> bool {
-    !norm(model).contains("claude-3-")
-}
-
-/// The binary's `T_(e)` — 1M context active iff the model id carries `[1m]`.
-fn context_1m_active(model: &str) -> bool {
-    norm(model).contains("[1m]")
-}
-
-/// The binary's `nhn(e)` for the first-party path: mid-conversation-system is
-/// emitted for every first-party model EXCEPT the enumerated older ones
-/// (returns `false` for `claude-3-*` and the explicit pre-4.8 list; `true` for
-/// fable-5 / mythos-5 / opus-4-8 and any other first-party model).
-fn mid_conversation_system(model: &str) -> bool {
-    let m = norm(model);
-    if m.contains("claude-3-") {
-        return false;
-    }
-    const OLDER: &[&str] = &[
-        "opus-4-0",
-        "opus-4-1",
-        "opus-4-5",
-        "opus-4-6",
-        "opus-4-7",
-        "sonnet-4-0",
-        "sonnet-4-5",
-        "sonnet-4-6",
-        "sonnet-5",
-        "haiku-4-5",
+/// Native OI/Ab built-in identity branch. Served model aliases and overrides
+/// are resolved by the caller; this branch handles native wire IDs.
+pub(crate) fn beta_canonical(model: &str) -> String {
+    let model = model.to_ascii_lowercase();
+    const KNOWN: &[&str] = &[
+        "claude-fable-5-1",
+        "claude-fable-5",
+        "claude-mythos-5-1",
+        "claude-mythos-5",
+        "claude-opus-5-5",
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-opus-4-5",
+        "claude-opus-4-1",
+        "claude-sonnet-5-5",
+        "claude-sonnet-5",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-5",
+        "claude-haiku-4-5",
+        "claude-3-7-sonnet",
+        "claude-3-5-sonnet",
+        "claude-3-5-haiku",
+        "claude-3-opus",
+        "claude-3-sonnet",
+        "claude-3-haiku",
     ];
-    !OLDER.iter().any(|older| m.contains(older))
+    // OI checks the undotted 4.0 identities before the subsequent families.
+    for &known in KNOWN {
+        if known == "claude-sonnet-5-5" && undotted_four(&model, "claude-opus-4") {
+            return "claude-opus-4-0".into();
+        }
+        if known == "claude-haiku-4-5" && undotted_four(&model, "claude-sonnet-4") {
+            return "claude-sonnet-4-0".into();
+        }
+        if model.contains(known) {
+            return known.into();
+        }
+    }
+    let suffix = model
+        .rsplit_once('-')
+        .filter(|(_, suffix)| suffix.len() == 8 && suffix.bytes().all(|b| b.is_ascii_digit()));
+    suffix.map_or(model.clone(), |(base, _)| base.into())
 }
 
-/// Whether `var` is set to a non-empty, non-`0`/`false` value.
+fn undotted_four(model: &str, family: &str) -> bool {
+    model.match_indices(family).any(|(start, _)| {
+        let tail = &model.as_bytes()[start + family.len()..];
+        !(tail.first() == Some(&b'-')
+            && tail.get(1).is_some_and(u8::is_ascii_digit)
+            && !tail.get(2).is_some_and(u8::is_ascii_digit))
+    })
+}
+
+const MODEL_ORDER: &[&str] = &[
+    "claude-opus-4-0",
+    "claude-sonnet-4-0",
+    "claude-opus-4-1",
+    "claude-sonnet-4-5",
+    "claude-haiku-4-5",
+    "claude-opus-4-5",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+];
+
+pub(crate) fn older_than(model: &str, threshold: &str) -> bool {
+    let model = beta_canonical(model);
+    model.contains("claude-3-")
+        || MODEL_ORDER
+            .iter()
+            .position(|&name| name == model)
+            .is_some_and(|index| {
+                index
+                    < MODEL_ORDER
+                        .iter()
+                        .position(|&name| name == threshold)
+                        .expect("native threshold")
+            })
+}
+
+pub(crate) fn structured_outputs_model_capable(model: &str) -> bool {
+    // Native Tvn/f$: all four Claude protocol families are admitted. The
+    // caller checks the Claude protocol family before this model-order gate.
+    !older_than(model, "claude-opus-4-1")
+}
+
+pub(crate) fn effort_capable(provider: Provider, model: &str) -> bool {
+    effort_capable_in(
+        provider,
+        model,
+        env_truthy("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT"),
+    )
+}
+
+fn effort_capable_in(provider: Provider, model: &str, always: bool) -> bool {
+    let model = beta_canonical(model);
+    !model.contains("claude-3-")
+        && ![
+            "claude-opus-4-0",
+            "claude-opus-4-1",
+            "claude-sonnet-4-0",
+            "claude-sonnet-4-5",
+            "claude-haiku-4-5",
+        ]
+        .contains(&model.as_str())
+        && (always
+            || model == "claude-mythos-5"
+            || matches!(provider, Provider::Anthropic | Provider::Foundry))
+}
+
+fn is_haiku(model: &str) -> bool {
+    beta_canonical(model).contains("haiku")
+}
+fn thinking_capable(model: &str) -> bool {
+    !beta_canonical(model).contains("claude-3-")
+}
+fn context_management_capable(model: &str) -> bool {
+    thinking_capable(model)
+}
+fn context_1m_active(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("[1m]")
+}
+fn mid_conversation_system(model: &str) -> bool {
+    !older_than(model, "claude-opus-4-8")
+}
 fn env_truthy(var: &str) -> bool {
-    match std::env::var(var) {
-        Ok(v) => {
-            let v = v.trim();
-            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
-        }
-        Err(_) => false,
-    }
+    crate::structured_output::bool_environment(var)
 }
 
 /// Build the first-party (`xLr(model)`) ordered beta set for messages.create.
-fn first_party_betas(ctx: &BetaContext) -> Vec<&'static str> {
+fn model_betas(provider: Provider, ctx: &BetaContext) -> Vec<&'static str> {
+    let environment = BetaEnvironment::read();
+    model_betas_in(provider, ctx, environment)
+}
+
+#[derive(Clone, Copy, Default)]
+struct BetaEnvironment {
+    disabled: bool,
+    interleaved_disabled: bool,
+    force_mid_system: bool,
+}
+impl BetaEnvironment {
+    fn read() -> Self {
+        Self {
+            disabled: env_truthy("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"),
+            interleaved_disabled: env_truthy("DISABLE_INTERLEAVED_THINKING"),
+            force_mid_system: env_truthy("CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM"),
+        }
+    }
+}
+fn model_betas_in(
+    provider: Provider,
+    ctx: &BetaContext,
+    env: BetaEnvironment,
+) -> Vec<&'static str> {
     let model = &ctx.model;
-    let exp = ctx.experimental_on();
-    let gkt = thinking_capable(model);
+    let exp = !env.disabled;
+    let first_party = matches!(provider, Provider::Anthropic | Provider::Foundry);
+    let gkt = provider == Provider::Foundry
+        || (thinking_capable(model)
+            && (first_party || beta_canonical(model) != "claude-haiku-4-5"));
     let mut betas: Vec<&'static str> = Vec::new();
 
     // 1. claude-code (unless Haiku).
@@ -321,30 +399,41 @@ fn first_party_betas(ctx: &BetaContext) -> Vec<&'static str> {
         betas.push(CONTEXT_1M);
     }
     // 4. interleaved-thinking, model thinking-capable ∧ not env-disabled.
-    if !env_truthy("DISABLE_INTERLEAVED_THINKING") && gkt {
+    if !env.interleaved_disabled && gkt {
         betas.push(INTERLEAVED_THINKING);
     }
     // 5. redact-thinking: experimental ∧ thinking ∧ interactive ∧ !summaries.
-    if exp && gkt && ctx.interactive && !ctx.show_thinking_summaries {
+    if first_party && exp && gkt && ctx.interactive && !ctx.show_thinking_summaries {
         betas.push(REDACT_THINKING);
     }
     // 6. thinking-token-count: experimental ∧ thinking ∧ firstParty.
-    if exp && gkt {
+    if exp
+        && gkt
+        && (provider == Provider::Anthropic
+            || provider == Provider::Bedrock && !older_than(model, "claude-opus-4-7"))
+    {
         betas.push(THINKING_TOKEN_COUNT);
     }
     // 7. narration_summaries (`pewter_owl_header` flag, default off) — skipped.
     // 8. context-management: !$Be ∧ KWu(model).
-    if exp && context_management_capable(model) {
+    if first_party && exp && (provider == Provider::Foundry || context_management_capable(model)) {
         betas.push(CONTEXT_MANAGEMENT);
     }
     // 9. structured-outputs (`tengu_tool_pear` flag, default off) — skipped.
-    // 10. web-search (vertex/foundry only) — skipped on first-party.
+    if provider == Provider::Foundry
+        || provider == Provider::Vertex && !older_than(model, "claude-opus-4-0")
+    {
+        betas.push(WEB_SEARCH);
+    }
     // 11. prompt-caching-scope: experimental.
-    if exp {
+    if first_party && exp {
         betas.push(PROMPT_CACHING_SCOPE);
     }
     // 12. mid-conversation-system: nhn(model).
-    if mid_conversation_system(model) {
+    if env.force_mid_system
+        || beta_canonical(model) == "claude-mythos-5"
+        || first_party && mid_conversation_system(model)
+    {
         betas.push(MID_CONVERSATION_SYSTEM);
     }
     // (ANTHROPIC_BETAS env append is honored by apply_beta_header's merge.)
@@ -353,6 +442,11 @@ fn first_party_betas(ctx: &BetaContext) -> Vec<&'static str> {
         betas.push(FAST_MODE);
     }
     // Per-feature: effort when the request sets output_config.effort.
+    let side = ctx.request_kind
+        == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
+    if side && ctx.structured_output {
+        betas.push(STRUCTURED_OUTPUTS);
+    }
     if ctx.effort {
         betas.push(EFFORT);
     }
@@ -360,9 +454,12 @@ fn first_party_betas(ctx: &BetaContext) -> Vec<&'static str> {
     if ctx.context_hint {
         betas.push(CONTEXT_HINT);
     }
+    if !side && ctx.structured_output {
+        betas.push(STRUCTURED_OUTPUTS);
+    }
     // claude.ts appends the provider-specific tool-search header after the
     // ordinary model/request beta list once `useToolSearch` is resolved.
-    if ctx.tool_search && exp {
+    if ctx.tool_search && exp && first_party {
         betas.push(ADVANCED_TOOL_USE_1P);
     }
     betas
@@ -372,7 +469,7 @@ fn first_party_betas(ctx: &BetaContext) -> Vec<&'static str> {
 /// per-request [`BetaContext`].
 ///
 /// Ports the binary's `e5(model)`: the first-party ordered set from
-/// [`first_party_betas`], then provider/endpoint narrowing:
+/// [`model_betas`], then provider/endpoint narrowing:
 /// - **`CountTokens`** keeps only [`COUNT_TOKENS_ALLOWED`] (the binary's `ERr`).
 /// - **`Bedrock`** drops [`BEDROCK_EXTRA_PARAMS_HEADERS`] (the binary's `bRr`),
 ///   which move to `extraBodyParams`.
@@ -380,7 +477,7 @@ fn first_party_betas(ctx: &BetaContext) -> Vec<&'static str> {
 ///   first-party path here anyway).
 #[must_use]
 pub fn assemble_beta_header(provider: Provider, endpoint: Endpoint, ctx: &BetaContext) -> String {
-    let mut betas = first_party_betas(ctx);
+    let mut betas = model_betas(provider, ctx);
 
     // count_tokens: intersect with the ERr whitelist (any provider).
     if matches!(endpoint, Endpoint::CountTokens) {
@@ -388,7 +485,7 @@ pub fn assemble_beta_header(provider: Provider, endpoint: Endpoint, ctx: &BetaCo
     }
 
     match provider {
-        Provider::Anthropic => {}
+        Provider::Anthropic | Provider::Foundry => {}
         Provider::Vertex => {
             betas.retain(|b| *b != ADVANCED_TOOL_USE_1P);
             if ctx.tool_search && ctx.experimental_on() {
@@ -409,7 +506,7 @@ pub fn assemble_beta_header(provider: Provider, endpoint: Endpoint, ctx: &BetaCo
 /// `anthropic_beta` array rather than the HTTP header.
 #[must_use]
 pub fn bedrock_extra_body_betas(ctx: &BetaContext) -> Vec<String> {
-    let mut betas: Vec<String> = first_party_betas(ctx)
+    let mut betas: Vec<String> = model_betas(Provider::Bedrock, ctx)
         .into_iter()
         .filter(|beta| BEDROCK_EXTRA_PARAMS_HEADERS.contains(beta))
         .map(str::to_string)
@@ -504,6 +601,80 @@ pub fn apply_beta_header_with_auth_and_custom(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_native_model_beta_source_matches_headers_and_effort() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/betas_2_1_287.json")).unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let input = &case["input"];
+            let provider = match input["provider"].as_str().unwrap() {
+                "firstParty" => Provider::Anthropic,
+                "foundry" => Provider::Foundry,
+                "vertex" => Provider::Vertex,
+                "bedrock" => Provider::Bedrock,
+                _ => unreachable!(),
+            };
+            let bool_env = |key: &str| {
+                input["env"][key]
+                    .as_str()
+                    .is_some_and(crate::structured_output::bool_value)
+            };
+            let env = BetaEnvironment {
+                disabled: bool_env("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"),
+                interleaved_disabled: bool_env("DISABLE_INTERLEAVED_THINKING"),
+                force_mid_system: bool_env("CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM"),
+            };
+            let model = input["model"].as_str().unwrap();
+            let context = BetaContext::for_model(model)
+                .with_interactive(input["interactive"].as_bool().unwrap());
+            let all = model_betas_in(provider, &context, env);
+            let body: Vec<_> = all
+                .iter()
+                .filter(|beta| BEDROCK_EXTRA_PARAMS_HEADERS.contains(beta))
+                .copied()
+                .collect();
+            let base: Vec<_> = all
+                .iter()
+                .filter(|beta| {
+                    provider != Provider::Bedrock || !BEDROCK_EXTRA_PARAMS_HEADERS.contains(beta)
+                })
+                .copied()
+                .collect();
+            let count: Vec<_> = base
+                .iter()
+                .filter(|beta| COUNT_TOKENS_ALLOWED.contains(beta))
+                .copied()
+                .collect();
+            assert_eq!(
+                beta_canonical(model),
+                case["expected"]["canonical"],
+                "{case}"
+            );
+            assert_eq!(base.join(","), case["expected"]["base"], "{case}");
+            assert_eq!(
+                serde_json::to_value(body).unwrap(),
+                case["expected"]["body"],
+                "{case}"
+            );
+            assert_eq!(count.join(","), case["expected"]["count"], "{case}");
+            let effort = effort_capable_in(
+                provider,
+                model,
+                bool_env("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT"),
+            );
+            assert_eq!(effort, case["expected"]["effort"], "{case}");
+            let automatic = model_betas_in(provider, &context.with_effort(effort), env)
+                .into_iter()
+                .filter(|beta| {
+                    provider != Provider::Bedrock || !BEDROCK_EXTRA_PARAMS_HEADERS.contains(beta)
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            assert_eq!(automatic, case["expected"]["default_main"], "{case}");
+            assert_eq!(base.join(","), case["expected"]["explicit_main"], "{case}");
+        }
+    }
 
     /// The 17 live constants are byte-exact against the binary's `qS(...)` registry.
     #[test]
@@ -627,11 +798,8 @@ mod tests {
         assert!(mid_conversation_system("claude-opus-4-8"));
         assert!(mid_conversation_system("claude-fable-5-1"));
         assert!(mid_conversation_system("claude-mythos-5-1"));
-        // 2.1.201 gate: claude-sonnet-5 is in the OLDER return-false branch
-        // (`n==="claude-sonnet-5"||n==="claude-haiku-4-5")return!1`), so the
-        // beta does NOT ride. Contains-hazard lock: the "sonnet-5" exclude must
-        // match "claude-sonnet-5" but NOT "sonnet-4-5"/"sonnet-4-6".
-        assert!(!mid_conversation_system("claude-sonnet-5"));
+        // Native av/lr does not classify Sonnet 5 as an older model.
+        assert!(mid_conversation_system("claude-sonnet-5"));
         assert!(!mid_conversation_system("claude-sonnet-4-6"));
         assert!(!mid_conversation_system("claude-sonnet-4-5"));
         assert!(!mid_conversation_system("claude-opus-4-7"));
@@ -789,12 +957,15 @@ mod tests {
     #[test]
     fn context_hint_body_lights_the_beta_header() {
         let model = "claude-opus-4-6";
-        let off = first_party_betas(&BetaContext::for_model(model));
+        let off = model_betas(Provider::Anthropic, &BetaContext::for_model(model));
         assert!(
             !off.contains(&CONTEXT_HINT),
             "no `context_hint` in the body ⇒ no beta: {off:?}"
         );
-        let on = first_party_betas(&BetaContext::for_model(model).with_context_hint(true));
+        let on = model_betas(
+            Provider::Anthropic,
+            &BetaContext::for_model(model).with_context_hint(true),
+        );
         assert!(
             on.contains(&CONTEXT_HINT),
             "`context_hint` in the body ⇒ the beta rides along: {on:?}"

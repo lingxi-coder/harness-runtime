@@ -1,17 +1,18 @@
 use ::fusion as fusion_engine;
 use async_trait::async_trait;
+use futures::StreamExt;
 use lingxi_core::host::panel_pool::PanelPoolDrain;
 use lingxi_core::host::subagent_spawn::SubagentInheritance;
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 use lingxi_core::host::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sidequery::{
     SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse,
     StrictStructuredQueryRequest, StrictStructuredQueryResponse,
 };
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
 
@@ -66,15 +67,9 @@ struct Api {
 }
 #[async_trait]
 impl agent::SubagentApiClient for Api {
-    async fn messages_create_stream_in_opts(
+    async fn stream(
         &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        tools: Vec<Value>,
-        effort: Option<Value>,
-        opts: agent::api::SubagentApiCallOpts,
+        request: agent::api::SubagentApiRequest,
     ) -> Result<
         futures::stream::BoxStream<
             'static,
@@ -82,61 +77,17 @@ impl agent::SubagentApiClient for Api {
         >,
         llm_runtime::LlmError,
     > {
-        self.messages_create_stream_forced_in_opts(
-            model, profile, system, messages, tools, None, effort, opts,
-        )
-        .await
-    }
-
-    async fn messages_create_stream_forced_in_opts(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        tools: Vec<Value>,
-        forced_tool: Option<&str>,
-        effort: Option<Value>,
-        opts: agent::api::SubagentApiCallOpts,
-    ) -> Result<
-        futures::stream::BoxStream<
-            'static,
-            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
-        >,
-        llm_runtime::LlmError,
-    > {
-        // Explicit mock host: retain and inspect the actual Rust capability,
-        // rather than relying on the legacy default's fail-closed opts path.
-        let context = opts.model_attempt;
+        // Keep the actual attempt capability alive through stream opening,
+        // including the barrier shared by the two admitted panels.
+        let context = request.opts.model_attempt;
         if let Some(context) = &context {
             assert_eq!(context.stage(), ModelAttemptStage::Panel);
             assert!(context.panel_slot().is_some());
             self.registered.fetch_add(1, Ordering::SeqCst);
         }
-        let result = self
-            .messages_create_stream_forced_in(
-                model,
-                profile,
-                system,
-                messages,
-                tools,
-                forced_tool,
-                effort,
-            )
-            .await;
-        drop(context);
-        result
-    }
-    async fn messages_create(
-        &self,
-        _: &str,
-        _: Option<&str>,
-        _: Vec<lingxi_core::types::ConversationMessage>,
-        _: Vec<Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.both.wait().await;
-        Ok(llm_runtime::HistoryResponse {
+        let response = llm_runtime::HistoryResponse {
             id: "fake-panel".into(),
             model: "mock".into(),
             content: vec![llm_runtime::ContentBlock::ToolCall {
@@ -149,7 +100,10 @@ impl agent::SubagentApiClient for Api {
             usage: Default::default(),
             cost: None,
             provider_metadata: Value::Null,
-        })
+        };
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(response);
+        drop(context);
+        Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
     }
 }
 #[derive(Default)]

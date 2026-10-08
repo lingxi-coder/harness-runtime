@@ -39,7 +39,7 @@ impl ConversationOrchestrator {
         // gate. Seeding it here matters because the reminder producer can run
         // before the first wire-tools assembly.
         tools.set_main_loop_model(
-            crate::conversation::tooling_impl::canonical_main_loop_model(&config.model),
+            crate::conversation::tooling_impl::canonical_main_loop_model(&config.model, None),
         );
         // Publish the session-scoped tool-search gate (Claude Code `$U()`) so the
         // request builder branches `tool_reference` normalization on the SESSION
@@ -54,6 +54,7 @@ impl ConversationOrchestrator {
                 && tool_search_supported_for_request(&config.model, None),
         );
         let session = SessionState::empty(SessionId::new(), config.model.clone());
+        let main_reports = super::main_reports_impl::MainReportInbox::new(session.session_id);
         let invoked_skill_session_id = session.session_id.to_string();
         let current_effort = config.effort.clone();
         let current_reasoning_selection = current_effort
@@ -61,6 +62,7 @@ impl ConversationOrchestrator {
             .map(|effort| lingxi_core::host::ReasoningSelection::Level { id: effort.clone() })
             .unwrap_or(lingxi_core::host::ReasoningSelection::Automatic);
         let current_effort_explicit = current_effort.is_some();
+        let ultracode = config.ultracode;
         Self {
             config,
             api,
@@ -71,10 +73,24 @@ impl ConversationOrchestrator {
             perms,
             output,
             session: Arc::new(Mutex::new(session)),
+            session_end_fired: Mutex::new(HashSet::new()),
+            mod_turn: std::sync::Mutex::new(None),
+            mod_session_event_sender: std::sync::Mutex::new(None),
+            mod_session_measure_sampler: Arc::new(
+                mod_session_measure_sampler::ModSessionMeasureSampler::default(),
+            ),
+            mod_ui_selection: std::sync::Mutex::new(None),
+            mod_surface_roster: std::sync::Arc::new(
+                crate::mod_surface_roster::ModSurfaceRoster::default(),
+            ),
+            mod_settings_reader: None,
+            mod_command_catalog: None,
             invoked_skill_session_guard: compaction::invoked_skills::InvokedSkillSessionGuard::new(
                 invoked_skill_session_id,
             ),
             turn_gate: Arc::new(Mutex::new(())),
+            streaming_tool_dispatch_owner: std::sync::OnceLock::new(),
+            main_reports,
             model_switch_gate: Mutex::new(()),
             dynamic_workflows_gate: lingxi_core::host::session_flags::DynamicWorkflowsGate::default(
             ),
@@ -100,14 +116,19 @@ impl ConversationOrchestrator {
                 current_effort,
                 current_reasoning_selection,
                 current_effort_explicit,
+                ultracode,
             ),
             memory,
             should_exit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             fast_mode: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_registry: None,
+            task_registry: None,
+            mod_agent_name_registry: None,
+            model_resolution_context_provider: None,
             ide_handle: None,
             fork_spawner: None,
             fork_budget: None,
+            hook_agent_inheritance: None,
             bg_session_forker: None,
             repo_root_reloader: None,
             recap_runner: None,
@@ -133,6 +154,16 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_jsonl_writer(mut self, writer: Arc<JsonlWriter>) -> Self {
         self.transcript.jsonl_writer = Some(writer);
+        self
+    }
+
+    /// Use the host's live remote UI attachment roster for this session.
+    #[must_use]
+    pub fn with_mod_surface_roster(
+        mut self,
+        roster: std::sync::Arc<crate::mod_surface_roster::ModSurfaceRoster>,
+    ) -> Self {
+        self.mod_surface_roster = roster;
         self
     }
 
@@ -190,6 +221,26 @@ impl ConversationOrchestrator {
         self
     }
 
+    /// Supply the host's live settings sources to Mod calls.
+    #[must_use]
+    pub fn with_mod_settings_reader(
+        mut self,
+        reader: Arc<dyn hooks::mods::ModSettingsReader>,
+    ) -> Self {
+        self.mod_settings_reader = Some(reader);
+        self
+    }
+
+    /// Supply the host's shared slash-command catalog to Mod calls.
+    #[must_use]
+    pub fn with_mod_command_catalog(
+        mut self,
+        catalog: Arc<dyn hooks::mods::ModCommandCatalog>,
+    ) -> Self {
+        self.mod_command_catalog = Some(catalog);
+        self
+    }
+
     /// Wire the resolved workspace-trust state for `/goal`.
     #[must_use]
     pub fn with_workspace_trusted(mut self, trusted: bool) -> Self {
@@ -220,27 +271,14 @@ impl ConversationOrchestrator {
     /// `ExitWorktree` (Task 6-8 of the worktree-206 plan) swap. Builder-style;
     /// wired at the desktop/mobile composition roots.
     ///
-    /// Registers a synchronous `set_on_swap` callback (Task 5) that clears
-    /// [`Self::conditional_rules_cache`] — the one genuine CWD-keyed cache this
-    /// port keeps — on every swap, so the next turn re-walks the memory
-    /// hierarchy under the new cwd instead of replaying the pre-swap
-    /// directory's conditional rules for the rest of the session. Every other
-    /// per-turn cwd-dependent section (env block, gitStatus,
-    /// `additional_context_message`) is recomputed from scratch each turn, so
-    /// switching them onto this live cell (done in [`Self::build_prompt_context`]
-    /// and friends) is enough on its own — no cache to clear there.
+    /// Conditional rules use the current cwd on every fresh trigger walk.
+    /// Their session delivery marks survive a worktree swap.
     ///
     /// Without this call the default private `SessionCwd` (over the
     /// constructor's static `cwd`, never swapped) stands, so every cwd-derived
     /// section reads the boot cwd exactly as before — the INERT INVARIANT.
     #[must_use]
     pub fn with_session_cwd(mut self, session_cwd: Arc<tool_api::SessionCwd>) -> Self {
-        let cache = Arc::clone(&self.prompt_runtime.conditional_rules_cache);
-        session_cwd.set_on_swap(Box::new(move |_new_cwd| {
-            if let Ok(mut guard) = cache.lock() {
-                *guard = None;
-            }
-        }));
         self.session_cwd = session_cwd;
         self
     }
@@ -332,6 +370,7 @@ impl ConversationOrchestrator {
                 .expect("with_session_id runs at construction, before any turn holds the lock");
             s.session_id = session_id;
         }
+        self.main_reports.reset_for_builder(session_id);
         self.invoked_skill_session_guard
             .replace(session_id.to_string());
         self
@@ -453,6 +492,7 @@ impl ConversationOrchestrator {
     /// post-prepare owner to finish. Hosts call this after request producers
     /// stop and before session-state coordinators close.
     pub async fn close_and_drain_session_switches(&self) -> Vec<String> {
+        self.close_main_report_admission().await;
         self.lifecycle_runtime
             .session_switch_supervisor
             .close_and_drain()
@@ -492,6 +532,48 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_mcp_registry(mut self, mcp: Arc<mcp::McpRegistry>) -> Self {
         self.mcp_registry = Some(mcp);
+        self
+    }
+
+    /// Share the execution registry with Mod agent enumeration and waits.
+    #[must_use]
+    pub fn with_task_registry(
+        mut self,
+        registry: Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
+    ) -> Self {
+        self.task_registry = Some(registry);
+        self
+    }
+
+    /// Bind the actual Agent routing store to direct Mod list calls.
+    #[must_use]
+    pub fn with_mod_agent_name_registry(
+        mut self,
+        registry: Arc<dyn lingxi_core::host::agent_name_registry::AgentNameRegistry>,
+    ) -> Self {
+        self.mod_agent_name_registry = Some(registry);
+        self
+    }
+
+    /// Share the host's model route authority and refresh the initial tool gate.
+    #[must_use]
+    pub fn with_model_resolution_context_provider(
+        mut self,
+        provider: Arc<dyn agent::model_resolution::ModelResolutionContextProvider>,
+    ) -> Self {
+        self.model_resolution_context_provider = Some(provider);
+        let initial_route = self
+            .session
+            .try_lock()
+            .ok()
+            .map(|session| (session.model.clone(), session.model_profile.clone()));
+        if let Some((model, profile)) = initial_route {
+            self.refresh_main_loop_model_for_route(&model, profile.as_deref());
+        } else {
+            // A shared session is already in use; its route will be refreshed
+            // by profile seeding or the next wire-tools snapshot.
+            self.tools.set_main_loop_model(None);
+        }
         self
     }
 
@@ -630,12 +712,7 @@ impl ConversationOrchestrator {
     }
 
     fn coordinator_simple_mode() -> bool {
-        lingxi_core::host::env::is_env_truthy(
-            std::env::var("LINGXI_SIMPLE")
-                .or_else(|_| std::env::var("CLAUDE_CODE_SIMPLE"))
-                .ok()
-                .as_deref(),
-        )
+        lingxi_core::host::env::is_env_truthy(std::env::var(branding::SIMPLE_ENV).ok().as_deref())
     }
 
     #[cfg(test)]
@@ -746,6 +823,28 @@ impl ConversationOrchestrator {
         self.lookup_tool(name, false)
     }
 
+    /// Resolve `$.tool.call` against the live Native-equivalent active tool
+    /// catalog, after the `Mx` wrapped-V1 filter. Returns the canonical tool
+    /// handle itself so later validation, permission checks, and execution use
+    /// the same Arc even if a dynamic catalog changes during the call.
+    pub(crate) async fn resolve_mod_tool_call_tool(
+        &self,
+        requested_name: &str,
+    ) -> Option<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
+        self.filtered_available_tools()
+            .await
+            .into_iter()
+            .find(|tool| {
+                let wrapper = tool.native_mod_tool_batch_wrapper_facts();
+                let hidden_wrapped_v1 = wrapper.underlying_v1_tool_name.is_some()
+                    && wrapper.entry_field_name.is_some()
+                    && wrapper.per_entry_hook_inputs_is_function
+                    && wrapper.reassemble_is_function;
+                !hidden_wrapped_v1
+                    && (tool.name() == requested_name || tool.aliases().contains(&requested_name))
+            })
+    }
+
     fn lookup_tool(
         &self,
         name: &str,
@@ -813,7 +912,7 @@ impl ConversationOrchestrator {
     }
 
     /// Wire the source of completed background (`async`) hook responses, folded
-    /// back into the next turn by [`Self::async_hook_response_reminder_message`]
+    /// back into the next turn by [`Self::async_hook_response_mod_messages`]
     /// (claude-code `getAsyncHookResponseAttachments`). Without it that method
     /// is a strict no-op.
     #[must_use]
@@ -1028,6 +1127,16 @@ impl ConversationOrchestrator {
         self
     }
 
+    /// Attach the owning session's enforced tool and shared budget handles for Agent hooks.
+    #[must_use]
+    pub fn with_hook_agent_inheritance(
+        mut self,
+        inheritance: lingxi_core::host::SubagentInheritance,
+    ) -> Self {
+        self.hook_agent_inheritance = Some(inheritance);
+        self
+    }
+
     /// Attach the budget enforcer a `/fork`-spawned background agent inherits
     /// (`SubagentInheritance::budget`). Pair with [`Self::with_fork_spawner`].
     #[must_use]
@@ -1169,7 +1278,7 @@ impl ConversationOrchestrator {
         self.should_exit.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Hermetic override for the roots [`Self::nested_memory_reminder_message`]
+    /// Hermetic override for the roots [`Self::nested_memory_reminder_messages`]
     /// probes. See [`Self::nested_memory_roots`].
     #[must_use]
     pub fn with_nested_memory_roots(

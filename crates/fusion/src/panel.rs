@@ -1525,6 +1525,7 @@ fn spawn_request(
     name_index: usize,
 ) -> SubagentSpawnRequest {
     SubagentSpawnRequest {
+        stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped,
         subagent_type: FUSION_PANEL_TYPE.to_string(),
         prompt,
         model: Some(panel.model.clone()),
@@ -2556,6 +2557,7 @@ Everything below is PARTIAL output recovered from the agent before it was cut of
 did NOT finish its task \u{2014} treat these results as incomplete."
         );
         SubagentResult::Completed {
+            handback: None,
             agent_id: lingxi_core::types::AgentId::new(),
             content: serde_json::json!({
                 "content": [{"type": "text", "text": cutoff_note}],
@@ -2637,6 +2639,7 @@ being silently discarded"
             "panel prompt".into(),
             Duration::from_secs(1),
             PanelFinish::Done(SubagentResult::Completed {
+                handback: None,
                 agent_id: lingxi_core::types::AgentId::new(),
                 content: serde_json::json!({"not": "a valid panel report"}),
                 usage: SubagentUsage::default(),
@@ -3789,6 +3792,7 @@ mod cancel_drain_settlement_tests {
             reasoning_output_tokens: 0,
         };
         SubagentResult::Completed {
+            handback: None,
             agent_id: lingxi_core::types::AgentId::new(),
             content,
             usage: usage.clone(),

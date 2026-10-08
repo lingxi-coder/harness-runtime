@@ -513,6 +513,30 @@ impl DurableTurnStore {
         })
     }
 
+    /// Live observers cannot undo a pause or terminal checkpoint. Compare and
+    /// mutate under the same store lock as explicit pause/resume transitions.
+    pub(crate) fn transition_if_live(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+        state: TurnRecoveryStateDto,
+        safe_to_resume: bool,
+        reason: Option<String>,
+    ) -> Result<Option<TurnRecoverySnapshotDto>, DurableTurnStoreError> {
+        self.update_if(session_id, turn_id, |checkpoint| {
+            if !matches!(
+                checkpoint.state,
+                TurnRecoveryStateDto::Running | TurnRecoveryStateDto::WaitingForUser
+            ) {
+                return Ok(None);
+            }
+            checkpoint.state = state;
+            checkpoint.safe_to_resume = safe_to_resume && !checkpoint.state.is_terminal();
+            checkpoint.reason = reason;
+            Ok(Some(checkpoint.snapshot()))
+        })
+    }
+
     pub(crate) fn cancel(
         &self,
         session_id: &str,
@@ -594,6 +618,18 @@ impl DurableTurnStore {
         turn_id: u64,
         mutate: impl FnOnce(&mut DurableTurnCheckpoint) -> Result<T, DurableTurnStoreError>,
     ) -> Result<T, DurableTurnStoreError> {
+        self.update_if(session_id, turn_id, |checkpoint| {
+            mutate(checkpoint).map(Some)
+        })
+        .map(|value| value.expect("unconditional mutation returns a value"))
+    }
+
+    fn update_if<T>(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+        mutate: impl FnOnce(&mut DurableTurnCheckpoint) -> Result<Option<T>, DurableTurnStoreError>,
+    ) -> Result<Option<T>, DurableTurnStoreError> {
         let mut cache = self
             .lock
             .lock()
@@ -613,7 +649,9 @@ impl DurableTurnStore {
 
         let cached = self.load_cached_turn(&mut cache, &relative)?.clone();
         let mut checkpoint = cached.checkpoint.clone();
-        let value = mutate(&mut checkpoint)?;
+        let Some(value) = mutate(&mut checkpoint)? else {
+            return Ok(None);
+        };
         checkpoint.reconcile_sequences();
         checkpoint.revision = checkpoint.revision.saturating_add(1);
         self.sync_journal_relative(&relative)?;
@@ -625,7 +663,7 @@ impl DurableTurnStore {
                 journal_event_count: cached.journal_event_count,
             },
         );
-        Ok(value)
+        Ok(Some(value))
     }
 
     fn sync_journal_relative(&self, relative: &Path) -> Result<(), DurableTurnStoreError> {
@@ -850,6 +888,56 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let store = DurableTurnStore::new(temp.path().join("turns"));
         (temp, store)
+    }
+
+    #[test]
+    fn live_observers_preserve_a_paused_checkpoint_until_explicit_resume() {
+        let (_temp, store) = store();
+        store
+            .begin("session", 1, "prompt".into(), None, vec![])
+            .unwrap();
+        store
+            .transition(
+                "session",
+                1,
+                TurnRecoveryStateDto::PausedRecoverable,
+                true,
+                Some("background_time_expired".into()),
+            )
+            .unwrap();
+        let paused = store.load("session", 1).unwrap();
+        for state in [
+            TurnRecoveryStateDto::WaitingForUser,
+            TurnRecoveryStateDto::Running,
+            TurnRecoveryStateDto::Completed,
+        ] {
+            assert!(store
+                .transition_if_live("session", 1, state, false, Some("late observer".into()))
+                .unwrap()
+                .is_none());
+            let unchanged = store.load("session", 1).unwrap();
+            assert_eq!(unchanged.state, paused.state);
+            assert_eq!(unchanged.revision, paused.revision);
+            assert_eq!(unchanged.reason, paused.reason);
+            assert_eq!(unchanged.safe_to_resume, paused.safe_to_resume);
+        }
+        store
+            .transition("session", 1, TurnRecoveryStateDto::Running, true, None)
+            .unwrap();
+        assert_eq!(
+            store
+                .transition_if_live(
+                    "session",
+                    1,
+                    TurnRecoveryStateDto::WaitingForUser,
+                    false,
+                    None
+                )
+                .unwrap()
+                .unwrap()
+                .state,
+            TurnRecoveryStateDto::WaitingForUser
+        );
     }
 
     #[test]

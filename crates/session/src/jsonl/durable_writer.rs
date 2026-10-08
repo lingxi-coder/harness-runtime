@@ -1,15 +1,20 @@
 //! Effectively-once transcript delivery under a session-state lock.
 //!
-//! `JsonlWriter` remains the compatibility writer used by older embedders.
-//! This writer is the durable path for terminal/outbox records: it uses the
+//! `JsonlWriter` owns the session transcript targets. This writer supplies
+//! their durable path for terminal/outbox records: it uses the
 //! pinned session-state directory as the lock root, checks the stable delivery
 //! id under that same lock, appends through the exact no-follow handle, and
 //! fsyncs before acknowledging success.
 
+use crate::jsonl::exact_json::{
+    parse_exact_json, to_vec_with_overrides, ExactJsonError, ExactJsonValue, Utf16Overrides,
+};
 use crate::jsonl::journal::{SESSION_STATE_DIR_MODE, SESSION_STATE_FILE_MODE};
+use crate::jsonl::message_identity::{self, IdentityLogStore};
 use lingxi_core::host::rooted_fs::{
-    lock_exclusive_pinned, open_append_file_pinned, open_read_file_pinned, root_identity,
-    sync_parent_pinned, RootIdentity,
+    atomic_write_pinned, atomic_write_stream_pinned, lock_exclusive_pinned,
+    open_append_file_pinned, open_read_file_pinned, root_identity, sync_parent_pinned,
+    AtomicWriteOptions, RootIdentity,
 };
 use lingxi_core::host::FsError;
 use serde_json::{Map, Value};
@@ -24,6 +29,8 @@ pub const TRANSCRIPT_LOCK_FILE_NAME: &str = "transcript.lock";
 /// In-memory record comparison and new Fusion record bound. Larger ordinary
 /// history rows are validated by streaming, retaining only identity metadata.
 pub const DEFAULT_MAX_TRANSCRIPT_SCAN_BYTES: usize = 2 * 1024 * 1024;
+const TOMBSTONE_TAIL_BYTES: u64 = 64 * 1024;
+const TOMBSTONE_REWRITE_LIMIT_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Append-once result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +45,9 @@ pub enum TranscriptAppendOutcome {
 /// second interpretation of the same delivery id.
 #[derive(Debug, Error)]
 pub enum TranscriptWriterError {
+    /// Exact JavaScript JSON string encoding failed.
+    #[error(transparent)]
+    ExactJson(#[from] ExactJsonError),
     /// Rooted filesystem failure.
     #[error(transparent)]
     Fs(#[from] FsError),
@@ -52,6 +62,9 @@ pub enum TranscriptWriterError {
     /// Durable outbox messages must carry their deterministic transcript UUID.
     #[error("transcript payload is missing a string uuid")]
     MissingMessageUuid,
+    /// A native UUID-only row cannot be converted from a delivery-id row.
+    #[error("native transcript payload must not carry deliveryId")]
+    NativeDeliveryIdField,
     /// A stable delivery id was found with different content.
     #[error("transcript delivery id conflict: {delivery_id}")]
     DeliveryConflict {
@@ -102,6 +115,11 @@ pub struct DurableTranscriptTransaction<'a> {
 struct TranscriptIdentity {
     uuid: Option<String>,
     delivery: Option<String>,
+}
+
+struct TranscriptExpectation {
+    exact: ExactJsonValue,
+    delivery_id: Option<String>,
 }
 
 struct IdentitySeed<'a> {
@@ -155,8 +173,8 @@ impl<'de> serde::de::Visitor<'de> for IdentitySeed<'_> {
 }
 
 /// `IgnoredAny` skips large strings without allocating, but serde deliberately
-/// does not validate their UTF-8/surrogate pairs and uses a depth-sized scratch
-/// stack. Guard precisely those properties; serde still owns JSON grammar.
+/// does not validate their UTF-8 or escapes and uses a depth-sized scratch
+/// stack. Guard those properties; JSON admits escaped lone surrogate units.
 struct MetadataReader<'a, R> {
     reader: R,
     budget: &'a Cell<Option<usize>>,
@@ -179,12 +197,8 @@ enum StringEscape {
     None,
     Escaped,
     Unicode {
-        value: u16,
         left: u8,
-        low: bool,
     },
-    LowSlash,
-    LowU,
 }
 
 impl StreamingStringValidation {
@@ -237,45 +251,20 @@ impl StreamingStringValidation {
                 _ => StringEscape::None,
             },
             StringEscape::Escaped => match byte {
-                b'u' => StringEscape::Unicode {
-                    value: 0,
-                    left: 4,
-                    low: false,
-                },
+                b'u' => StringEscape::Unicode { left: 4 },
                 b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => StringEscape::None,
                 _ => return false,
             },
-            StringEscape::Unicode { value, left, low } => {
-                let Some(digit) = char::from(byte).to_digit(16) else {
+            StringEscape::Unicode { left } => {
+                if !byte.is_ascii_hexdigit() {
                     return false;
-                };
-                let value = (value << 4) | digit as u16;
+                }
                 if left > 1 {
-                    StringEscape::Unicode {
-                        value,
-                        left: left - 1,
-                        low,
-                    }
-                } else if low {
-                    if !(0xdc00..=0xdfff).contains(&value) {
-                        return false;
-                    }
-                    StringEscape::None
-                } else if (0xd800..=0xdbff).contains(&value) {
-                    StringEscape::LowSlash
-                } else if (0xdc00..=0xdfff).contains(&value) {
-                    return false;
+                    StringEscape::Unicode { left: left - 1 }
                 } else {
                     StringEscape::None
                 }
             }
-            StringEscape::LowSlash if byte == b'\\' => StringEscape::LowU,
-            StringEscape::LowU if byte == b'u' => StringEscape::Unicode {
-                value: 0,
-                left: 4,
-                low: true,
-            },
-            StringEscape::LowSlash | StringEscape::LowU => return false,
         };
         true
     }
@@ -411,6 +400,25 @@ impl DurableTranscriptWriter {
         )
     }
 
+    /// Remove one native transcript UUID under the same cross-process
+    /// transaction used by durable appends and relocation. The replacement is
+    /// atomic, so a crash cannot leave the original file truncated between a
+    /// tombstone and suffix copy.
+    pub fn remove_message_by_uuid_at(
+        &self,
+        transcript_root: &Path,
+        transcript_identity: &RootIdentity,
+        transcript_relative: &Path,
+        message_uuid: &str,
+    ) -> Result<bool, TranscriptWriterError> {
+        self.begin_transaction()?.remove_message_by_uuid_at(
+            transcript_root,
+            transcript_identity,
+            transcript_relative,
+            message_uuid,
+        )
+    }
+
     fn append_json_once_at_locked(
         &self,
         transcript_root: &Path,
@@ -418,9 +426,15 @@ impl DurableTranscriptWriter {
         transcript_relative: &Path,
         delivery_id: &str,
         mut payload: Value,
+        utf16_overrides: &Utf16Overrides,
+        stamp_delivery_id: bool,
+        identity_registration: Option<(&IdentityLogStore, &Path)>,
     ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
         if !matches!(payload, Value::Object(_)) {
             return Err(TranscriptWriterError::PayloadNotObject);
+        }
+        if !stamp_delivery_id && payload.get("deliveryId").is_some() {
+            return Err(TranscriptWriterError::NativeDeliveryIdField);
         }
         let message_uuid = payload
             .get("uuid")
@@ -428,11 +442,14 @@ impl DurableTranscriptWriter {
             .filter(|uuid| !uuid.is_empty())
             .ok_or(TranscriptWriterError::MissingMessageUuid)?
             .to_string();
-        if let Value::Object(object) = &mut payload {
-            object.insert(
-                "deliveryId".to_string(),
-                Value::String(delivery_id.to_string()),
-            );
+        if stamp_delivery_id {
+            payload
+                .as_object_mut()
+                .expect("object payload checked")
+                .insert(
+                    "deliveryId".to_string(),
+                    Value::String(delivery_id.to_string()),
+                );
         }
         let (file_present, missing_final_delimiter, existing_match, last_uuid) =
             match open_read_file_pinned(
@@ -441,8 +458,13 @@ impl DurableTranscriptWriter {
                 Some(transcript_identity),
             ) {
                 Ok(file) => {
-                    let (missing_delimiter, matching, last_uuid) =
-                        self.scan_existing(file, delivery_id, &message_uuid, &payload)?;
+                    let (missing_delimiter, matching, last_uuid) = self.scan_existing(
+                        file,
+                        delivery_id,
+                        &message_uuid,
+                        &payload,
+                        utf16_overrides,
+                    )?;
                     (true, missing_delimiter, matching, last_uuid)
                 }
                 Err(FsError::NotFound(_)) => (false, false, None, None),
@@ -479,8 +501,7 @@ impl DurableTranscriptWriter {
                 );
             }
         }
-        let mut line =
-            serde_json::to_vec(&payload).map_err(|error| FsError::Io(error.to_string()))?;
+        let mut line = to_vec_with_overrides(&payload, utf16_overrides)?;
         line.push(b'\n');
         if line.len() > self.max_record_bytes {
             return Err(TranscriptWriterError::ScanTooLarge {
@@ -489,6 +510,15 @@ impl DurableTranscriptWriter {
         }
         if missing_final_delimiter {
             line.insert(0, b'\n');
+        }
+        if let Some((store, identity_path)) = identity_registration {
+            message_identity::append_row_identity_at(
+                store,
+                identity_path,
+                transcript_root,
+                transcript_identity,
+                &message_uuid,
+            )?;
         }
         let mut file = open_append_file_pinned(
             transcript_root,
@@ -575,6 +605,7 @@ impl DurableTranscriptWriter {
         delivery_id: &str,
         message_uuid: &str,
         payload: &Value,
+        utf16_overrides: &Utf16Overrides,
     ) -> Result<
         (
             bool,
@@ -586,7 +617,21 @@ impl DurableTranscriptWriter {
         #[cfg(test)]
         self.duplicate_scans
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let expected = payload_without_delivery_id(payload.clone());
+        let encoded = to_vec_with_overrides(payload, utf16_overrides)?;
+        let mut expected = parse_exact_json(
+            std::str::from_utf8(&encoded).expect("exact JSON encoder emits UTF-8"),
+        )?;
+        let expected_delivery_id = expected
+            .value
+            .get("deliveryId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        expected.value = payload_without_delivery_id(expected.value);
+        expected.utf16_overrides.remove("/deliveryId");
+        let expected = TranscriptExpectation {
+            exact: expected,
+            delivery_id: expected_delivery_id,
+        };
         let mut reader = BufReader::with_capacity(16 * 1024, file);
         let mut line = Vec::new();
         let mut line_offset = 0_u64;
@@ -688,14 +733,17 @@ impl DurableTranscriptWriter {
         offset: u64,
         delivery_id: &str,
         message_uuid: &str,
-        expected: &Value,
+        expected: &TranscriptExpectation,
         matching: &mut Option<Result<TranscriptAppendOutcome, TranscriptWriterError>>,
     ) -> Result<Option<String>, TranscriptWriterError> {
         if line.is_empty() {
             return Ok(None);
         }
-        let value: Value = serde_json::from_slice(line)
-            .map_err(|_| TranscriptWriterError::CorruptLine { offset })?;
+        let mut exact = std::str::from_utf8(line)
+            .ok()
+            .and_then(|line| parse_exact_json(line).ok())
+            .ok_or(TranscriptWriterError::CorruptLine { offset })?;
+        let value = exact.value;
         let stored_uuid = value.get("uuid").and_then(Value::as_str);
         let last_uuid = stored_uuid
             .filter(|uuid| !uuid.is_empty())
@@ -703,11 +751,16 @@ impl DurableTranscriptWriter {
         let stored_delivery_id = value.get("deliveryId").and_then(Value::as_str);
         let matches_uuid = stored_uuid == Some(message_uuid);
         let matches_delivery = stored_delivery_id == Some(delivery_id);
-        let identities_agree =
-            matches_uuid && stored_delivery_id.is_none_or(|stored| stored == delivery_id);
+        let identities_agree = matches_uuid
+            && match expected.delivery_id.as_deref() {
+                Some(expected_id) => stored_delivery_id == Some(expected_id),
+                None => value.get("deliveryId").is_none(),
+            };
         if matches_uuid || matches_delivery {
             let mut actual = payload_without_delivery_id(value);
-            let mut comparable_expected = expected.clone();
+            let mut comparable_expected = expected.exact.value.clone();
+            let mut expected_units = expected.exact.utf16_overrides.clone();
+            exact.utf16_overrides.remove("/deliveryId");
             // A caller may use null as the parent placeholder for a new
             // Fusion delivery. Existing duplicate rows carry their resolved
             // parent; compare all immutable fields while ignoring only this
@@ -722,12 +775,16 @@ impl DurableTranscriptWriter {
                 if let Value::Object(object) = &mut comparable_expected {
                     object.remove("parentUuid");
                 }
+                exact.utf16_overrides.remove("/parentUuid");
+                expected_units.remove("/parentUuid");
             }
-            // Older transcript rows did not carry `deliveryId`; accepting an
-            // identical UUID-only row makes the upgrade idempotent. Once a
-            // delivery id is present, both stable identities must agree: a
-            // collision in either namespace is a hard conflict.
-            let outcome = if identities_agree && actual == comparable_expected {
+            // Native rows identify their prepared UUID alone. Fusion rows
+            // carry the current delivery identity as well. A retry must use
+            // the same format and immutable payload as its original append.
+            let outcome = if identities_agree
+                && actual == comparable_expected
+                && exact.utf16_overrides == expected_units
+            {
                 Ok(TranscriptAppendOutcome::AlreadyPresent)
             } else {
                 Err(TranscriptWriterError::DeliveryConflict {
@@ -811,8 +868,26 @@ impl DurableTranscriptTransaction<'_> {
         transcript_relative: &Path,
         payload: Value,
     ) -> Result<(), TranscriptWriterError> {
-        let mut line =
-            serde_json::to_vec(&payload).map_err(|error| FsError::Io(error.to_string()))?;
+        self.append_raw_json_at_exact(
+            transcript_root,
+            transcript_identity,
+            transcript_relative,
+            payload,
+            &Utf16Overrides::new(),
+        )
+    }
+
+    /// Append one ordinary native row with recovered exact string leaves.
+    /// It retains the ordinary path's ordering and durability policy.
+    pub fn append_raw_json_at_exact(
+        &self,
+        transcript_root: &Path,
+        transcript_identity: &RootIdentity,
+        transcript_relative: &Path,
+        payload: Value,
+        utf16_overrides: &Utf16Overrides,
+    ) -> Result<(), TranscriptWriterError> {
+        let mut line = to_vec_with_overrides(&payload, utf16_overrides)?;
         line.push(b'\n');
         // Ordinary transcript rows do not buy durability, and never did: the
         // non-durable writer this path replaced only flushed. They travel
@@ -846,6 +921,160 @@ impl DurableTranscriptTransaction<'_> {
             )?;
         }
         Ok(())
+    }
+
+    /// Remove a Native tombstone UUID while the durable transcript lock is
+    /// held. The 64 KiB tail path keeps the normal target search bounded; if
+    /// the target is elsewhere, full inspection is limited to 50 MiB. Both
+    /// paths publish with an atomic replacement, so an interrupted copy never
+    /// leaves the original inode truncated. Surviving `parentUuid` fields are
+    /// left byte-for-byte unchanged.
+    pub fn remove_message_by_uuid_at(
+        &self,
+        transcript_root: &Path,
+        transcript_identity: &RootIdentity,
+        transcript_relative: &Path,
+        message_uuid: &str,
+    ) -> Result<bool, TranscriptWriterError> {
+        let mut file = match open_read_file_pinned(
+            transcript_root,
+            transcript_relative,
+            Some(transcript_identity),
+        ) {
+            Ok(file) => file,
+            Err(FsError::NotFound(_)) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let file_len = file
+            .metadata()
+            .map_err(|error| FsError::Io(error.to_string()))?
+            .len();
+        if file_len == 0 {
+            return Ok(false);
+        }
+
+        let tail_len = file_len.min(TOMBSTONE_TAIL_BYTES);
+        let tail_start = file_len - tail_len;
+        let tail_len_usize = usize::try_from(tail_len)
+            .map_err(|_| FsError::Io("transcript tail exceeds addressable memory".into()))?;
+        let mut tail = vec![0; tail_len_usize];
+        file.seek(SeekFrom::Start(tail_start))
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        file.read_exact(&mut tail)
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        let mut offset = 0usize;
+        let mut tail_match = None;
+        for line in tail.split_inclusive(|byte| *byte == b'\n') {
+            let line_start = offset;
+            offset += line.len();
+            // The first fragment can begin halfway through a record. It is
+            // eligible only when the bounded scan started at the file head.
+            if line_start == 0 && tail_start != 0 {
+                continue;
+            }
+            if transcript_line_has_uuid(line, message_uuid) {
+                tail_match = Some(line_start..offset);
+                break;
+            }
+        }
+
+        if tail_match.is_none() && file_len > TOMBSTONE_REWRITE_LIMIT_BYTES {
+            tracing::warn!(
+                bytes = file_len,
+                message_uuid,
+                "skipping transcript tombstone removal because the target is outside the tail window of a large session file"
+            );
+            return Ok(false);
+        }
+
+        if let Some(range) = tail_match {
+            let line_start = tail_start
+                .checked_add(range.start as u64)
+                .ok_or_else(|| FsError::Io("transcript tail offset overflow".into()))?;
+            let line_end = tail_start
+                .checked_add(range.end as u64)
+                .ok_or_else(|| FsError::Io("transcript tail offset overflow".into()))?;
+            atomic_write_stream_pinned(
+                transcript_root,
+                transcript_relative,
+                AtomicWriteOptions {
+                    overwrite: true,
+                    create_parents: false,
+                    dir_mode: 0o700,
+                    file_mode: 0o600,
+                },
+                transcript_identity,
+                |temporary| {
+                    file.seek(SeekFrom::Start(0))
+                        .map_err(|error| FsError::Io(error.to_string()))?;
+                    let copied_prefix = {
+                        let mut prefix = (&mut file).take(line_start);
+                        std::io::copy(&mut prefix, temporary)
+                            .map_err(|error| FsError::Io(error.to_string()))?
+                    };
+                    if copied_prefix != line_start {
+                        return Err(FsError::Io(
+                            "transcript changed while staging tombstone prefix".into(),
+                        ));
+                    }
+                    file.seek(SeekFrom::Start(line_end))
+                        .map_err(|error| FsError::Io(error.to_string()))?;
+                    let copied_suffix = std::io::copy(&mut file, temporary)
+                        .map_err(|error| FsError::Io(error.to_string()))?;
+                    if copied_suffix != file_len.saturating_sub(line_end) {
+                        return Err(FsError::Io(
+                            "transcript changed while staging tombstone suffix".into(),
+                        ));
+                    }
+                    Ok(())
+                },
+            )?;
+            return Ok(true);
+        }
+
+        let capacity = usize::try_from(file_len)
+            .map_err(|_| FsError::Io("transcript file exceeds addressable memory".into()))?;
+        let mut body = Vec::new();
+        body.try_reserve_exact(capacity).map_err(|error| {
+            FsError::Io(format!(
+                "could not buffer transcript for tombstone: {error}"
+            ))
+        })?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| FsError::Io(error.to_string()))?;
+        file.read_to_end(&mut body)
+            .map_err(|error| FsError::Io(error.to_string()))?;
+
+        let mut line_start = 0usize;
+        let mut match_range = None;
+        for line in body.split_inclusive(|byte| *byte == b'\n') {
+            let line_end = line_start + line.len();
+            if transcript_line_has_uuid(line, message_uuid) {
+                match_range = Some((line_start, line_end));
+                break;
+            }
+            line_start = line_end;
+        }
+        let Some((line_start, line_end)) = match_range else {
+            return Ok(false);
+        };
+        body.copy_within(line_end.., line_start);
+        body.truncate(body.len() - (line_end - line_start));
+        drop(file);
+
+        atomic_write_pinned(
+            transcript_root,
+            transcript_relative,
+            &body,
+            AtomicWriteOptions {
+                overwrite: true,
+                create_parents: false,
+                dir_mode: 0o700,
+                file_mode: 0o600,
+            },
+            transcript_identity,
+        )?;
+        Ok(true)
     }
 
     /// Append under the writer's own pinned root without reacquiring the lock.
@@ -902,8 +1131,102 @@ impl DurableTranscriptTransaction<'_> {
             transcript_relative,
             delivery_id,
             payload,
+            &Utf16Overrides::new(),
+            true,
+            None,
         )
     }
+
+    /// Append one durable delivery and register its outer UUID in the Host
+    /// identity sidecar under the same transaction, only after duplicate
+    /// detection has established that a new row will be written.
+    pub(crate) fn append_json_once_at_with_tip_identity(
+        &self,
+        transcript_root: &Path,
+        transcript_identity: &RootIdentity,
+        transcript_relative: &Path,
+        delivery_id: &str,
+        payload: Value,
+        identity_store: &IdentityLogStore,
+        transcript_path: &Path,
+    ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
+        self.writer.append_json_once_at_locked(
+            transcript_root,
+            transcript_identity,
+            transcript_relative,
+            delivery_id,
+            payload,
+            &Utf16Overrides::new(),
+            true,
+            Some((identity_store, transcript_path)),
+        )
+    }
+
+    /// Append native exact JavaScript strings once by their prepared UUID.
+    /// The delivery key stays private; no `deliveryId` field is emitted.
+    pub fn append_json_once_at_with_tip_exact(
+        &self,
+        transcript_root: &Path,
+        transcript_identity: &RootIdentity,
+        transcript_relative: &Path,
+        delivery_id: &str,
+        payload: Value,
+        utf16_overrides: &Utf16Overrides,
+    ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
+        self.writer.append_json_once_at_locked(
+            transcript_root,
+            transcript_identity,
+            transcript_relative,
+            delivery_id,
+            payload,
+            utf16_overrides,
+            false,
+            None,
+        )
+    }
+
+    /// The ordinary Host session writer variant. It records the outer UUID in
+    /// its Host-only identity sidecar under this already-held transaction,
+    /// after duplicate detection and before the transcript append.
+    pub(crate) fn append_json_once_at_with_tip_exact_identity(
+        &self,
+        transcript_root: &Path,
+        transcript_identity: &RootIdentity,
+        transcript_relative: &Path,
+        delivery_id: &str,
+        payload: Value,
+        utf16_overrides: &Utf16Overrides,
+        identity_store: &IdentityLogStore,
+        transcript_path: &Path,
+    ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
+        self.writer.append_json_once_at_locked(
+            transcript_root,
+            transcript_identity,
+            transcript_relative,
+            delivery_id,
+            payload,
+            utf16_overrides,
+            false,
+            Some((identity_store, transcript_path)),
+        )
+    }
+}
+
+fn transcript_line_has_uuid(line: &[u8], expected_uuid: &str) -> bool {
+    let line = line.strip_suffix(b"\n").unwrap_or(line);
+    let Ok(line) = std::str::from_utf8(line) else {
+        return false;
+    };
+    parse_exact_json(line)
+        .ok()
+        .and_then(|exact| {
+            exact
+                .value
+                .get("uuid")
+                .and_then(Value::as_str)
+                .map(|uuid| uuid == expected_uuid)
+        })
+        .unwrap_or(false)
 }
 
 fn payload_without_delivery_id(mut payload: Value) -> Value {
@@ -917,6 +1240,77 @@ fn payload_without_delivery_id(mut payload: Value) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn native_exact_written_failure_requires_durable_cold_retry_and_same_units() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = DurableTranscriptWriter::open(dir.path()).unwrap();
+        let identity = root_identity(dir.path()).unwrap();
+        let path = Path::new("native.jsonl");
+        let payload = json!({"uuid":"native-peer", "parentUuid":null, "origin":{"kind":"peer","body":"\u{fffd}"}, "message":{"content":[{"type":"text","text":"\u{fffd}"}]}});
+        let overrides = Utf16Overrides::from([
+            ("/origin/body".into(), vec![0xd83d]),
+            ("/message/content/0/text".into(), vec![0xd83d]),
+        ]);
+        writer
+            .fail_next_append_sync
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            writer.with_transaction(|tx| tx.append_json_once_at_with_tip_exact(
+                dir.path(),
+                &identity,
+                path,
+                "private-delivery",
+                payload.clone(),
+                &overrides
+            )),
+            Err(TranscriptWriterError::WrittenButNotDurable(_))
+        ));
+        let raw = std::fs::read_to_string(dir.path().join(path)).unwrap();
+        assert_eq!(raw.matches("\\ud83d").count(), 2);
+        assert!(!raw.contains("deliveryId"));
+        drop(writer);
+        let cold = DurableTranscriptWriter::open(dir.path()).unwrap();
+        cold.fail_next_existing_sync_for_test();
+        assert!(cold
+            .with_transaction(|tx| tx.append_json_once_at_with_tip_exact(
+                dir.path(),
+                &identity,
+                path,
+                "private-delivery",
+                payload.clone(),
+                &overrides
+            ))
+            .is_err());
+        assert_eq!(
+            cold.with_transaction(|tx| tx.append_json_once_at_with_tip_exact(
+                dir.path(),
+                &identity,
+                path,
+                "private-delivery",
+                payload.clone(),
+                &overrides
+            ))
+            .unwrap(),
+            (TranscriptAppendOutcome::AlreadyPresent, true)
+        );
+        let different = Utf16Overrides::from([
+            ("/origin/body".into(), vec![0xdc00]),
+            ("/message/content/0/text".into(), vec![0xd83d]),
+        ]);
+        assert!(matches!(
+            cold.with_transaction(|tx| tx.append_json_once_at_with_tip_exact(
+                dir.path(),
+                &identity,
+                path,
+                "private-delivery",
+                payload,
+                &different
+            )),
+            Err(TranscriptWriterError::DeliveryConflict { .. })
+        ));
+        assert_eq!(std::fs::read_to_string(dir.path().join(path)).unwrap(), raw);
+    }
 
     /// Ordinary rows travel through the durable transaction for ORDERING, not
     /// for durability, and must not pay an fsync each. Only creating the file
@@ -961,6 +1355,100 @@ mod tests {
             2,
             "a delivery whose receipt claims durability pays for it"
         );
+    }
+
+    #[test]
+    fn durable_tombstone_removes_one_row_atomically_without_reparenting_children() {
+        let state = tempfile::tempdir().unwrap();
+        let transcript = tempfile::tempdir().unwrap();
+        let path = Path::new("transcript.jsonl");
+        let transcript_path = transcript.path().join(path);
+        let root = "{\"type\":\"user\",\"uuid\":\"root\",\"parentUuid\":null}\n";
+        let removed = "{\"type\":\"assistant\",\"uuid\":\"removed\",\"parentUuid\":\"root\"}\n";
+        let child = "{\"type\":\"assistant\",\"uuid\":\"child\",\"parentUuid\":\"removed\"}\n";
+        let source = format!("{root}{removed}{child}");
+        std::fs::write(&transcript_path, &source).unwrap();
+        let identity = root_identity(transcript.path()).unwrap();
+        let writer = DurableTranscriptWriter::open(state.path()).unwrap();
+
+        assert!(writer
+            .remove_message_by_uuid_at(transcript.path(), &identity, path, "removed")
+            .unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&transcript_path).unwrap(),
+            format!("{root}{child}")
+        );
+        let persisted_child: Value = serde_json::from_str(
+            std::fs::read_to_string(&transcript_path)
+                .unwrap()
+                .lines()
+                .nth(1)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted_child["parentUuid"], "removed");
+    }
+
+    #[test]
+    fn durable_tombstone_holds_the_shared_transcript_transaction() {
+        let state = tempfile::tempdir().unwrap();
+        let transcript = tempfile::tempdir().unwrap();
+        let path = Path::new("transcript.jsonl");
+        let transcript_path = transcript.path().join(path);
+        std::fs::write(
+            &transcript_path,
+            "{\"type\":\"assistant\",\"uuid\":\"target\",\"parentUuid\":null}\n",
+        )
+        .unwrap();
+        let identity = root_identity(transcript.path()).unwrap();
+        let writer = DurableTranscriptWriter::open(state.path()).unwrap();
+        let transaction = writer.begin_transaction().unwrap();
+        let worker_writer = writer.clone();
+        let transcript_root = transcript.path().to_path_buf();
+        let identity_for_worker = identity;
+        let path_for_worker = path.to_path_buf();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = worker_writer.remove_message_by_uuid_at(
+                &transcript_root,
+                &identity_for_worker,
+                &path_for_worker,
+                "target",
+            );
+            finished_tx.send(result).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(finished_rx
+            .recv_timeout(std::time::Duration::from_millis(30))
+            .is_err());
+        drop(transaction);
+        assert!(finished_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap());
+        worker.join().unwrap();
+        assert_eq!(std::fs::metadata(transcript_path).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn durable_tombstone_rejects_a_replaced_transcript_root_without_touching_it() {
+        let state = tempfile::tempdir().unwrap();
+        let transcript = tempfile::tempdir().unwrap();
+        let wrong_root = tempfile::tempdir().unwrap();
+        let path = Path::new("transcript.jsonl");
+        let transcript_path = transcript.path().join(path);
+        let source = "{\"type\":\"assistant\",\"uuid\":\"target\",\"parentUuid\":null}\n";
+        std::fs::write(&transcript_path, source).unwrap();
+        let wrong_identity = root_identity(wrong_root.path()).unwrap();
+        let writer = DurableTranscriptWriter::open(state.path()).unwrap();
+
+        assert!(writer
+            .remove_message_by_uuid_at(transcript.path(), &wrong_identity, path, "target")
+            .is_err());
+        assert_eq!(std::fs::read_to_string(transcript_path).unwrap(), source);
     }
 
     #[test]
@@ -1067,9 +1555,9 @@ mod tests {
         let path = Path::new("transcript.jsonl");
         let prefix = format!("{{\"uuid\":\"image\",\"body\":\"{}", "a".repeat(1024));
         let mut cases = vec![
-            format!("{prefix}\\uD800\"}}").into_bytes(),
-            format!("{prefix}\\uDC00\"}}").into_bytes(),
-            format!("{prefix}\\uD800\\u0041\"}}").into_bytes(),
+            format!("{prefix}\\uQQQQ\"}}").into_bytes(),
+            format!("{prefix}\\uD80\"}}").into_bytes(),
+            format!("{prefix}\\q\"}}").into_bytes(),
             format!("{{\"uuid\":\"{}\",\"body\":0}}", "a".repeat(1024)).into_bytes(),
             format!("{{\"{}\":0}}", "k".repeat(1024)).into_bytes(),
             format!("{{\"body\":{}0{}}}", "[".repeat(256), "]".repeat(256)).into_bytes(),
@@ -1085,16 +1573,16 @@ mod tests {
             ));
             assert_eq!(std::fs::read(dir.path().join(path)).unwrap(), bytes);
         }
-        // Real multibyte Unicode and an escaped supplementary codepoint both
-        // remain valid while a large unrelated image body is skipped.
-        let valid = format!("{prefix}你好\\uD83D\\uDE00\"}}");
-        std::fs::write(dir.path().join(path), valid).unwrap();
-        assert_eq!(
-            writer
-                .append_json_once(path, "d", json!({"uuid":"f"}))
-                .unwrap(),
-            TranscriptAppendOutcome::Appended
-        );
+        // JSON strings admit escaped unmatched UTF-16 as well as scalar text.
+        for suffix in ["你好\\uD83D\\uDE00", "\\uD800", "\\uDC00", "\\uD800\\u0041"] {
+            std::fs::write(dir.path().join(path), format!("{prefix}{suffix}\"}}")).unwrap();
+            assert_eq!(
+                writer
+                    .append_json_once(path, "d", json!({"uuid":"f"}))
+                    .unwrap(),
+                TranscriptAppendOutcome::Appended
+            );
+        }
     }
 
     #[test]
@@ -1238,7 +1726,7 @@ mod tests {
     }
 
     #[test]
-    fn identical_legacy_uuid_without_delivery_id_is_upgrade_idempotent() {
+    fn append_once_keeps_native_uuid_and_fusion_delivery_identities_distinct() {
         let dir = tempfile::tempdir().unwrap();
         let writer = DurableTranscriptWriter::open(dir.path()).unwrap();
         let path = Path::new("transcript.jsonl");
@@ -1246,12 +1734,68 @@ mod tests {
         existing.push(b'\n');
         std::fs::write(dir.path().join(path), existing).unwrap();
 
+        let payload = json!({"uuid":"message-1","text":"ok"});
+        assert!(matches!(
+            writer.append_json_once(path, "delivery-1", payload.clone()),
+            Err(TranscriptWriterError::DeliveryConflict { .. })
+        ));
+        // A current native UUID-only append still retries its own row.
+        let identity = root_identity(dir.path()).unwrap();
         assert_eq!(
             writer
-                .append_json_once(path, "delivery-1", json!({"uuid":"message-1","text":"ok"}))
+                .with_transaction(|tx| tx.append_json_once_at_with_tip_exact(
+                    dir.path(),
+                    &identity,
+                    path,
+                    "private-delivery",
+                    payload.clone(),
+                    &Utf16Overrides::new(),
+                ))
                 .unwrap(),
-            TranscriptAppendOutcome::AlreadyPresent
+            (TranscriptAppendOutcome::AlreadyPresent, true)
         );
+
+        let mut invalid_native = payload.clone();
+        invalid_native["deliveryId"] = Value::Null;
+        assert!(matches!(
+            writer.with_transaction(|tx| tx.append_json_once_at_with_tip_exact(
+                dir.path(),
+                &identity,
+                path,
+                "private-delivery",
+                invalid_native.clone(),
+                &Utf16Overrides::new(),
+            )),
+            Err(TranscriptWriterError::NativeDeliveryIdField)
+        ));
+        std::fs::write(dir.path().join(path), format!("{invalid_native}\n")).unwrap();
+        assert!(matches!(
+            writer.with_transaction(|tx| tx.append_json_once_at_with_tip_exact(
+                dir.path(),
+                &identity,
+                path,
+                "private-delivery",
+                payload.clone(),
+                &Utf16Overrides::new(),
+            )),
+            Err(TranscriptWriterError::DeliveryConflict { .. })
+        ));
+
+        let fusion_path = Path::new("fusion.jsonl");
+        writer
+            .append_json_once(fusion_path, "delivery-1", payload.clone())
+            .unwrap();
+        assert!(matches!(
+            writer.with_transaction(|tx| tx.append_json_once_at_with_tip_exact(
+                dir.path(),
+                &identity,
+                fusion_path,
+                "private-delivery",
+                payload,
+                &Utf16Overrides::new(),
+            )),
+            Err(TranscriptWriterError::DeliveryConflict { .. })
+        ));
         assert_eq!(
             std::fs::read_to_string(dir.path().join(path))
                 .unwrap()

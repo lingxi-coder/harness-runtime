@@ -5,6 +5,11 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 struct State {
+    server_betas: HashMap<
+        (String, String, crate::ProtocolFamily),
+        lingxi_llm_client::providers::anthropic::fallback_request::ServerBetaState,
+    >,
+    betas: lingxi_llm_client::providers::anthropic::beta_repair::ConversationBetaState,
     marked: HashMap<lingxi_core::types::MessageId, usize>,
     pending_snapshot: bool,
     stripped: bool,
@@ -34,7 +39,131 @@ impl PartialEq for ThinkingRecoveryScope {
     }
 }
 
+#[cfg(test)]
+mod beta_tests {
+    use super::*;
+    use lingxi_llm_client::providers::anthropic::{
+        beta_repair::Beta,
+        fallback_request::LaneMode,
+        thinking_display::{DisplayProbe, DisplayProbeBudget, ProbeAdmission},
+    };
+    #[test]
+    fn context_reset_detaches_inflight_beta_commit_without_resetting_signature_history() {
+        let scope = ThinkingRecoveryScope::default();
+        scope.arm(true);
+        let captured = scope.beta_rejections();
+        let mut probe = DisplayProbe::default();
+        assert!(probe.on_error(
+            400,
+            ProbeAdmission {
+                header_sent: true,
+                ..Default::default()
+            },
+            &DisplayProbeBudget::default()
+        ));
+        scope.reset_beta_rejections();
+        assert!(probe.on_success(&captured));
+        captured.reject(Beta::ThinkingTokenCount);
+        assert!(captured.rejected(Beta::ThinkingDisplayUpdates));
+        assert!(!scope
+            .beta_rejections()
+            .rejected(Beta::ThinkingDisplayUpdates));
+        assert!(!scope.beta_rejections().rejected(Beta::ThinkingTokenCount));
+        assert!(scope.stripped());
+    }
+
+    #[test]
+    fn server_fallback_beta_latches_partition_and_detach_on_context_reset() {
+        let scope = ThinkingRecoveryScope::default();
+        let provider = crate::ProviderId::AnthropicFirstParty;
+        let protocol = crate::ProtocolFamily::AnthropicMessages;
+        let direct = scope.server_fallback_betas(&provider, "direct", protocol);
+        direct.reject(LaneMode::Default);
+
+        assert!(direct.snapshot().default_rejected);
+        assert!(
+            !scope
+                .server_fallback_betas(&provider, "alternate", protocol)
+                .snapshot()
+                .default_rejected,
+            "profiles own separate server-fallback beta latches"
+        );
+        assert!(
+            !scope
+                .server_fallback_betas(
+                    &crate::ProviderId::Custom {
+                        name: "gateway".into(),
+                    },
+                    "direct",
+                    protocol,
+                )
+                .snapshot()
+                .default_rejected,
+            "providers own separate server-fallback beta latches"
+        );
+        assert!(
+            !scope
+                .server_fallback_betas(&provider, "direct", crate::ProtocolFamily::FoundryClaude,)
+                .snapshot()
+                .default_rejected,
+            "protocols own separate server-fallback beta latches"
+        );
+
+        scope.reset_beta_rejections();
+        assert!(direct.snapshot().default_rejected);
+        assert!(
+            !scope
+                .server_fallback_betas(&provider, "direct", protocol)
+                .snapshot()
+                .default_rejected,
+            "a context reset detaches old in-flight handles"
+        );
+    }
+}
+
 impl ThinkingRecoveryScope {
+    /// Server betas follow a conversation and its provider profile. This keeps
+    /// the authorized multi-provider picker from moving first-party latches.
+    pub fn server_fallback_betas(
+        &self,
+        provider: &crate::ProviderId,
+        profile: &str,
+        protocol: crate::ProtocolFamily,
+    ) -> lingxi_llm_client::providers::anthropic::fallback_request::ServerBetaState {
+        let key = (
+            serde_json::to_string(provider).expect("provider identity is JSON"),
+            profile.to_owned(),
+            protocol,
+        );
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .server_betas
+            .entry(key)
+            .or_default()
+            .clone()
+    }
+
+    /// SDK display rejection belongs to this conversation, independently of
+    /// signature stripping and the lifetime of a shared API service.
+    pub fn beta_rejections(
+        &self,
+    ) -> lingxi_llm_client::providers::anthropic::beta_repair::ConversationBetaState {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .betas
+            .clone()
+    }
+
+    /// Replace the latch identity on context reset. An older in-flight request
+    /// may settle its captured scope without rejecting betas in the new scope.
+    pub fn reset_beta_rejections(&self) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        state.betas = Default::default();
+        state.server_betas = Default::default();
+    }
+
     /// Snapshot of rejected historical block ranges.
     pub fn messages(&self) -> HashMap<lingxi_core::types::MessageId, usize> {
         self.0

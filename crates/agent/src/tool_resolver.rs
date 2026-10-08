@@ -12,15 +12,13 @@
 //! every subagent pool has the agent-management / plan-mode tools stripped by
 //! default: `TaskOutput`, `ExitPlanMode`, `EnterPlanMode`, `AskUserQuestion`,
 //! `ConnectGitHub`, `WaitForMcpServers`, `ScheduleWakeup` (claude `_qd`).
-//! `Workflow` is additionally dropped for non-ant subagents (claude
-//! `...(USER_TYPE !== 'ant' ? [WORKFLOW_TOOL_NAME] : [])`).
+//! `Workflow` follows the agent's tool policy and the normal permission checks.
 //!
 //! `TaskStop` is NOT in that set — it is allowed to subagents. And `Agent` is
 //! NOT flat-denied either: it is DEPTH-GATED in [`AgentToolResolver::resolve`]
 //! per claude's `if(isAgentTool(a)) return depth < maxSpawnDepth`. As of 2.1.219
 //! the default maximum depth is 3 (was 1 through 2.1.217), with
-//! `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` providing the same override as
-//! Claude Code. The fork `use_exact_tools` bypass is exempt (fork recursion is
+//! `LINGXI_MAX_SUBAGENT_SPAWN_DEPTH` providing the override. The fork `use_exact_tools` bypass is exempt (fork recursion is
 //! governed by `AgentTool`'s `is_in_fork_child` message guard).
 //!
 //! ## Per-definition `disallowedTools` subtraction (claude `resolveAgentTools`)
@@ -41,7 +39,8 @@
 //! tool to a child. LingXi's resolver does not model `allowedAgentTypes` at all
 //! and so structurally cannot wrongly add `Agent` to a child based on it.
 
-use crate::definition::{AgentDefinition, AgentModel, AgentPermissionMode, AgentToolPolicy};
+use crate::definition::{AgentDefinition, AgentPermissionMode, AgentToolPolicy};
+use crate::model_resolution::ResolvedModelSelection;
 use std::collections::HashSet;
 use std::sync::Arc;
 use thiserror::Error;
@@ -50,6 +49,55 @@ use tool_api::Tool;
 /// Stateless utility that computes the effective tool set for an agent
 /// spawn from the agent definition plus the surrounding tool sets.
 pub struct AgentToolResolver;
+
+/// Trusted run gates for the ordinary Agent final-report tool. Shared resolver
+/// callers must opt in explicitly; an Auto mode alone grants no contract.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HandbackToolGates {
+    pub opt_in: bool,
+    pub feature_enabled: Option<bool>,
+    pub parent_auto: bool,
+    pub child_auto: bool,
+    pub exact_tools: bool,
+    pub structured_output: bool,
+    pub fork: bool,
+    pub observer: bool,
+}
+
+/// Inject the host-supplied instance after ordinary filtering. A foreign tool
+/// claiming its canonical name or alias disables the contract. The same Arc
+/// already offered remains a single declaration.
+pub fn inject_handback_tool(
+    tools: &mut Vec<Arc<dyn Tool>>,
+    supplied: Option<&Arc<dyn Tool>>,
+    gates: HandbackToolGates,
+) -> bool {
+    if !gates.opt_in
+        || !gates.feature_enabled.unwrap_or(true)
+        || !gates.parent_auto
+        || !gates.child_auto
+        || gates.exact_tools
+        || gates.structured_output
+        || gates.fork
+        || gates.observer
+    {
+        return false;
+    }
+    let Some(supplied) = supplied else {
+        return false;
+    };
+    let canonical = supplied.name();
+    if tools.iter().any(|tool| {
+        !Arc::ptr_eq(tool, supplied)
+            && (tool.name() == canonical || tool.aliases().contains(&canonical))
+    }) {
+        return false;
+    }
+    if !tools.iter().any(|tool| Arc::ptr_eq(tool, supplied)) {
+        tools.push(supplied.clone());
+    }
+    true
+}
 
 /// Coordinator workers must not be able to route through the generic MCP
 /// dispatcher or inspect MCP auth state, even when those base-list tools do
@@ -74,33 +122,12 @@ pub enum ToolResolutionError {
 }
 
 impl AgentToolResolver {
-    /// Tools every subagent has stripped by default, mirroring claude-code's
-    /// `ALL_AGENT_DISALLOWED_TOOLS` (`constants/tools.ts:36-46`). `is_ant`
-    /// gates the `Agent` entry: when `true` (claude `USER_TYPE === 'ant'`) the
-    /// `Agent` tool is KEPT so nested agents may spawn further agents.
-    ///
-    /// The tool names are hardcoded string literals because the `agent` crate
-    /// has no path-dep on `tools/*` (verified via `agent/Cargo.toml`), so the
-    /// `*_TOOL_NAME` consts are unreachable — `builtins.rs` already hardcodes
-    /// the same names. `Workflow` is dropped for non-ant subagents (claude
-    /// v2.1.186 `HDd` ant-gates it exactly like `Agent`).
+    /// Tools stripped from every subagent because their state belongs to the
+    /// parent session. Workflow remains subject to the ordinary agent tool
+    /// policy and permission checks. Agent recursion is bounded separately.
     #[must_use]
-    pub fn all_agent_disallowed_tools(is_ant: bool) -> Vec<&'static str> {
-        // PARITY: binary 2.1.191 `_qd(e)` (cc_all.txt:16041079):
-        //   `function _qd(e){return new Set([eW,WD,Kz,nm,Kst,tHe,
-        //                                    ...e!=="ant"?[av]:[],Kh])}`
-        // resolving the minified consts (grounded in the same binary):
-        //   eW="TaskOutput"  WD="ExitPlanMode"  Kz="EnterPlanMode"
-        //   nm="AskUserQuestion"  Kst="ConnectGitHub"  tHe="WaitForMcpServers"
-        //   av="Workflow" (non-ant only)  Kh="ScheduleWakeup"
-        // `nHe=_qd("external")` is the set the subagent tool-filter consults
-        // (`if(nHe.has(a.name))return!1`, cc_all.txt:19974083) — so ScheduleWakeup,
-        // ConnectGitHub and WaitForMcpServers ARE flatly denied to every subagent.
-        // ScheduleWakeup denial is load-bearing here: the WakeupSchedulerCell is
-        // process-global, so an un-denied ScheduleWakeup would let a default
-        // subagent schedule a real wakeup. (The companion advisory `nke`/NKE_BASE
-        // in runner.rs is only a message; the real removal happens HERE.)
-        let mut names = vec![
+    pub fn all_agent_disallowed_tools() -> Vec<&'static str> {
+        vec![
             "TaskOutput",
             "ExitPlanMode",
             "EnterPlanMode",
@@ -108,25 +135,7 @@ impl AgentToolResolver {
             "ConnectGitHub",
             "WaitForMcpServers",
             "ScheduleWakeup",
-            // NOTE: the binary's `_qd` set excludes `TaskStop` AND `Agent`.
-            // `TaskStop` is allowed to subagents (so it is NOT listed here), and
-            // `Agent` is NOT flat-denied — it is depth-GATED in `resolve()` via
-            // Claude's configured maximum spawn depth.
-        ];
-        // claude: `...(USER_TYPE !== 'ant' ? [WORKFLOW_TOOL_NAME] : [])` (`av`,
-        // non-ant only) — ant subagents keep `Workflow`. `Agent` is depth-gated
-        // (both ant + non-ant), NOT in this flat-deny set.
-        if !is_ant {
-            names.push("Workflow");
-        }
-        names
-    }
-
-    /// `true` when `USER_TYPE == "ant"` (claude `process.env.USER_TYPE ===
-    /// 'ant'`, EXACT match — not the truthy allowlist). Matches the existing
-    /// repo convention (`tools/task/src/task.rs`).
-    fn is_user_ant() -> bool {
-        std::env::var("USER_TYPE").is_ok_and(|v| v == "ant")
+        ]
     }
 
     /// Compute the effective tool list for a subagent.
@@ -146,7 +155,7 @@ impl AgentToolResolver {
     ///
     /// Pipeline (claude `resolveAgentTools` order-equivalent):
     /// 1. policy projection ([`AgentToolPolicy`]) — only removes tools;
-    /// 2. always-disallowed drop (`Agent`/`TaskOutput`/… gated by `USER_TYPE`);
+    /// 2. always-disallowed drop (`Agent`/`TaskOutput`/… subject to session ownership);
     /// 3. per-definition `disallowed_tools` subtraction (base-name match);
     /// 4. append per-agent MCP tools (coordinator workers omit `comms`);
     /// 5. Plan-mode safe-tool narrowing (LingXi-local last step).
@@ -229,15 +238,9 @@ impl AgentToolResolver {
         // `Write`/`Edit` (keeping `Read`). The tools are pulled from the parent
         // pool (the memory agent's parent always exposes them); if the parent
         // pool lacks one, that tool is simply not injected.
-        // (review #13) Match claude's full condition `fm() && n.memory &&
-        // o!==void 0`, not just `n.memory`: (a) honor the global auto-memory
-        // killswitch via `auto_memory_enabled()`, so `CLAUDE_CODE_DISABLE_AUTO_MEMORY`
-        // / `CLAUDE_CODE_SIMPLE` suppress injection as claude does — otherwise a
-        // restricted agent would be granted Read/Write/Edit the user's killswitch
-        // meant to withhold; and (b) inject ONLY for an EXPLICIT tools list
-        // (`o!==void 0`). For `All` the tools are already present (no-op); for
-        // `Except` claude does NOT inject, so an `Except`-excluded memory tool
-        // must stay excluded.
+        // Apply `LINGXI_DISABLE_AUTO_MEMORY` and `LINGXI_SIMPLE` before injecting
+        // tools. Only explicit tool lists receive this augmentation: All already
+        // has the tools, while Except must retain its exclusions.
         if agent_def.memory.is_some()
             && auto_memory_enabled()
             && matches!(agent_def.tools, AgentToolPolicy::Explicit(_))
@@ -256,15 +259,15 @@ impl AgentToolResolver {
         // claude's filterToolsForAgent runs on `availableTools` regardless of
         // the agent's `tools` policy. Applied BEFORE the MCP extend so
         // `mcp__*` tools are never touched (they are appended after).
-        let disallowed = Self::all_agent_disallowed_tools(Self::is_user_ant());
+        let disallowed = Self::all_agent_disallowed_tools();
         tools.retain(|t| !disallowed.contains(&t.name()));
 
         // (2b) Agent recursion depth-gate — introduced in Claude 2.1.217 and
         // raised to a default maximum depth of 3 in 2.1.219.
         // `if(isAgentTool(a)) return depth < getMaxSubagentSpawnDepth()`.
         // The default is 3 (depths 0-2 may spawn; a depth-3 child may not),
-        // with `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` as the override.
-        // Applies to ALL subagents (ant + non-ant). The `use_exact_tools` fork
+        // with `LINGXI_MAX_SUBAGENT_SPAWN_DEPTH` as the override.
+        // Applies to all subagents. The `use_exact_tools` fork
         // bypass (returned above) is exempt — fork recursion is governed by the
         // `is_in_fork_child` message guard in `AgentTool`.
         if depth >= lingxi_core::host::subagent_spawn::max_subagent_spawn_depth() {
@@ -324,31 +327,21 @@ fn tool_name_from_spec(spec: &str) -> &str {
     spec.split('(').next().unwrap_or(spec).trim()
 }
 
-/// Mirror of claude `fm()` / `isAutoMemoryEnabled` for the auto-memory tool
-/// injection gate (review #13). Auto-memory is DISABLED — and so the Read/Write/
-/// Edit injection is suppressed — when the killswitch env is set:
-/// `CLAUDE_CODE_DISABLE_AUTO_MEMORY` / `LINGXI_DISABLE_AUTO_MEMORY` truthy, or
-/// `CLAUDE_CODE_SIMPLE` / `LINGXI_SIMPLE` set. The remaining `fm()` arms
+/// Auto-memory tool injection is disabled when the product setting is set:
+/// `LINGXI_DISABLE_AUTO_MEMORY` truthy, or `LINGXI_SIMPLE` set. The remaining `fm()` arms
 /// (settings-level `autoMemoryEnabled:false`, non-interactive `Rl()`, and the
 /// remote-without-memdir case) are not yet threaded into the resolver — a
-/// documented follow-up; the env killswitch is the user-facing control CC
-/// documents and is honored here.
+/// documented follow-up; the environment settings are honored here.
 fn auto_memory_enabled() -> bool {
-    fn truthy(name: &str) -> bool {
-        std::env::var(name).ok().is_some_and(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            !matches!(v.as_str(), "" | "0" | "false" | "no" | "off")
-        })
-    }
-    fn is_set(name: &str) -> bool {
-        std::env::var(name)
-            .ok()
-            .is_some_and(|v| !v.trim().is_empty())
-    }
-    !(truthy("CLAUDE_CODE_DISABLE_AUTO_MEMORY")
-        || truthy("LINGXI_DISABLE_AUTO_MEMORY")
-        || is_set("CLAUDE_CODE_SIMPLE")
-        || is_set("LINGXI_SIMPLE"))
+    auto_memory_enabled_for_flags(
+        std::env::var("LINGXI_DISABLE_AUTO_MEMORY").ok().as_deref(),
+        std::env::var(branding::SIMPLE_ENV).ok().as_deref(),
+    )
+}
+
+fn auto_memory_enabled_for_flags(disabled: Option<&str>, simple: Option<&str>) -> bool {
+    !(lingxi_core::host::env::is_env_truthy(disabled)
+        || lingxi_core::host::env::is_env_truthy(simple))
 }
 
 /// Resolve a subagent spawn's advertised tool SCHEMAS + dispatch allow-list from
@@ -361,17 +354,18 @@ fn auto_memory_enabled() -> bool {
 /// `runAgent.ts`): [`AgentToolResolver::resolve`] over the registry's
 /// `available_tools`, then the tool-wide deny filter
 /// (`filterToolsByDenyRules`), then wire serialization keyed on the subagent's
-/// resolved `model` (so a model-gated tool prompt tracks the child's model).
+/// resolved model/profile (so route-gated tool prompts track the child's
+/// provider as well as its model).
 ///
 /// The allow-list includes each resolved tool's `aliases()` so the runner's
 /// dispatch guard accepts the SAME surface the inherited `RegistryToolInvoker`
-/// does (e.g. `AgentTool`'s legacy `"Task"`); the advertised schemas stay
+/// does for tools that declare aliases; the advertised schemas stay
 /// canonical-name-only. An empty `tool_wide_deny` drops nothing.
 pub async fn resolve_subagent_tools(
     registry: &tool_api::ToolRegistry,
     agent_def: &AgentDefinition,
     tool_wide_deny: &[String],
-    default_model: Option<&str>,
+    child_selection: Option<&ResolvedModelSelection>,
     // The resolved subagent's own recursion depth — gates its `Agent` tool
     // against Claude's configured maximum. Threaded from the spawn request.
     depth: u32,
@@ -384,6 +378,42 @@ pub async fn resolve_subagent_tools(
     // every caller that has none (byte-identical legacy).
     agent_mcp_tools: &[Arc<dyn Tool>],
 ) -> Result<(Vec<serde_json::Value>, Vec<String>), ToolResolutionError> {
+    resolve_subagent_tools_with_handback(
+        registry,
+        agent_def,
+        tool_wide_deny,
+        child_selection,
+        depth,
+        coordinator_mode,
+        agent_mcp_tools,
+        None,
+        HandbackToolGates::default(),
+    )
+    .await
+    .map(|(schemas, allowed, _)| (schemas, allowed))
+}
+
+/// Ordinary Agent variant, injecting its private final-report tool only after
+/// the full ordinary policy pipeline has finished.
+pub async fn resolve_subagent_tools_with_handback(
+    registry: &tool_api::ToolRegistry,
+    agent_def: &AgentDefinition,
+    tool_wide_deny: &[String],
+    child_selection: Option<&ResolvedModelSelection>,
+    // The resolved subagent's own recursion depth — gates its `Agent` tool
+    // against Claude's configured maximum. Threaded from the spawn request.
+    depth: u32,
+    // Whether this spawn is a coordinator worker. Coordinator workers hide
+    // `role:"comms"` MCP tools while ordinary sessions retain them.
+    coordinator_mode: bool,
+    // §24b — this spawn's already-connected per-agent MCP tools (claude
+    // `Agr`'s `Fe`), passed straight through to
+    // [`AgentToolResolver::resolve`]'s `agent_mcp_tools` parameter. Empty for
+    // every caller that has none (byte-identical legacy).
+    agent_mcp_tools: &[Arc<dyn Tool>],
+    supplied: Option<&Arc<dyn Tool>>,
+    handback_gates: HandbackToolGates,
+) -> Result<(Vec<serde_json::Value>, Vec<String>, bool), ToolResolutionError> {
     use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
 
     let parent_tools = registry.available_tools(&ToolStaticContext::default());
@@ -422,6 +452,7 @@ pub async fn resolve_subagent_tools(
             return Err(ToolResolutionError::EmptyExplicitToolSet(names.join(", ")));
         }
     }
+    let handback_enabled = inject_handback_tool(&mut resolved, supplied, handback_gates);
     let allowed: Vec<String> = resolved
         .iter()
         .flat_map(|t| {
@@ -429,20 +460,26 @@ pub async fn resolve_subagent_tools(
                 .chain(t.aliases().iter().map(|a| (*a).to_string()))
         })
         .collect();
-    let model = match &agent_def.model {
-        AgentModel::Explicit(id) | AgentModel::Alias(id) => Some(id.clone()),
-        AgentModel::Inherit => default_model.map(str::to_string),
+    let bash_precommit_skills = if resolved
+        .iter()
+        .any(|tool| tool.name() == "Skill" || tool.aliases().contains(&"Skill"))
+    {
+        registry.bash_precommit_skills().await
+    } else {
+        tool_api::tool_trait::BashPrecommitSkills::default()
     };
     let schemas = tool_api::wire::tools_to_wire(
         &resolved,
         &PromptOptions {
             include_examples: true,
-            model,
-            model_profile: None,
+            model: child_selection.map(|selection| selection.model.clone()),
+            model_profile: child_selection.and_then(|selection| selection.model_profile.clone()),
+            bash_precommit_skills,
+            bash_precommit_session_generation: registry.bash_precommit_session_generation(),
         },
     )
     .await;
-    Ok((schemas, allowed))
+    Ok((schemas, allowed, handback_enabled))
 }
 
 /// Add the tool capabilities every in-process teammate receives regardless of
@@ -503,6 +540,7 @@ mod tests {
     /// resolver inspects).
     struct StubTool {
         name: &'static str,
+        aliases: &'static [&'static str],
         role: Option<&'static str>,
         enabled: bool,
     }
@@ -511,6 +549,9 @@ mod tests {
     impl Tool for StubTool {
         fn name(&self) -> &str {
             self.name
+        }
+        fn aliases(&self) -> &[&str] {
+            self.aliases
         }
         fn input_schema(&self) -> &Value {
             static SCHEMA: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
@@ -548,8 +589,17 @@ mod tests {
         async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
             self.name.into()
         }
-        async fn prompt(&self, _opts: &PromptOptions) -> String {
-            self.name.into()
+        async fn prompt(&self, opts: &PromptOptions) -> String {
+            if self.name == "Bash" {
+                format!(
+                    "Bash {:?} generation={}",
+                    opts.bash_precommit_skills, opts.bash_precommit_session_generation
+                )
+            } else if self.name == "RouteFacts" {
+                format!("model={:?}, profile={:?}", opts.model, opts.model_profile)
+            } else {
+                self.name.into()
+            }
         }
         async fn call(
             &self,
@@ -564,14 +614,88 @@ mod tests {
     fn tool(name: &'static str) -> Arc<dyn Tool> {
         Arc::new(StubTool {
             name,
+            aliases: &[],
             role: None,
             enabled: true,
         })
     }
 
+    #[test]
+    fn handback_injection_matches_pinned_spawn_conjunction() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/subagent_handback_2_1_286.json"
+        ))
+        .unwrap();
+        for case in fixture["dependency_mocked_spawn_cases"].as_array().unwrap() {
+            let input = &case["input"];
+            let supplied = tool("SubagentHandback");
+            let mut offered = input["pool"]
+                .as_array()
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .map(|entry| {
+                            if entry["native_handback"] == true {
+                                supplied.clone()
+                            } else if entry["aliases"][0] == "SubagentHandback" {
+                                Arc::new(StubTool {
+                                    name: "foreign",
+                                    aliases: &["SubagentHandback"],
+                                    role: None,
+                                    enabled: true,
+                                }) as Arc<dyn Tool>
+                            } else if entry["aliases"][0] == "handback" {
+                                Arc::new(StubTool {
+                                    name: "foreign",
+                                    aliases: &["handback"],
+                                    role: None,
+                                    enabled: true,
+                                }) as Arc<dyn Tool>
+                            } else {
+                                tool("SubagentHandback")
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| vec![tool("Read")]);
+            let enabled = inject_handback_tool(
+                &mut offered,
+                (input["tool_supplied"] != false).then_some(&supplied),
+                HandbackToolGates {
+                    opt_in: if input["omit_opt_in"] == true {
+                        false
+                    } else if input.get("opt_in").is_some() {
+                        input["opt_in"].as_bool() == Some(true)
+                    } else {
+                        true
+                    },
+                    feature_enabled: input["flags"]["tengu_lively_waffle"].as_bool(),
+                    parent_auto: input["parent_mode"].as_str().unwrap_or("auto") == "auto",
+                    child_auto: input["child_mode"].as_str().unwrap_or("auto") == "auto",
+                    exact_tools: input["exact_tools"] == true,
+                    structured_output: input["structured_output"] == true,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                enabled,
+                case["expected"]["enabled"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                serde_json::json!(offered.iter().map(|tool| tool.name()).collect::<Vec<_>>()),
+                case["expected"]["tools"],
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
     fn comms_tool(name: &'static str) -> Arc<dyn Tool> {
         Arc::new(StubTool {
             name,
+            aliases: &[],
             role: Some("comms"),
             enabled: true,
         })
@@ -583,6 +707,7 @@ mod tests {
         registry.register_builtin(tool("Read"));
         registry.register_builtin(Arc::new(StubTool {
             name: "LSP",
+            aliases: &[],
             role: None,
             enabled: false,
         }));
@@ -627,6 +752,104 @@ mod tests {
         names.iter().map(|n| tool(n)).collect()
     }
 
+    #[tokio::test]
+    async fn child_tool_prompt_uses_admitted_model_and_profile_instead_of_definition() {
+        let mut registry = tool_api::ToolRegistry::new();
+        registry.register_builtin(tool("RouteFacts"));
+        let mut definition = agent_def(all_policy());
+        definition.model = AgentModel::Explicit("definition-model".into());
+        for profile in ["provider-a", "provider-b"] {
+            let selection = ResolvedModelSelection {
+                model: "shared-child-model".into(),
+                model_profile: Some(profile.into()),
+                model_resolution_context: crate::model_resolution::ModelResolutionContext {
+                    route: crate::model_resolution::ModelRouteFacts {
+                        model: "shared-child-model".into(),
+                        profile: Some(profile.into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            };
+            let (schemas, _) = resolve_subagent_tools(
+                &registry,
+                &definition,
+                &[],
+                Some(&selection),
+                0,
+                false,
+                &[],
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                schemas[0]["description"],
+                format!("model=Some(\"shared-child-model\"), profile=Some(\"{profile}\")")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_precommit_skills_follow_live_catalog_and_effective_skill_tool() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tool_api::tool_trait::BashPrecommitSkills;
+        let mut registry = tool_api::ToolRegistry::new();
+        registry.register_builtin(tool("Bash"));
+        registry.register_builtin(tool("Skill"));
+        let enabled = Arc::new(AtomicBool::new(true));
+        let provider_enabled = enabled.clone();
+        registry.set_bash_precommit_skills_provider(move || {
+            let enabled = provider_enabled.clone();
+            async move {
+                BashPrecommitSkills {
+                    custom_verify: enabled.load(Ordering::Relaxed),
+                    ..Default::default()
+                }
+            }
+        });
+        let definition = agent_def(all_policy());
+        let description = |schemas: Vec<Value>| {
+            schemas
+                .into_iter()
+                .find(|tool| tool["name"] == "Bash")
+                .unwrap()["description"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let (schemas, _) = resolve_subagent_tools(&registry, &definition, &[], None, 0, false, &[])
+            .await
+            .unwrap();
+        assert!(description(schemas).contains("custom_verify: true"));
+
+        let blocked = agent_def(AgentToolPolicy::Except(vec!["Skill".into()]));
+        let (schemas, _) = resolve_subagent_tools(&registry, &blocked, &[], None, 0, false, &[])
+            .await
+            .unwrap();
+        assert!(description(schemas).contains("custom_verify: false"));
+        let (schemas, _) = resolve_subagent_tools(
+            &registry,
+            &definition,
+            &["Skill".into()],
+            None,
+            0,
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(description(schemas).contains("custom_verify: false"));
+
+        enabled.store(false, Ordering::Relaxed);
+        registry.reset_bash_precommit_prompt_session();
+        let (schemas, _) = resolve_subagent_tools(&registry, &definition, &[], None, 0, false, &[])
+            .await
+            .unwrap();
+        let prompt = description(schemas);
+        assert!(prompt.contains("custom_verify: false"));
+        assert!(prompt.contains("generation=1"));
+    }
+
     fn names(tools: &[Arc<dyn Tool>]) -> Vec<String> {
         tools.iter().map(|t| t.name().to_string()).collect()
     }
@@ -635,6 +858,7 @@ mod tests {
     /// defaults.
     fn agent_def(tools: AgentToolPolicy) -> AgentDefinition {
         AgentDefinition {
+            omit_instructions: false,
             cache_ttl: None,
             agent_type: "test".into(),
             when_to_use: String::new(),
@@ -660,6 +884,7 @@ mod tests {
             initial_prompt: None,
             color: None,
             observer: None,
+            offer_provider: None,
         }
     }
 
@@ -741,68 +966,37 @@ mod tests {
         assert_eq!(excluded, vec!["Bash"]);
     }
 
-    // ── pure core: all_agent_disallowed_tools(is_ant) ──
-    // Tested directly (no env) to avoid the process-global USER_TYPE race.
-
     #[test]
-    fn core_non_ant_set_excludes_agent_and_task_stop() {
-        // `Agent` is depth-gated (not flat-denied) and `TaskStop` is allowed to
-        // subagents — neither is in the disallowed set (claude `_qd`). The
-        // plan-mode / agent-management tools + non-ant `Workflow` ARE.
-        let set = AgentToolResolver::all_agent_disallowed_tools(false);
-        assert!(
-            !set.contains(&"Agent"),
-            "Agent is depth-gated, not flat-denied"
-        );
-        assert!(
-            !set.contains(&"TaskStop"),
-            "TaskStop is allowed to subagents"
-        );
-        assert!(set.contains(&"TaskOutput"));
-        assert!(set.contains(&"ExitPlanMode"));
-        assert!(set.contains(&"EnterPlanMode"));
-        assert!(set.contains(&"AskUserQuestion"));
-        // non-ant: Workflow is dropped from subagent pools (binary HDd ant-gate).
-        assert!(set.contains(&"Workflow"));
-    }
-
-    /// The binary's `_qd`/`nHe` set (cc_all.txt:16041079) flatly denies
-    /// `ScheduleWakeup`, `ConnectGitHub`, and `WaitForMcpServers` to every
-    /// subagent. Denying `ScheduleWakeup` is load-bearing: the process-global
-    /// `WakeupSchedulerCell` means an un-denied call would schedule a real wakeup.
-    #[test]
-    fn core_denies_schedule_wakeup_and_friends() {
-        for is_ant in [false, true] {
-            let set = AgentToolResolver::all_agent_disallowed_tools(is_ant);
-            assert!(
-                set.contains(&"ScheduleWakeup"),
-                "ScheduleWakeup must be denied to subagents (is_ant={is_ant})"
-            );
-            assert!(set.contains(&"ConnectGitHub"));
-            assert!(set.contains(&"WaitForMcpServers"));
+    fn auto_memory_uses_canonical_boolean_flags() {
+        assert!(auto_memory_enabled_for_flags(None, None));
+        for value in ["", "0", "false", "no", "off", "unknown"] {
+            assert!(auto_memory_enabled_for_flags(Some(value), None));
+            assert!(auto_memory_enabled_for_flags(None, Some(value)));
+        }
+        for value in ["1", "true", "yes", "on"] {
+            assert!(!auto_memory_enabled_for_flags(Some(value), None));
+            assert!(!auto_memory_enabled_for_flags(None, Some(value)));
         }
     }
 
     #[test]
-    fn core_ant_omits_agent_and_workflow_keeps_rest() {
-        let set = AgentToolResolver::all_agent_disallowed_tools(true);
-        assert!(
-            !set.contains(&"Agent"),
-            "Agent is depth-gated, never flat-denied"
-        );
-        // ant: Workflow is kept (allowed for ant subagents), like Agent.
+    fn core_denies_session_tools_and_keeps_workflow() {
+        let set = AgentToolResolver::all_agent_disallowed_tools();
+        assert!(!set.contains(&"Agent"), "Agent is depth-gated");
+        assert!(!set.contains(&"TaskStop"));
         assert!(!set.contains(&"Workflow"));
-        assert!(
-            !set.contains(&"TaskStop"),
-            "TaskStop is allowed to subagents"
-        );
-        assert!(set.contains(&"TaskOutput"));
+        for tool in [
+            "TaskOutput",
+            "ExitPlanMode",
+            "EnterPlanMode",
+            "AskUserQuestion",
+            "ScheduleWakeup",
+            "ConnectGitHub",
+            "WaitForMcpServers",
+        ] {
+            assert!(set.contains(&tool), "{tool} belongs to the parent session");
+        }
     }
-
-    // ── resolve(): always-disallowed drop ──
-    // NOTE: these rely on the default env (USER_TYPE unset). They must NOT run
-    // concurrently with a test that sets USER_TYPE=ant in the same process; we
-    // therefore test the ant branch via the pure core above, never via env.
 
     #[test]
     fn all_policy_keeps_agent_at_depth_0() {
@@ -819,15 +1013,13 @@ mod tests {
     }
 
     #[test]
-    fn all_policy_strips_workflow_for_non_ant() {
-        // The registered Workflow tool must not leak into subagent pools (binary
-        // HDd: Workflow disallowed for USER_TYPE !== "ant").
+    fn all_policy_keeps_workflow() {
         let parent = pool(&["Read", "Workflow", "Bash"]);
         let resolved = AgentToolResolver::resolve(&agent_def(all_policy()), &parent, &[], 0, false);
         let got = names(&resolved);
         assert!(
-            !got.contains(&"Workflow".to_string()),
-            "Workflow must be stripped from non-ant subagents"
+            got.contains(&"Workflow".to_string()),
+            "Workflow follows the ordinary tool policy"
         );
         assert!(got.contains(&"Read".to_string()));
         assert!(got.contains(&"Bash".to_string()));

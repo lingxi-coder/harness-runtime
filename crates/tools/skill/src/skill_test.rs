@@ -228,12 +228,9 @@ mod tests {
 
     #[tokio::test]
     async fn model_frontmatter_returns_context_modifier_switching_main_loop_model() {
-        // SKILLEXEC.3 (model scope): a skill with `model:` returns a
-        // `context_modifier` that switches the turn's main-loop model. Here the
-        // seed `ctx` (fresh_ctx → main_loop_model "test", no `[1m]`) has no 1M
-        // suffix, so the resolved model is the bare override.
+        // Frontmatter is passed to the host without provider or model defaults.
         let desc = SkillDescriptor {
-            model: Some("claude-opus-4-6".into()),
+            model: Some("balanced".into()),
             ..prompt_desc("switcher")
         };
         let tool = SkillTool::with_loader(
@@ -248,15 +245,14 @@ mod tests {
             .context_modifier
             .expect("a skill with model: returns a context_modifier");
         let modified = modifier(fresh_ctx());
-        assert_eq!(modified.options.main_loop_model, "claude-opus-4-6");
+        assert_eq!(modified.options.main_loop_model, "balanced");
+        assert_eq!(modified.options.model_profile, None);
     }
 
     #[tokio::test]
-    async fn model_frontmatter_modifier_preserves_1m_suffix() {
-        // When the session is on `[1m]` and the skill's family supports 1M, the
-        // suffix is carried over (TS resolveSkillModelOverride).
+    async fn model_frontmatter_modifier_defers_route_and_context_window_resolution() {
         let desc = SkillDescriptor {
-            model: Some("claude-sonnet-4-6".into()),
+            model: Some("other/shared".into()),
             ..prompt_desc("switcher")
         };
         let tool = SkillTool::with_loader(
@@ -269,9 +265,11 @@ mod tests {
             .expect("ok");
         let modifier = out.context_modifier.expect("context_modifier present");
         let mut seed = fresh_ctx();
-        seed.options.main_loop_model = "claude-opus-4-6[1m]".into();
+        seed.options.main_loop_model = "parent[1m]".into();
+        seed.options.model_profile = Some("current".into());
         let modified = modifier(seed);
-        assert_eq!(modified.options.main_loop_model, "claude-sonnet-4-6[1m]");
+        assert_eq!(modified.options.main_loop_model, "other/shared");
+        assert_eq!(modified.options.model_profile, None);
     }
 
     #[tokio::test]
@@ -373,7 +371,7 @@ mod tests {
         match &out.new_messages[0] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
                 match content.first() {
-                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                    Some(lingxi_core::types::ContentBlock::Text { text, .. }) => {
                         assert_eq!(text, "Review PR 123 now");
                     }
                     other => panic!("expected leading Text block, got {other:?}"),
@@ -414,7 +412,7 @@ mod tests {
         match &out.new_messages[0] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
                 match content.first() {
-                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                    Some(lingxi_core::types::ContentBlock::Text { text, .. }) => {
                         assert_eq!(text, "Hello world")
                     }
                     other => panic!("expected leading Text block, got {other:?}"),
@@ -434,10 +432,12 @@ mod tests {
             fn try_build_at(
                 &self,
                 _: &str,
-                root: &std::path::Path,
-                cwd: &std::path::Path,
-                preload: bool,
+                context: command_api::BundledPromptContext<'_>,
             ) -> std::io::Result<String> {
+                let root = context.project_root;
+                let cwd = context.cwd;
+                let preload = context.is_preload;
+                assert_eq!(context.main_loop_model, Some("claude-fable-5"));
                 assert_eq!(root, std::path::Path::new("/project"));
                 assert_eq!(cwd, std::path::Path::new("/project/subdir"));
                 assert!(!preload);
@@ -456,6 +456,7 @@ mod tests {
         let tool = SkillTool::with_loader(builtin, Arc::new(FixedLoader(Some(desc))));
         let mut call = fresh_ctx();
         call.cwd = Some("/project/subdir".into());
+        call.options.main_loop_model = "claude-fable-5".into();
         let error = tool
             .call(json!({"skill":"loop"}), call, fresh_tx())
             .await
@@ -501,7 +502,7 @@ mod tests {
         match &out.new_messages[0] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
                 match content.first() {
-                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                    Some(lingxi_core::types::ContentBlock::Text { text, .. }) => {
                         assert_eq!(text, "USAGE")
                     }
                     other => panic!("expected leading Text block, got {other:?}"),
@@ -526,7 +527,7 @@ mod tests {
         match &out.new_messages[0] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
                 match content.first() {
-                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                    Some(lingxi_core::types::ContentBlock::Text { text, .. }) => {
                         assert_eq!(text, "BUILT[check the deploy]");
                     }
                     other => panic!("expected leading Text block, got {other:?}"),
@@ -551,7 +552,7 @@ mod tests {
         match &out.new_messages[0] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
                 match content.first() {
-                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                    Some(lingxi_core::types::ContentBlock::Text { text, .. }) => {
                         assert_eq!(text, "body here")
                     }
                     other => panic!("expected leading Text block, got {other:?}"),
@@ -595,7 +596,7 @@ mod tests {
         match &out.new_messages[0] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
                 match content.first() {
-                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                    Some(lingxi_core::types::ContentBlock::Text { text, .. }) => {
                         // format_bash_output trims the stdout -> "hi".
                         assert_eq!(text, "before hi after");
                     }
@@ -637,7 +638,7 @@ mod tests {
             match &out.new_messages[0] {
                 lingxi_core::types::ConversationMessage::User { content, .. } => {
                     match content.first() {
-                        Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                        Some(lingxi_core::types::ContentBlock::Text { text, .. }) => {
                             assert_eq!(text, "before hi after");
                         }
                         other => panic!("expected leading Text block, got {other:?}"),
@@ -687,7 +688,7 @@ mod tests {
         match &out.new_messages[0] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
                 match content.first() {
-                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                    Some(lingxi_core::types::ContentBlock::Text { text, .. }) => {
                         assert_eq!(text, &expected);
                         assert_eq!(text, "Review PR 123 now (no shell here)");
                     }
@@ -722,7 +723,7 @@ mod tests {
         match &out.new_messages[0] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
                 match content.first() {
-                    Some(lingxi_core::types::ContentBlock::Text { text }) => {
+                    Some(lingxi_core::types::ContentBlock::Text { text, .. }) => {
                         // Body is verbatim — the `!`echo hi`` block is NOT expanded.
                         assert_eq!(text, "before !`echo hi` after");
                     }
@@ -810,7 +811,7 @@ mod tests {
         match &out.new_messages[0] {
             lingxi_core::types::ConversationMessage::User { content, .. } => {
                 match content.first() {
-                    Some(lingxi_core::types::ContentBlock::Text { text }) => text.clone(),
+                    Some(lingxi_core::types::ContentBlock::Text { text, .. }) => text.clone(),
                     other => panic!("expected leading Text block, got {other:?}"),
                 }
             }
@@ -1474,6 +1475,7 @@ mod fork_dispatch_tests {
         ) -> Result<SubagentResult, SubagentSpawnError> {
             *self.seen.lock().unwrap() = Some(request);
             Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: lingxi_core::types::AgentId::nil(),
                 content: self.sync_content.clone().unwrap_or(json!([])),
                 usage: Default::default(),
@@ -1617,8 +1619,11 @@ mod fork_dispatch_tests {
     async fn a_forking_skill_launches_a_background_subagent() {
         let spawner: Arc<RecordingSpawner> = Arc::default();
         let tool = tool_with(spawner.clone(), fork_desc("review", None), vec![]);
+        let mut caller = ctx_with_registry();
+        caller.options.main_loop_model = "gpt-4o".into();
+        caller.options.model_profile = Some("openai".into());
         let res = tool
-            .call(json!({"skill": "review"}), ctx_with_registry(), fresh_tx())
+            .call(json!({"skill": "review"}), caller, fresh_tx())
             .await
             .expect("fork dispatch succeeds");
 
@@ -1646,6 +1651,9 @@ mod fork_dispatch_tests {
         assert_eq!(req.forked_skill_name.as_deref(), Some("review"));
         assert_eq!(req.forked_skill_attribution.as_deref(), Some("review"));
         assert_eq!(req.subagent_type, "code-reviewer");
+        assert_eq!(req.parent_model_override.as_deref(), Some("gpt-4o"));
+        assert_eq!(req.parent_model_profile_override.as_deref(), Some("openai"));
+        assert!(req.model_profile.is_none());
         assert!(req.run_in_background);
         // The `SendMessage` handle is the skill name, so `@review` resolves.
         assert_eq!(req.name.as_deref(), Some("review"));
@@ -1661,6 +1669,7 @@ mod fork_dispatch_tests {
             task_type: "local_agent".into(),
             status: "running".into(),
             forked_skill_name: Some("review".into()),
+            agent_facts: None,
             ..Default::default()
         };
         let spawner: Arc<RecordingSpawner> = Arc::default();
@@ -1917,6 +1926,7 @@ mod fork_dispatch_tests {
             task_type: "local_agent".into(),
             status: "running".into(),
             forked_skill_name: Some("review".into()),
+            agent_facts: None,
             ..Default::default()
         };
         let registry = Arc::new(StubRegistry::new(vec![live]));
@@ -1967,7 +1977,7 @@ mod fork_dispatch_tests {
 fn declared_effort_matches_the_oracle_union() {
     use session::forked_skill::Effort;
 
-    for level in ["low", "medium", "high", "xhigh", "max"] {
+    for level in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
         assert_eq!(
             super::parse_declared_effort(level),
             Some(Effort::Level(level.to_string())),

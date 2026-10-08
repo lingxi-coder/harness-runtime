@@ -46,9 +46,8 @@
 /// `claude-code/${…VERSION}` and `claude-code_${…VERSION.replace(/\./g,"-")}_${e}`
 /// — so only the number moves. What the bump does NOT claim: the gaps the sweep
 /// found are classified, not closed. Plugin surface modules and the JSX render
-/// runtime are unbuilt, and `SubagentHandback` is gated FALSE upstream so its
-/// absence is alignment. Those are registered divergences, not behaviour this
-/// number overstates.
+/// runtime were registered divergences. The then-disabled `SubagentHandback`
+/// gate is enabled by default in 2.1.286; its old exemption has been retired.
 ///
 /// The bump is deliberately LAST. It is what this session tells servers and child
 /// processes it is, so raising it before the behaviour matched would overstate
@@ -72,26 +71,23 @@
 /// persisted-tool-result cap (TL-6, 2.1.266), and the keep-recent clear's
 /// persist hook (CMP-2).
 ///
-/// Four remain, each a subsystem rather than a patch, each sized at the oracle:
+/// The four items recorded by that sweep have since changed. The 2026-09-30
+/// audit found the following live state (see docs/parity/claude-code-2.1.286.md):
 ///
-/// * **CLI-4** `/cost` prompt-cache reporting — needs a per-request cache
-///   ledger with MISS ATTRIBUTION (diffing system prompt, tools and messages
-///   across requests to name a cause), plus the `prompt_cache` status field.
-/// * **CLI-5** `bashEditDiffEnabled` — a git tree-snapshot differ with a
-///   per-repo failure ledger, index-lock handling, `status --porcelain=v2`
-///   tree construction and `diff-tree` parsing with file/hunk caps.
+/// * **CLI-4** `/cost` prompt-cache reporting — now wired to actual prepared
+///   requests, stream/fallback usage and dispatch-time TTL. Exact mixed-TTL
+///   breakdown presence remains an SDK-level evidence gap.
+/// * **CLI-5** `bashEditDiffEnabled` — implemented in tool-shell's
+///   `bash_edit_diff` and wired into the desktop composition root.
 /// * **HP-6** `sandbox.credentials.awsPairs` — one field of a credential-masking
 ///   MITM proxy that substitutes sentinels for real secrets and RE-SIGNS AWS
 ///   SigV4 requests; the field is meaningless without the proxy.
-/// * **CMP-1** summarize / summarize-up-to — needs the rewind dispatch
-///   redesigned: it currently unwinds the TUI and mutates on disk, while a
-///   summarize needs a live model call over the CURRENT conversation before
-///   anything unwinds.
+/// * **CMP-1** summarize / summarize-up-to — implemented by the orchestrator's
+///   live `summarize_at` path; host UI acceptance is a separate check.
 ///
-/// ⇒ Raising the number now would tell servers, child processes and language
-/// servers that those four exist. Under-claiming is the recoverable direction;
-/// the port has been burned by the other one. Raise it WITH the last of the
-/// four, and add the line saying what the sweep verified.
+/// The 2.1.286 audit includes new contracts beyond those four. Keep the existing
+/// advertised baseline until that audit is complete; a reference binary's
+/// version or passing local output hashes alone do not establish parity.
 pub const CLAUDE_CODE_VERSION: &str = "2.1.267";
 
 pub mod agent_name_registry;
@@ -106,9 +102,11 @@ pub mod bridge;
 pub mod budget;
 pub mod calendar;
 pub mod camera;
+pub mod claude_model_identity;
 pub mod clipboard;
 pub mod clock;
 pub mod commands;
+pub mod compliance_taints;
 pub mod computer_control;
 pub mod contacts;
 pub mod coordinator_mode;
@@ -116,13 +114,18 @@ pub mod deep_link;
 pub mod device_status;
 pub mod display;
 pub mod effect_handler;
+pub mod effort;
+pub mod effort_table;
 pub mod env;
+pub mod fast_mode;
 pub mod file_history_sink;
 pub mod filesystem;
 pub mod fork_resume_gate;
 pub mod fork_subagent;
 pub mod fusion;
 pub mod fusion_setup;
+pub mod handback;
+pub mod handback_wire;
 pub mod haptics;
 pub mod http;
 pub mod ide;
@@ -133,7 +136,9 @@ pub mod location;
 pub mod lsp;
 pub mod mailbox;
 pub mod mcp;
+pub mod mcp_result;
 pub mod mobile_runtime_environment;
+pub mod mod_agent_list;
 pub mod model_attempt;
 pub mod model_capabilities;
 pub mod notification;
@@ -148,12 +153,14 @@ pub mod platform;
 pub mod process;
 pub mod prompting_gate;
 pub mod read_auto_allow;
+pub mod refusal_api_text;
 pub mod repo_root_reload;
 #[cfg_attr(windows, allow(unsafe_code))]
 pub mod rooted_fs;
 pub mod runtime;
 pub mod sandbox;
 pub mod secure_storage;
+pub mod server_fallback_row;
 pub mod session_flags;
 pub mod session_retention;
 pub mod share;
@@ -170,7 +177,9 @@ pub mod task_registry;
 pub mod team_registry;
 pub mod team_spawn;
 pub mod teammate_worker;
+pub mod tool_execution;
 pub mod tool_invoker;
+pub mod tool_use_lifecycle;
 pub mod traffic_mode;
 pub mod tts;
 pub mod uds_inbox;
@@ -181,6 +190,8 @@ pub use session_retention::{
     SessionRetentionError, SessionRetentionGate, SessionRetentionPin, SessionRetirement,
 };
 pub mod worktree;
+
+pub use server_fallback_row::{ServerFallbackApiErrorMessage, ServerFallbackApiErrorRow};
 
 pub use android_ui::{
     AndroidAccessRequest, AndroidAccessTier, AndroidAction, AndroidActionResult, AndroidAppInfo,
@@ -250,6 +261,12 @@ pub use fusion::{
     FUSION_MAX_VERIFY_COMMAND_BYTES, FUSION_MIN_PANEL, FUSION_PANEL_POOL_CAP, FUSION_PANEL_TYPE,
     FUSION_SCHEMA_VERSION, FUSION_VERIFICATION_OUTPUT_BYTE_CAP,
 };
+pub use handback::{
+    BeginHandbackRun, HandbackAdmissionError, HandbackAdmissionOutcome, HandbackConsumptionAck,
+    HandbackDisposition, HandbackEnvelope, HandbackInstruction, HandbackPeerOrigin,
+    HandbackReceipt, HandbackRecipient, HandbackReport, HandbackRunKey, HandbackRunToken,
+    HandbackSessionScope, HandbackState, PreparedHandbackReport, ReportReview, ReportingAdmission,
+};
 pub use haptics::{HapticError, HapticService, HapticStyle};
 pub use http::{HttpError, HttpTransport, RawByteStreamWithMeta, ResolvedAddressOverride};
 pub use ide::{IdeEndpointInfo, IdeHandle, IdeStatus, IdeTransport};
@@ -284,18 +301,21 @@ pub use orchestrator::{
     CostSnapshot, CurrentUsageSnapshot, DeferredToolReplay, DirectoryAddedHookSummary, DoctorCheck,
     DoctorReport, DoctorSummary, ForkOutcome, GoalClearedReason, GoalStatusAttachment,
     GoalStatusKind, HandleError, HookInfo, LoopUsageProvider, LoopUsageRow, McpActionState,
-    McpServerInfo, McpStatus, McpToggleOutcome, MemoryEditorOutcome, ModelBillingMode,
-    ModelCapabilities, ModelListing, ModelMetadata, ModelPricing, ModelPricingTier,
-    ModelProvenance, ModelUsageRow, OrchestratorHandle, OutputEvent, OutputStream,
-    OutputStyleListing, PermissionControlState, PermissionModeAvailability, PlanSnapshot,
-    PromptSnapshot, PromptToolDescription, RateLimitSnapshot, ReasoningBudgetRange,
-    ReasoningControlSpec, ReasoningSelection, RecapOutcome, RegisterRepoRootOutcome,
-    RegisterRepoRootRequest, ResumeRuntimeSnapshot, RewindRowData, SkillInfo, StatusSnapshot,
-    SummarizeDirection, TurnOutcome,
+    McpServerInfo, McpStatus, McpToggleOutcome, MemoryEditorOutcome, ModUiSelection,
+    ModelBillingMode, ModelCapabilities, ModelListing, ModelMetadata, ModelPricing,
+    ModelPricingTier, ModelProvenance, ModelUsageRow, OrchestratorHandle, OutputEvent,
+    OutputStream, OutputStyleListing, PermissionControlState, PermissionModeAvailability,
+    PlanSnapshot, PromptSnapshot, PromptToolDescription, RateLimitSnapshot, ReasoningBudgetRange,
+    ReasoningControlSpec, ReasoningSelection, RecapOutcome, RefusalContinuationJoin,
+    RefusalContinuationPhase, RegisterRepoRootOutcome, RegisterRepoRootRequest,
+    ResumeRuntimeSnapshot, RewindRowData, ServerFallbackTombstoneMessage, SkillInfo,
+    StatusSnapshot, SummarizeDirection, TurnOutcome,
 };
 pub use panel_pool::{PanelPoolLease, PanelPoolPermit};
 pub use permission_gate::{
-    AutoModePrompt, PermissionDecision, PermissionDenial, PermissionGate, PermissionRequestSource,
+    AutoModePrompt, ClassifierOnlyOnBlock, ClassifierOnlyOutcome, ClassifierOnlyPolicy,
+    ClassifierOnlyReviewRequest, PermissionDecision, PermissionDenial, PermissionGate,
+    PermissionRequestSource,
 };
 pub use platform::Platform;
 pub use process::{
@@ -339,6 +359,7 @@ pub use tokio_util::sync::CancellationToken;
 pub use tool_invoker::{
     SubagentInvocationContext, ToolExecutionPolicy, ToolInvoker, ToolInvokerError,
 };
+pub use tool_use_lifecycle::{ToolUseLifecycleTracker, ToolUseRemoval, ToolUseRemovalReason};
 pub use tts::TtsAudio;
 pub use voice::VoiceRecording;
 pub use web_search::{WebSearchConfigProvider, WebSearchRuntimeConfig};
@@ -381,7 +402,15 @@ pub mod refusal_notice;
 
 /// One refusal hop, decided identically for both turn loops.
 pub mod refusal_driver;
-pub mod tool_execution;
+pub mod refusal_server;
+pub mod refusal_server_control;
+pub mod refusal_state;
+
+pub mod instruction_announcements;
+pub mod instruction_context_cache;
+pub mod instruction_memory_sanitize;
+/// Shared main/subagent instruction-loading boundary.
+pub mod instructions;
 
 pub use tool_execution::{
     DurableToolOutput, NativeContinuationBinding, NativeReceiptRecord, NativeReceiptStage,

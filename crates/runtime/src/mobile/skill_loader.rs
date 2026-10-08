@@ -348,12 +348,12 @@ impl ToolSkillLoader for MobileDiskSkillLoader {
     // Supply canonical names for the Skill tool's unknown-name suggestions.
     // Read the live registry and apply the same visibility rules as load().
     async fn list_names(&self) -> Vec<String> {
-        self.registry
-            .read()
-            .await
+        let registry = self.registry.read().await;
+        registry
             .list_all()
             .into_iter()
             .filter(|command| command_visible_in_session_mode(command, self.session_mode))
+            .filter(|command| registry.session_skill_allowed(command))
             .map(|command| command.name.clone())
             .collect()
     }
@@ -361,8 +361,9 @@ impl ToolSkillLoader for MobileDiskSkillLoader {
     async fn load(&self, name: &str) -> Result<Option<SkillDescriptor>, ToolError> {
         let reg = self.registry.read().await;
         Ok(reg.resolve(name).and_then(|cmd| {
-            command_visible_in_session_mode(cmd, self.session_mode)
-                .then(|| to_descriptor_for_mode(cmd, self.session_id.as_deref(), self.session_mode))
+            (command_visible_in_session_mode(cmd, self.session_mode)
+                && reg.session_skill_allowed(cmd))
+            .then(|| to_descriptor_for_mode(cmd, self.session_id.as_deref(), self.session_mode))
         }))
     }
 }
@@ -398,6 +399,7 @@ impl AgentSkillLoader for MobileDiskSkillLoader {
         skill_name: &str,
         agent_type: &str,
         cwd: Option<&std::path::Path>,
+        model: Option<&str>,
     ) -> Result<Option<SkillLoad>, String> {
         let registry = self.registry.read().await;
         let Some(resolved) = Self::resolve_agent_skill_name(&registry, skill_name, agent_type)
@@ -430,7 +432,15 @@ impl AgentSkillLoader for MobileDiskSkillLoader {
                     .as_ref()
                     .map_or_else(|| cwd.clone(), |state| state.project_root());
                 builder
-                    .try_build_at("", &root, &cwd, true)
+                    .try_build_at(
+                        "",
+                        command_api::BundledPromptContext {
+                            project_root: &root,
+                            cwd: &cwd,
+                            is_preload: true,
+                            main_loop_model: model,
+                        },
+                    )
                     .map_err(|error| error.to_string())?
             }
             None => command_api::substitute_arguments_faithful(
@@ -456,7 +466,7 @@ impl AgentSkillLoader for MobileDiskSkillLoader {
         Ok(Some(SkillLoad {
             display_name: skill_name.to_string(),
             progress_message: None,
-            content: vec![ContentBlock::Text { text: body }],
+            content: vec![ContentBlock::Text { text: body, citations: None }],
         }))
     }
 }
@@ -649,13 +659,14 @@ mod tests {
             "frontend-design",
             "lingxi-local-app:designer",
             None,
+            None,
         )
         .await
         .expect("checked skill preload")
         .expect("namespaced Plugin skill must preload");
         assert!(matches!(
             preload.content.as_slice(),
-            [ContentBlock::Text { text }]
+            [ContentBlock::Text { text, .. }]
                 if text.contains("ROUTER-ONLY-MARKER")
                     && text.contains("IOS-PROFILE-ONLY-MARKER")
                     && text.contains("## Bundled resource: references/router.md")
@@ -685,6 +696,7 @@ mod tests {
             "lingxi-local-app:apple-design",
             "lingxi-local-app:designer",
             None,
+            None,
         )
         .await
         .expect("checked skill preload")
@@ -693,7 +705,7 @@ mod tests {
             .content
             .iter()
             .find_map(|block| match block {
-                ContentBlock::Text { text } => Some(text),
+                ContentBlock::Text { text, .. } => Some(text),
                 _ => None,
             })
             .expect("Apple Design preload must be text");
@@ -823,10 +835,12 @@ mod tests {
             fn try_build_at(
                 &self,
                 _: &str,
-                root: &Path,
-                cwd: &Path,
-                preload: bool,
+                context: command_api::BundledPromptContext<'_>,
             ) -> std::io::Result<String> {
+                let root = context.project_root;
+                let cwd = context.cwd;
+                let preload = context.is_preload;
+                assert_eq!(context.main_loop_model, Some("claude-fable-5"));
                 assert!(preload);
                 assert_eq!(root, Path::new("/project"));
                 assert_eq!(cwd, Path::new("/child"));
@@ -849,9 +863,15 @@ mod tests {
         let loader = MobileDiskSkillLoader::new(Arc::new(RwLock::new(reg)))
             .with_prompt_cwd(tool_api::SessionCwd::new("/project".into(), Vec::new()));
         assert_eq!(
-            AgentSkillLoader::resolve_and_load(&loader, "loop", "agent", Some(Path::new("/child")))
-                .await
-                .unwrap_err(),
+            AgentSkillLoader::resolve_and_load(
+                &loader,
+                "loop",
+                "agent",
+                Some(Path::new("/child")),
+                Some("claude-fable-5")
+            )
+            .await
+            .unwrap_err(),
             "loop.md denied"
         );
     }

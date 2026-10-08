@@ -83,6 +83,76 @@ fn orch_with_seed(seed: Vec<SurfacedMemory>) -> ConversationOrchestrator {
     orch_bare().with_memory_prefetch(prefetch)
 }
 
+#[derive(Default)]
+struct MemoryRouteClient(std::sync::Mutex<Vec<(String, Option<String>)>>);
+
+#[async_trait]
+impl sidequery::SideQueryClient for MemoryRouteClient {
+    async fn query(
+        &self,
+        request: sidequery::SideQueryRequest,
+    ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((request.model, request.profile));
+        Ok(sidequery::SideQueryResponse {
+            text: None,
+            structured: Some(serde_json::json!({ "filenames": ["guide.md"] })),
+            tool_calls: Vec::new(),
+            usage: Default::default(),
+            stop_reason: Some("end_turn".into()),
+            retry_count: 0,
+        })
+    }
+}
+
+#[tokio::test]
+async fn memory_prefetch_follows_live_model_and_profile_switches() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = memory::memdir::paths::memdir_roots_at(dir.path(), std::path::Path::new("/work"), false);
+    std::fs::create_dir_all(&roots.user_memdir).unwrap();
+    std::fs::write(roots.user_memdir.join("guide.md"), "USE RG").unwrap();
+    let client = Arc::new(MemoryRouteClient::default());
+    let prefetch = Arc::new(memory::prefetch::MemoryPrefetch::new(
+        Arc::new(memory::selector::MemorySelector::new(client.clone())),
+        Arc::new(InlineRuntime),
+        roots,
+    ));
+    let orch = orch_bare().with_memory_prefetch(prefetch);
+    let routes = [
+        ("gpt-4o", "openai"),
+        ("gemini-2.5-pro", "google"),
+        ("shared-model", "gateway-a"),
+        ("shared-model", "gateway-b"),
+    ];
+
+    for (model, profile) in routes {
+        {
+            let mut session = orch.session.lock().await;
+            session.model = model.into();
+            session.model_profile = Some(profile.into());
+        }
+        orch.start_memory_prefetch().await;
+        let pending = orch
+            .prompt_runtime
+            .pending_memory_prefetch
+            .lock()
+            .await
+            .take()
+            .unwrap();
+        assert_eq!(pending.take().await.len(), 1);
+    }
+
+    assert_eq!(
+        *client.0.lock().unwrap(),
+        routes
+            .into_iter()
+            .map(|(model, profile)| (model.to_string(), Some(profile.to_string())))
+            .collect::<Vec<_>>()
+    );
+}
+
 #[tokio::test]
 async fn no_prefetch_wired_yields_none() {
     let orch = orch_bare();

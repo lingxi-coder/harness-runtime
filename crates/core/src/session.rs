@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
 /// Running total of `Usage` across all turns in a session.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CumulativeUsage(pub Usage);
@@ -135,6 +139,15 @@ pub struct SessionState {
     pub session_id: SessionId,
     /// Ordered conversation history.
     pub history: Vec<ConversationMessage>,
+    /// Genuine user prompts removed from the active history by compaction.
+    /// `$.session.turns()` adds this to the prompts still present in `history`.
+    /// A full JSONL resume rebuilds the original rows and starts at zero.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub compacted_user_turns: u64,
+    /// User rows whose JSONL envelope carried `isVirtual: true`. This flag is
+    /// independent of `isMeta`, but the model-facing message type omits it.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub virtual_user_messages: HashSet<MessageId>,
     /// Original assistant grouping flags `(isVirtual, resumedFromIncompleteThinking)`
     /// retained when JSONL rows are projected into protocol messages.
     #[serde(default)]
@@ -261,6 +274,8 @@ impl SessionState {
         Self {
             session_id,
             history: Vec::new(),
+            compacted_user_turns: 0,
+            virtual_user_messages: HashSet::new(),
             hook_message_grouping: HashMap::new(),
             usage: CumulativeUsage::default(),
             model,
@@ -300,6 +315,7 @@ impl SessionState {
     /// excluded transcript messages. Recovery/compaction paths use this when
     /// they rewrite the request history in place.
     pub fn replace_model_context_history(&mut self, history: Vec<ConversationMessage>) {
+        let before = self.real_user_turns_in_history();
         let excluded = self
             .history
             .iter()
@@ -308,6 +324,95 @@ impl SessionState {
             .collect::<Vec<_>>();
         self.history = history;
         self.history.extend(excluded);
+        let after = self.real_user_turns_in_history();
+        self.compacted_user_turns = self
+            .compacted_user_turns
+            .saturating_add(before.saturating_sub(after));
+    }
+
+    /// Number of actual user prompts in this session, including those removed
+    /// from model context by earlier compactions.
+    #[must_use]
+    pub fn real_user_turns(&self) -> u64 {
+        self.compacted_user_turns
+            .saturating_add(self.real_user_turns_in_history())
+    }
+
+    fn real_user_turns_in_history(&self) -> u64 {
+        self.history
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message,
+                    ConversationMessage::User {
+                        id,
+                        content,
+                        is_meta: false,
+                        is_compact_summary: false,
+                        is_visible_in_transcript_only: false,
+                    } if !self.virtual_user_messages.contains(id)
+                        && !self.compact_summary_messages.contains(id)
+                        && !self.transcript_only_messages.contains(id)
+                        && !content.iter().any(|block| matches!(block, crate::types::ContentBlock::ToolResult { .. }))
+                )
+            })
+            .count() as u64
+    }
+}
+
+#[cfg(test)]
+mod mod_session_turn_tests {
+    use super::*;
+    use crate::types::{ContentBlock, ToolUseId};
+
+    #[test]
+    fn real_user_turns_survive_repeated_compaction_and_roundtrip() {
+        let mut session = SessionState::empty(SessionId::nil(), "model".into());
+        let first = ConversationMessage::user(MessageId::new(), "first".into());
+        let second = ConversationMessage::user(MessageId::new(), "second".into());
+        let virtual_user = ConversationMessage::user(MessageId::new(), "virtual".into());
+        session.virtual_user_messages.insert(virtual_user.id());
+        session.history.extend([
+            first,
+            ConversationMessage::user_meta(MessageId::new(), "meta".into()),
+            virtual_user,
+            ConversationMessage::User {
+                id: MessageId::new(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: ToolUseId::new(),
+                    content: "result".into(),
+                    is_error: Some(false),
+                    provider_tool_use_id: None,
+                    content_blocks: None,
+                }],
+                is_meta: false,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
+            },
+            second.clone(),
+        ]);
+        assert_eq!(session.real_user_turns(), 2);
+
+        session.replace_model_context_history(vec![
+            ConversationMessage::compact_summary(MessageId::new(), "summary".into()),
+            second,
+        ]);
+        assert_eq!(session.compacted_user_turns, 1);
+        assert_eq!(session.real_user_turns(), 2);
+
+        let third = ConversationMessage::user(MessageId::new(), "third".into());
+        session.history.push(third.clone());
+        assert_eq!(session.real_user_turns(), 3);
+        session.replace_model_context_history(vec![
+            ConversationMessage::compact_summary(MessageId::new(), "summary 2".into()),
+            third,
+        ]);
+        assert_eq!(session.compacted_user_turns, 2);
+        assert_eq!(session.real_user_turns(), 3);
+
+        let restored: SessionState =
+            serde_json::from_value(serde_json::to_value(&session).unwrap()).unwrap();
+        assert_eq!(restored.real_user_turns(), 3);
     }
 }
 

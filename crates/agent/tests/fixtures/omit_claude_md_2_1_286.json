@@ -1,0 +1,348 @@
+{
+  "provenance": {
+    "version": "2.1.286",
+    "nativeSha256": "75e3016e9d2570767b08e43a7467d4817a4f149232c169ca295f2c95fef21433",
+    "chunk": "src_191018893.js",
+    "function": "Fl",
+    "startByte": 145417,
+    "sourceSha256": "8f85371a39032476dc48f166cce85373f5c1a19ff2c36cc414e047f6b2fb7382",
+    "selectionStartByte": 123483,
+    "selectionSourceSha256": "72223ce629d9425b86f58549a6788456f56b3d1ff3d4dae3e409f32b54ab47f6"
+  },
+  "cases": [
+    {
+      "source": "built-in",
+      "result": "managed",
+      "original": {
+        "claudeMd": "FULL POLICY",
+        "userEmail": "user@example.test",
+        "currentDate": "2026-09-30"
+      },
+      "expected": {
+        "userContext": {
+          "userEmail": "user@example.test",
+          "currentDate": "2026-09-30"
+        },
+        "managedInstructionsOnly": false
+      }
+    },
+    {
+      "source": "built-in",
+      "result": "empty",
+      "original": {
+        "claudeMd": "FULL POLICY",
+        "userEmail": "user@example.test",
+        "currentDate": "2026-09-30"
+      },
+      "expected": {
+        "userContext": {
+          "userEmail": "user@example.test",
+          "currentDate": "2026-09-30"
+        },
+        "managedInstructionsOnly": false
+      }
+    },
+    {
+      "source": "built-in",
+      "result": "failure",
+      "original": {
+        "claudeMd": "FULL POLICY",
+        "userEmail": "user@example.test",
+        "currentDate": "2026-09-30"
+      },
+      "expected": {
+        "userContext": {
+          "userEmail": "user@example.test",
+          "currentDate": "2026-09-30"
+        },
+        "managedInstructionsOnly": false
+      }
+    },
+    {
+      "source": "policySettings",
+      "result": "managed",
+      "original": {
+        "claudeMd": "FULL POLICY",
+        "userEmail": "user@example.test",
+        "currentDate": "2026-09-30"
+      },
+      "expected": {
+        "userContext": {
+          "userEmail": "user@example.test",
+          "currentDate": "2026-09-30"
+        },
+        "managedInstructionsOnly": false
+      }
+    },
+    {
+      "source": "policySettings",
+      "result": "empty",
+      "original": {
+        "claudeMd": "FULL POLICY",
+        "userEmail": "user@example.test",
+        "currentDate": "2026-09-30"
+      },
+      "expected": {
+        "userContext": {
+          "userEmail": "user@example.test",
+          "currentDate": "2026-09-30"
+        },
+        "managedInstructionsOnly": false
+      }
+    },
+    {
+      "source": "policySettings",
+      "result": "failure",
+      "original": {
+        "claudeMd": "FULL POLICY",
+        "userEmail": "user@example.test",
+        "currentDate": "2026-09-30"
+      },
+      "expected": {
+        "userContext": {
+          "userEmail": "user@example.test",
+          "currentDate": "2026-09-30"
+        },
+        "managedInstructionsOnly": false
+      }
+    },
+    {
+      "source": "plugin",
+      "result": "managed",
+      "original": {
+        "claudeMd": "FULL POLICY",
+        "userEmail": "user@example.test",
+        "currentDate": "2026-09-30"
+      },
+      "expected": {
+        "userContext": {
+          "claudeMd": "MANAGED POLICY",
+          "userEmail": "user@example.test",
+          "currentDate": "2026-09-30"
+        },
+        "managedInstructionsOnly": true
+      }
+    },
+    {
+      "source": "plugin",
+      "result": "empty",
+      "original": {
+        "claudeMd": "FULL POLICY",
+        "userEmail": "user@example.test",
+        "currentDate": "2026-09-30"
+      },
+      "expected": {
+        "userContext": {
+          "userEmail": "user@example.test",
+          "currentDate": "2026-09-30"
+        },
+        "managedInstructionsOnly": false
+      }
+    },
+    {
+      "source": "plugin",
+      "result": "failure",
+      "original": {
+        "claudeMd": "FULL POLICY",
+        "userEmail": "user@example.test",
+        "currentDate": "2026-09-30"
+      },
+      "expected": {
+        "userContext": {
+          "claudeMd": "FULL POLICY",
+          "userEmail": "user@example.test",
+          "currentDate": "2026-09-30"
+        },
+        "managedInstructionsOnly": false
+      }
+    },
+    {
+      "source": "projectSettings",
+      "result": "managed",
+      "original": {
+        "claudeMd": "FULL POLICY",
+        "userEmail": "user@example.test",
+        "currentDate": "2026-09-30"
+      },
+      "expected": {
+        "userContext": {
+          "claudeMd": "MANAGED POLICY",
+          "userEmail": "user@example.test",
+          "currentDate": "2026-09-30"
+        },
+        "managedInstructionsOnly": true
+      }
+    },
+    {
+      "source": "projectSettings",
+      "result": "empty",
+      "original": {
+        "claudeMd": "FULL POLICY",
+        "userEmail": "user@example.test",
+        "currentDate": "2026-09-30"
+      },
+      "expected": {
+        "userContext": {
+          "userEmail": "user@example.test",
+          "currentDate": "2026-09-30"
+        },
+        "managedInstructionsOnly": false
+      }
+    },
+    {
+      "source": "projectSettings",
+      "result": "failure",
+      "original": {
+        "claudeMd": "FULL POLICY",
+        "userEmail": "user@example.test",
+        "currentDate": "2026-09-30"
+      },
+      "expected": {
+        "userContext": {
+          "claudeMd": "FULL POLICY",
+          "userEmail": "user@example.test",
+          "currentDate": "2026-09-30"
+        },
+        "managedInstructionsOnly": false
+      }
+    }
+  ],
+  "selectionCases": [
+    {
+      "name": "ordinary_grandchild",
+      "omit": false,
+      "explicit": false,
+      "inheritedManaged": true,
+      "result": "managed",
+      "original": {
+        "claudeMd": "MANAGED PARENT POLICY",
+        "userEmail": "user@example.test",
+        "currentDate": "2026-09-30"
+      },
+      "loads": [
+        "Full"
+      ],
+      "expected": {
+        "userContext": {
+          "claudeMd": "FULL POLICY",
+          "userEmail": "user@example.test",
+          "currentDate": "2026-09-30"
+        },
+        "managedInstructionsOnly": false
+      }
+    },
+    {
+      "name": "explicit_omitting_fork",
+      "omit": true,
+      "explicit": true,
+      "inheritedManaged": true,
+      "result": "managed",
+      "original": {
+        "claudeMd": "MANAGED PARENT POLICY",
+        "userEmail": "user@example.test",
+        "currentDate": "2026-09-30"
+      },
+      "loads": [],
+      "expected": {
+        "userContext": {
+          "claudeMd": "MANAGED PARENT POLICY",
+          "userEmail": "user@example.test",
+          "currentDate": "2026-09-30"
+        },
+        "managedInstructionsOnly": false
+      }
+    },
+    {
+      "name": "explicit_ordinary_fork",
+      "omit": false,
+      "explicit": true,
+      "inheritedManaged": true,
+      "result": "managed",
+      "original": {
+        "claudeMd": "MANAGED PARENT POLICY",
+        "userEmail": "user@example.test",
+        "currentDate": "2026-09-30"
+      },
+      "loads": [],
+      "expected": {
+        "userContext": {
+          "claudeMd": "MANAGED PARENT POLICY",
+          "userEmail": "user@example.test",
+          "currentDate": "2026-09-30"
+        },
+        "managedInstructionsOnly": false
+      }
+    },
+    {
+      "name": "omitting_grandchild_managed",
+      "omit": true,
+      "explicit": false,
+      "inheritedManaged": true,
+      "result": "managed",
+      "original": {
+        "claudeMd": "MANAGED PARENT POLICY",
+        "userEmail": "user@example.test",
+        "currentDate": "2026-09-30"
+      },
+      "loads": [
+        "Full",
+        "ManagedOnly"
+      ],
+      "expected": {
+        "userContext": {
+          "claudeMd": "MANAGED POLICY",
+          "userEmail": "user@example.test",
+          "currentDate": "2026-09-30"
+        },
+        "managedInstructionsOnly": true
+      }
+    },
+    {
+      "name": "omitting_grandchild_empty",
+      "omit": true,
+      "explicit": false,
+      "inheritedManaged": true,
+      "result": "empty",
+      "original": {
+        "claudeMd": "MANAGED PARENT POLICY",
+        "userEmail": "user@example.test",
+        "currentDate": "2026-09-30"
+      },
+      "loads": [
+        "Full",
+        "ManagedOnly"
+      ],
+      "expected": {
+        "userContext": {
+          "userEmail": "user@example.test",
+          "currentDate": "2026-09-30"
+        },
+        "managedInstructionsOnly": false
+      }
+    },
+    {
+      "name": "omitting_grandchild_failure",
+      "omit": true,
+      "explicit": false,
+      "inheritedManaged": true,
+      "result": "failure",
+      "original": {
+        "claudeMd": "MANAGED PARENT POLICY",
+        "userEmail": "user@example.test",
+        "currentDate": "2026-09-30"
+      },
+      "loads": [
+        "Full",
+        "ManagedOnly"
+      ],
+      "expected": {
+        "userContext": {
+          "claudeMd": "FULL POLICY",
+          "userEmail": "user@example.test",
+          "currentDate": "2026-09-30"
+        },
+        "managedInstructionsOnly": false
+      }
+    }
+  ]
+}

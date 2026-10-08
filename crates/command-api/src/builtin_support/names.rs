@@ -527,6 +527,41 @@ pub fn is_palette_hidden(name: &str) -> bool {
         || CORRECT_BY_DESIGN_STUBS.iter().any(|(n, _)| *n == name)
 }
 
+/// Native 2.1.288 `src_186881176.js` `rRt` (offset 1,281,435) reads
+/// `command.immediate === true`; an `immediate` callback therefore appears as
+/// `false` in the event input.
+/// These interactive terminal command objects carry the literal boolean
+/// `true` in the executable; other same-named command variants can differ.
+#[must_use]
+pub fn command_describe_immediate(name: &str) -> bool {
+    matches!(
+        name,
+        "model"
+            | "mcp"
+            | "permissions"
+            | "tasks"
+            | "workflows"
+            | "hooks"
+            | "skills"
+            | "status"
+            | "brief"
+            | "color"
+            | "focus"
+            | "version"
+            | "autocompact"
+            | "skill-doctor"
+            | "usage"
+            | "goal"
+            | "fast"
+            | "btw"
+            | "rename"
+            | "plugin"
+            | "stop"
+            | "exit"
+            | "effort"
+    )
+}
+
 /// `(command_name, DISABLE_*_COMMAND env var)` pairs whose command object in
 /// claude-code v2.1.183 carries an `isEnabled:()=>!je.DISABLE_X_COMMAND`
 /// truthiness gate (`je` is `process.env`). When the env var is set to any
@@ -590,7 +625,12 @@ pub fn core_description(name: &str) -> &'static str {
         // (M4 cc2.1.198) The /agents wizard was removed; the command now
         // returns static guidance. Description verbatim from the 2.1.198
         // binary command object (`name:"agents"`, description `(removed) …`).
-        "agents" => "(removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/",
+        "agents" => {
+            static DESCRIPTION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+                format!("(removed) Ask {} to create/manage subagents, or edit {}/agents/", branding::PRODUCT_NAME, branding::DOT_DIR)
+            });
+            DESCRIPTION.as_str()
+        },
         // WIZARD-06. SLASH-03: re-worded upstream between 2.1.220 and 2.1.238.
         // Byte-exact from BOTH 2.1.238 twins (oracle @294963678):
         //   mSl={type:"local",name:"auto-mode-setup",supportsNonInteractive:!0,
@@ -1323,5 +1363,43 @@ mod tests {
         let gaps = name_set(HOST_BOUND_DEFERRED_GAPS);
         assert!(!disabled.contains("btw"));
         assert!(!gaps.contains("btw"));
+    }
+
+    #[test]
+    fn command_describe_immediate_distinguishes_literal_and_callback_fields() {
+        let native_true = [
+            "autocompact",
+            "brief",
+            "btw",
+            "color",
+            "effort",
+            "exit",
+            "fast",
+            "focus",
+            "goal",
+            "hooks",
+            "mcp",
+            "model",
+            "permissions",
+            "plugin",
+            "rename",
+            "skill-doctor",
+            "skills",
+            "status",
+            "stop",
+            "tasks",
+            "usage",
+            "version",
+            "workflows",
+        ];
+        for name in native_true {
+            assert!(command_describe_immediate(name), "{name}");
+        }
+
+        // Native properties which are callbacks (or absent) are not the
+        // literal boolean true checked by command.describe.
+        for name in ["add-dir", "config", "help", "diff", "theme"] {
+            assert!(!command_describe_immediate(name), "{name}");
+        }
     }
 }

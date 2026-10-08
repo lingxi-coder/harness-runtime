@@ -30,7 +30,7 @@
 //! it for unsupported models/providers or when `ToolSearch` was denied.
 
 use crate::tool_trait::Tool;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
@@ -150,6 +150,9 @@ pub struct DeferralState {
     mode: ToolSearchMode,
     session_kind_bg: bool,
     loaded: RwLock<HashSet<String>>,
+    /// `tool.describe` may override a tool's default `shouldDefer` answer for
+    /// the active Mod catalog. Request assembly replaces this map atomically.
+    mod_overrides: RwLock<HashMap<String, bool>>,
     auto_active: AtomicBool,
     request_supported: AtomicBool,
     /// Deferred-tool names already ANNOUNCED to the model as available this
@@ -172,6 +175,7 @@ impl DeferralState {
             mode,
             session_kind_bg,
             loaded: RwLock::new(HashSet::new()),
+            mod_overrides: RwLock::new(HashMap::new()),
             auto_active: AtomicBool::new(false),
             request_supported: AtomicBool::new(true),
             announced: RwLock::new(HashSet::new()),
@@ -331,7 +335,21 @@ impl DeferralState {
         if name == ENTER_WORKTREE_TOOL_NAME && self.session_kind_bg {
             return false;
         }
-        wants_defer
+        self.mod_overrides
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(name)
+            .copied()
+            .unwrap_or(wants_defer)
+    }
+
+    /// Install the complete result of the current `tool.describe` pass. An
+    /// empty map removes stale overrides after a Mod unload or session reset.
+    pub fn set_mod_overrides(&self, overrides: HashMap<String, bool>) {
+        *self
+            .mod_overrides
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = overrides;
     }
 
     /// Compute the deferred-tools delta for THIS outgoing model step against the
@@ -675,6 +693,22 @@ mod tests {
         let d = DeferralState::disabled();
         assert!(!d.is_enabled());
         assert!(!d.should_defer("Task", true));
+    }
+
+    #[test]
+    fn mod_description_can_add_and_remove_deferred_candidates() {
+        let state = DeferralState::new(ToolSearchMode::Enabled, false);
+        assert!(!state.wants_defer("Read", false));
+        assert!(state.wants_defer("Task", true));
+        state.set_mod_overrides(std::collections::HashMap::from([
+            ("Read".to_string(), true),
+            ("Task".to_string(), false),
+        ]));
+        assert!(state.wants_defer("Read", false));
+        assert!(!state.wants_defer("Task", true));
+        state.set_mod_overrides(std::collections::HashMap::new());
+        assert!(!state.wants_defer("Read", false));
+        assert!(state.wants_defer("Task", true));
     }
 
     #[test]

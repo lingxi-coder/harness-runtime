@@ -1790,16 +1790,21 @@ mod tests {
             ),
             other => panic!("expected Allow(AcceptEdits), got {other:?}"),
         }
-        // A compound of allowlisted commands is likewise auto-allowed.
-        assert!(matches!(
-            p.authorize("Bash", &bash("mkdir foo && touch foo/bar")),
+        // Native a6t's all-Allow branch retains both mode decisions.
+        let PermissionResult::Allow { reason, .. } =
+            p.authorize("Bash", &bash("mkdir foo && touch foo/bar"))
+        else {
+            panic!("the allowlisted compound must allow");
+        };
+        let PermissionDecisionReason::SubcommandResults { reasons } = reason else {
+            panic!("Native retains an all-Allow compound tree: {reason:?}");
+        };
+        assert_eq!(reasons.len(), 2);
+        assert!(reasons.values().all(|child| matches!(child.as_ref(),
             PermissionResult::Allow {
-                reason: PermissionDecisionReason::PermissionMode {
-                    mode: PermissionMode::AcceptEdits
-                },
-                ..
+                reason: PermissionDecisionReason::PermissionMode { mode: PermissionMode::AcceptEdits }, ..
             }
-        ));
+        )));
     }
 
     #[test]
@@ -1922,16 +1927,19 @@ mod tests {
                 ..
             }
         ));
-        // A compound with even ONE non-allowlisted base command is not allowed.
-        assert!(matches!(
-            p.authorize("Bash", &bash("mkdir foo && curl https://x")),
-            PermissionResult::Ask {
-                reason: PermissionDecisionReason::PermissionMode {
-                    mode: PermissionMode::AcceptEdits
-                },
-                ..
-            }
-        ));
+        // curl is passthrough in Native's preliminary walk. Even with just
+        // one part needing approval, the general compound branch keeps a tree.
+        let PermissionResult::Ask { reason, prompt, .. } =
+            p.authorize("Bash", &bash("mkdir foo && curl https://x"))
+        else {
+            panic!("curl prevents compound auto-allow");
+        };
+        let PermissionDecisionReason::SubcommandResults { reasons } = reason else {
+            panic!("the unmatched curl stays in the compound tree: {reason:?}");
+        };
+        assert!(matches!(reasons["mkdir foo"].as_ref(), PermissionResult::Allow { .. }));
+        assert!(matches!(reasons["curl https://x"].as_ref(), PermissionResult::Ask { .. }));
+        assert_eq!(prompt.message, "This Bash command contains multiple operations. The following part requires approval: curl https://x");
     }
 
     #[test]
@@ -2228,14 +2236,14 @@ mod tests {
             ),
             PermissionResult::Ask { .. }
         ));
-        // The legacy alias `Task` resolves to `Agent` content matching as well.
+        // Removed Task rules do not grant or deny Agent permissions.
         let p2 = policy_with_roots(
             r#"{ "permissions": { "deny": ["Task(Explore)"] } }"#,
             PermissionMode::Default,
         );
         assert!(matches!(
             p2.authorize("Agent", &serde_json::json!({ "subagent_type": "Explore" })),
-            PermissionResult::Deny { .. }
+            PermissionResult::Ask { .. }
         ));
     }
 
@@ -2275,18 +2283,13 @@ mod tests {
         let mut set = p.agent_deny_content_types();
         set.sort();
         assert_eq!(set, vec!["Explore".to_string(), "Plan".to_string()]);
-        // The `Task` alias is matched too (LingXi stores the alias verbatim).
+        // A removed Task rule cannot deny Agent catalog entries.
         let p2 = policy_with_roots(
             r#"{ "permissions": { "deny": ["Task(Explore)"] } }"#,
             PermissionMode::Default,
         );
-        assert_eq!(
-            p2.agent_type_deny_source("Explore"),
-            Some(PermissionRuleSource::Settings(
-                lingxi_core::types::SettingsScope::Project
-            ))
-        );
-        assert_eq!(p2.agent_deny_content_types(), vec!["Explore".to_string()]);
+        assert_eq!(p2.agent_type_deny_source("Explore"), None);
+        assert!(p2.agent_deny_content_types().is_empty());
     }
 
     // ── PERM.4: Plan mode + isBypassPermissionsModeAvailable bypasses ──────
@@ -2794,7 +2797,7 @@ mod tests {
             } => {
                 assert_eq!(
                     explanation.as_deref(),
-                    Some("Output redirection to '/proj/secrets/keys.txt' was blocked by a deny rule.")
+                    Some("Permission to use Bash with command echo x > secrets/keys.txt has been denied.")
                 );
                 assert!(
                     matches!(reason, PermissionDecisionReason::MatchedRule { .. }),
@@ -2841,12 +2844,30 @@ mod tests {
                 } => {
                     assert_eq!(
                         explanation.as_deref(),
-                        Some("Input redirection from '/proj/secrets/keys.txt' was blocked by a deny rule.")
+                        Some(
+                            format!(
+                                "Permission to use Bash with command {command} has been denied."
+                            )
+                            .as_str()
+                        )
                     );
-                    assert!(
-                        matches!(reason, PermissionDecisionReason::MatchedRule { .. }),
-                        "deny must be rule-typed, got {reason:?}"
-                    );
+                    let rule =
+                        crate::policy::first_rule_for_behavior(&reason, PermissionBehavior::Deny)
+                            .unwrap_or_else(|| {
+                                panic!("deny must retain its Read rule: {reason:?}")
+                            });
+                    assert_eq!(rule.value.to_rule_string(), "Read(secrets/**)");
+                    if command.contains('|') {
+                        assert!(matches!(
+                            reason,
+                            PermissionDecisionReason::SubcommandResults { .. }
+                        ));
+                    } else {
+                        assert!(matches!(
+                            reason,
+                            PermissionDecisionReason::MatchedRule { .. }
+                        ));
+                    }
                 }
                 other => panic!("expected input redirect deny for {command:?}, got {other:?}"),
             }
@@ -2900,6 +2921,111 @@ mod tests {
             p.authorize("Bash", &bash("echo ok && curl https://evil")),
             PermissionResult::Deny { .. }
         ));
+    }
+
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn sandbox_auto_allow_preserves_deny_and_ask_after_expanded_env_prefixes() {
+        let commands = [
+            "TZ=\"$HOME\" rm -rf build",
+            "LANG=staging; TZ=\"$HOME\" rm -rf build",
+        ];
+        for command in commands {
+            let parsed = crate::bash_ast_security::parse_for_security(command);
+            let crate::bash_ast_security::ParseForSecurityResult::Simple {
+                commands: ast_commands,
+            } = parsed
+            else {
+                panic!("expected a simple parsed command for {command}");
+            };
+            assert!(
+                ast_commands.iter().any(|ast_command| {
+                    !ast_command.env_vars.is_empty()
+                        && ast_command.argv.first().map(String::as_str) == Some("rm")
+                }),
+                "the parser must expose leading assignments separately from argv: {command}"
+            );
+
+            // These safe assignments do not themselves refuse sandbox auto-allow;
+            // without the rule re-check this command would be silently allowed.
+            let unruled = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default)
+                .with_sandbox_runtime(sandbox_cfg(&[]));
+            assert!(
+                matches!(
+                    unruled.authorize("Bash", &bash(command)),
+                    PermissionResult::Allow { .. }
+                ),
+                "control case should reach sandbox auto-allow: {command}"
+            );
+
+            let denied = policy_with_roots(
+                r#"{ "permissions": { "deny": ["Bash(rm:*)"] } }"#,
+                PermissionMode::Default,
+            )
+            .with_sandbox_runtime(sandbox_cfg(&[]));
+            assert!(
+                matches!(
+                    denied.authorize("Bash", &bash(command)),
+                    PermissionResult::Deny {
+                        reason: PermissionDecisionReason::MatchedRule { .. },
+                        ..
+                    }
+                ),
+                "managed-style deny must win before sandbox auto-allow: {command}"
+            );
+
+            let asked = policy_with_roots(
+                r#"{ "permissions": { "ask": ["Bash(rm:*)"] } }"#,
+                PermissionMode::Default,
+            )
+            .with_sandbox_runtime(sandbox_cfg(&[]));
+            assert!(
+                matches!(
+                    asked.authorize("Bash", &bash(command)),
+                    PermissionResult::Ask {
+                        reason: PermissionDecisionReason::MatchedRule { .. },
+                        ..
+                    }
+                ),
+                "ask rule must win before sandbox auto-allow: {command}"
+            );
+        }
+    }
+
+    #[cfg(feature = "bash-ast")]
+    #[test]
+    fn bash_content_rule_matches_ast_assignment_in_pipeline_before_permission_floor() {
+        let command = "echo ok | TZ=\"$HOME\" rm -rf build";
+        let parsed = crate::bash_ast_security::parse_for_security(command);
+        let crate::bash_ast_security::ParseForSecurityResult::Simple {
+            commands: ast_commands,
+        } = parsed
+        else {
+            panic!("expected a simple parsed pipeline");
+        };
+        assert!(ast_commands.iter().any(|ast_command| {
+            !ast_command.env_vars.is_empty()
+                && ast_command.argv.first().map(String::as_str) == Some("rm")
+        }));
+
+        for (section, expected) in [
+            ("deny", PermissionBehavior::Deny),
+            ("ask", PermissionBehavior::Ask),
+        ] {
+            let policy = policy_with_roots(
+                &format!(r#"{{ "permissions": {{ "{section}": ["Bash(rm:*)"] }} }}"#),
+                PermissionMode::Default,
+            )
+            .with_sandbox_runtime(sandbox_cfg(&[]));
+            let result = policy.authorize("Bash", &bash(command));
+            match (expected, result) {
+                (PermissionBehavior::Deny, PermissionResult::Deny { .. })
+                | (PermissionBehavior::Ask, PermissionResult::Ask { .. }) => {}
+                (expected, actual) => panic!(
+                    "{section} content rule should dominate the sandbox path; expected {expected:?}, got {actual:?}"
+                ),
+            }
+        }
     }
 
     #[test]
@@ -3121,9 +3247,37 @@ mod tests {
             PermissionResult::Ask {
                 reason: PermissionDecisionReason::Other { reason },
                 ..
-            } => assert!(reason.contains("10000 characters"), "reason was: {reason}"),
+            } => assert_eq!(
+                reason,
+                "Parser aborted (timeout, resource limit, or over-length)"
+            ),
             other => panic!("expected overlong Bash Ask, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn overlong_bash_gate_counts_native_utf16_units() {
+        let within = format!("echo {}", "\u{1f600}".repeat(4_997));
+        assert_eq!(within.encode_utf16().count(), 9_999);
+        assert!(within.chars().count() < 10_000);
+        assert!(PermissionPolicy::shell_overlength_bash_ask("Bash", &bash(&within)).is_none());
+
+        let over = format!("echo {}", "\u{1f600}".repeat(4_998));
+        assert_eq!(over.encode_utf16().count(), 10_001);
+        assert!(over.chars().count() < 10_000);
+        let result = PermissionPolicy::shell_overlength_bash_ask("Bash", &bash(&over))
+            .expect("Native UTF-16 length over the limit asks");
+        let PermissionResult::Ask {
+            reason: PermissionDecisionReason::Other { reason },
+            ..
+        } = result
+        else {
+            panic!("expected the Native parser-abort Ask")
+        };
+        assert_eq!(
+            reason,
+            "Parser aborted (timeout, resource limit, or over-length)"
+        );
     }
 
     #[test]
@@ -3972,12 +4126,8 @@ mod tests {
                     reason,
                     PermissionDecisionReason::MatchedRule { .. }
                 ));
-                assert!(
-                    explanation
-                        .as_deref()
-                        .is_some_and(|e| e.contains("was blocked")),
-                    "explanation: {explanation:?}"
-                );
+                assert_eq!(explanation.as_deref(),
+                    Some("Permission to use Bash with command cat secret.env has been denied."));
             }
             other => panic!("expected Read-deny command-path deny, got {other:?}"),
         }
@@ -4017,16 +4167,37 @@ mod tests {
                     reason,
                     ..
                 } => {
-                    assert!(
-                        explanation.as_deref().is_some_and(
-                            |e| e.starts_with("tee in '/proj/secrets/keys.txt' was blocked.")
-                        ),
-                        "command {command:?}: {explanation:?}"
+                    let denied_command = if cfg!(feature = "bash-ast") && command.contains('|') {
+                        "tee secrets/keys.txt"
+                    } else {
+                        command
+                    };
+                    assert_eq!(
+                        explanation.as_deref(),
+                        Some(
+                            format!(
+                        "Permission to use Bash with command {denied_command} has been denied."
+                    )
+                            .as_str()
+                        )
                     );
-                    assert!(
-                        matches!(reason, PermissionDecisionReason::MatchedRule { .. }),
-                        "deny must be rule-typed, got {reason:?}"
-                    );
+                    let rule =
+                        crate::policy::first_rule_for_behavior(&reason, PermissionBehavior::Deny)
+                            .unwrap_or_else(|| {
+                                panic!("deny must retain its Edit rule: {reason:?}")
+                            });
+                    assert_eq!(rule.value.to_rule_string(), "Edit(secrets/**)");
+                    if command.contains('|') {
+                        assert!(matches!(
+                            reason,
+                            PermissionDecisionReason::SubcommandResults { .. }
+                        ));
+                    } else {
+                        assert!(matches!(
+                            reason,
+                            PermissionDecisionReason::MatchedRule { .. }
+                        ));
+                    }
                 }
                 other => panic!("expected tee Edit-deny for {command:?}, got {other:?}"),
             }

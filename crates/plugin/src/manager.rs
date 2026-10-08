@@ -39,6 +39,7 @@ use crate::user_config;
 use serde_json::{Map, Value};
 
 use command_api::CommandRegistry;
+use hooks::mods::{ModReplayFailure, ModReplayModule, ModWorkerFailure};
 use hooks::{HookDefinition, HookExecutor, HookRegistry};
 use lingxi_core::host::task_registry::{MonitorRegistration, TaskRegistryHandle};
 use lingxi_core::host::{FileSystem, HttpTransport, RuntimeSpawner};
@@ -50,6 +51,7 @@ use secret::CredentialManager;
 use skill_api::{parse_skill_markdown, LoadedFrom, SkillRegistry, SkillSource};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use telemetry::tengu::plugin as plugin_telemetry;
 use telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata, PiiTagged, Verified};
@@ -105,6 +107,138 @@ pub enum PluginManagerError {
     Marketplace(String),
 }
 
+/// Managed Mod identities and their explicit hook-chain seats. Identities are
+/// exact `plugin@marketplace` keys from managed `enabledPlugins`.
+#[derive(Debug, Clone, Default)]
+pub struct ManagedModSeats {
+    pub enabled: HashSet<String>,
+    pub prepend: Vec<String>,
+    pub append: Vec<String>,
+}
+
+impl ManagedModSeats {
+    fn seat(&self, identity: &str) -> Option<(&'static str, Option<u32>)> {
+        if !identity.contains('@') || !self.enabled.contains(identity) {
+            return None;
+        }
+        if let Some(index) = self.prepend.iter().position(|name| name == identity) {
+            return Some(("prepend", u32::try_from(index).ok()));
+        }
+        if let Some(index) = self.append.iter().position(|name| name == identity) {
+            return Some(("append", u32::try_from(index).ok()));
+        }
+        // Managed plugins not listed in either key follow explicit prepends.
+        Some(("prepend", None))
+    }
+}
+
+#[cfg(test)]
+mod managed_mod_seat_tests {
+    use super::ManagedModSeats;
+
+    #[test]
+    fn seats_require_exact_enabled_identity_and_prepend_wins_duplicates() {
+        let seats = ManagedModSeats {
+            enabled: ["guard@org", "audit@org", "unlisted@org"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            prepend: vec!["guard@org".into()],
+            append: vec!["guard@org".into(), "audit@org".into()],
+        };
+        assert_eq!(seats.seat("guard@org"), Some(("prepend", Some(0))));
+        assert_eq!(seats.seat("audit@org"), Some(("append", Some(1))));
+        assert_eq!(seats.seat("unlisted@org"), Some(("prepend", None)));
+        assert_eq!(seats.seat("guard@other"), None);
+        assert_eq!(seats.seat("guard"), None);
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ModPluginReplayKey {
+    storage_id: String,
+    order: u64,
+}
+
+const MOD_WORKER_UNATTRIBUTED_CRASH_LIMIT: u8 = 3;
+
+#[derive(Default)]
+struct ModWorkerRecoveryPolicy {
+    unattributed_crashes: u8,
+    mods_off_at: Option<std::time::SystemTime>,
+}
+
+impl ModWorkerRecoveryPolicy {
+    fn record_failure(&mut self, failure: &ModWorkerFailure) {
+        if failure.attributed_storage_id.is_none() {
+            self.unattributed_crashes = self.unattributed_crashes.saturating_add(1);
+            if self.unattributed_crashes >= MOD_WORKER_UNATTRIBUTED_CRASH_LIMIT {
+                self.mods_off_at = Some(std::time::SystemTime::now());
+            }
+        }
+    }
+
+    fn declared_mod_set_changed(&mut self, admitted_mod: bool) {
+        self.unattributed_crashes = 0;
+        if admitted_mod {
+            self.mods_off_at = None;
+        }
+    }
+
+    fn mods_are_off(&self) -> bool {
+        self.mods_off_at.is_some()
+    }
+}
+
+#[cfg(test)]
+mod mod_worker_recovery_policy_tests {
+    use super::{ModWorkerFailure, ModWorkerRecoveryPolicy};
+
+    fn failure(epoch: u64, attributed_storage_id: Option<&str>) -> ModWorkerFailure {
+        ModWorkerFailure {
+            epoch,
+            reason: "test worker exit".into(),
+            attributed_storage_id: attributed_storage_id.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn threshold_counts_only_unattributed_deaths_and_explicit_reconcile_recovers() {
+        let mut policy = ModWorkerRecoveryPolicy::default();
+        policy.record_failure(&failure(1, Some("plugin@local")));
+        assert_eq!(policy.unattributed_crashes, 0);
+        assert!(!policy.mods_are_off());
+
+        policy.record_failure(&failure(2, None));
+        policy.record_failure(&failure(3, None));
+        assert!(!policy.mods_are_off());
+        policy.record_failure(&failure(4, None));
+        assert!(policy.mods_are_off());
+
+        policy.declared_mod_set_changed(false);
+        assert_eq!(policy.unattributed_crashes, 0);
+        assert!(policy.mods_are_off(), "a Native-only reload keeps Mods off");
+        policy.declared_mod_set_changed(true);
+        assert_eq!(policy.unattributed_crashes, 0);
+        assert!(!policy.mods_are_off(), "an admitted Mod clears the marker");
+    }
+}
+
+#[derive(Clone)]
+struct ModWorkerRecoveryView {
+    plugins: Arc<RwLock<HashMap<PluginId, PluginState>>>,
+    plugin_mod_names: Arc<RwLock<HashMap<PluginId, ModPluginReplayKey>>>,
+    plugin_configs: Arc<RwLock<HashMap<String, PluginUserConfig>>>,
+    blocked_marketplaces: Arc<RwLock<HashSet<String>>>,
+    managed_mod_seats: Arc<RwLock<ManagedModSeats>>,
+    credentials: Arc<CredentialManager>,
+    mods_enabled: bool,
+    workspace_trusted: bool,
+    disable_all_mods: bool,
+    safe_mode: bool,
+    managed_mods_only: bool,
+}
+
 /// The plugin lifecycle coordinator.
 ///
 /// Holds a state map keyed by [`PluginId`], references to every engine
@@ -114,7 +248,7 @@ pub enum PluginManagerError {
 /// The `fs`, `http`, and `runtime` fields are reserved for Plan 16's
 /// install/fetch code; they are not used by the M1.21 stub.
 pub struct PluginManager {
-    plugins: RwLock<HashMap<PluginId, PluginState>>,
+    plugins: Arc<RwLock<HashMap<PluginId, PluginState>>>,
     #[allow(dead_code)] // Used by Plan 16 install paths.
     install_dir: PathBuf,
     #[allow(dead_code)] // Used by Plan 16 install paths.
@@ -129,15 +263,21 @@ pub struct PluginManager {
     /// ones). Read from the settings `pluginConfigs` scope at construction (via
     /// [`Self::with_plugin_configs`]); empty otherwise. Sensitive values are
     /// NOT here — they come from [`CredentialManager`].
-    plugin_configs: RwLock<HashMap<String, PluginUserConfig>>,
+    plugin_configs: Arc<RwLock<HashMap<String, PluginUserConfig>>>,
     /// Managed marketplace names blocked from add/install/enable. Later
     /// composition-root refreshes replace this set in place.
-    blocked_marketplaces: RwLock<HashSet<String>>,
+    blocked_marketplaces: Arc<RwLock<HashSet<String>>>,
     /// Managed `enabledPlugins` names (name-part only) used to recover the
     /// oracle's org-policy provenance on session-enable telemetry.
     managed_plugin_names: RwLock<HashSet<String>>,
+    managed_mod_seats: Arc<RwLock<ManagedModSeats>>,
     analytics_bus: Arc<AnalyticsBus>,
     safe_mode: bool,
+    mods_enabled: bool,
+    workspace_trusted: bool,
+    disable_all_mods: bool,
+    managed_mods_only: bool,
+    sec_default_order: AtomicI64,
     /// Per-session collision keys prevent a reload loop from reporting the
     /// same resolved component collision repeatedly.
     reported_collision_events: Mutex<HashSet<String>>,
@@ -147,6 +287,12 @@ pub struct PluginManager {
     command_registry: Arc<RwLock<CommandRegistry>>,
     skill_registry: Arc<RwLock<SkillRegistry>>,
     hook_registry: Arc<RwLock<HookRegistry>>,
+    /// One persistent, killable JS worker for all Mods in this session.
+    mod_host: Mutex<Option<Arc<hooks::mods::ModHost>>>,
+    mod_store_root: PathBuf,
+    plugin_mod_names: Arc<RwLock<HashMap<PluginId, ModPluginReplayKey>>>,
+    mod_worker_recovery_policy: Arc<Mutex<ModWorkerRecoveryPolicy>>,
+    next_mod_registration_order: AtomicU64,
     output_style_registry: Arc<RwLock<OutputStyleRegistry>>,
     mcp_registry: Arc<McpRegistry>,
     lsp_registry: Arc<LspRegistry>,
@@ -190,7 +336,7 @@ pub struct PluginManager {
     /// transitions. The lock keeps a loaded snapshot live until its selected
     /// monitors are submitted, while stable monitor keys preserve session
     /// lifetime deduplication across reloads.
-    monitor_lifecycle: Mutex<()>,
+    monitor_lifecycle: Arc<Mutex<()>>,
     #[cfg(test)]
     /// Deterministic pause used by the in-crate lifecycle race regression.
     monitor_test_hooks: Mutex<Option<Arc<MonitorLifecycleTestHooks>>>,
@@ -204,7 +350,166 @@ pub struct PluginManager {
     plugin_monitor_tasks: Mutex<HashMap<PluginMonitorKey, String>>,
 }
 
+async fn build_mod_replay_modules(
+    view: &ModWorkerRecoveryView,
+    mods_off: bool,
+) -> (Vec<ModReplayModule>, Vec<ModReplayFailure>) {
+    if mods_off {
+        // The Native Pys=3 gate removes worker Mods only. The synthetic
+        // `sec-default` handler is inserted by the worker per dispatch and is
+        // not represented in this Manager-owned plugin map.
+        return (Vec::new(), Vec::new());
+    }
+    let plugins = view.plugins.read().await.clone();
+    let mut declared = view
+        .plugin_mod_names
+        .read()
+        .await
+        .iter()
+        .map(|(id, key)| (*id, key.clone()))
+        .collect::<Vec<_>>();
+    declared.sort_by_key(|(_, key)| key.order);
+    let configs = view.plugin_configs.read().await.clone();
+    let blocked_marketplaces = view.blocked_marketplaces.read().await.clone();
+    let managed_mod_seats = view.managed_mod_seats.read().await.clone();
+    let mut modules = Vec::new();
+    let mut failures = Vec::new();
+
+    for (id, key) in declared {
+        let Some(PluginState::Loaded {
+            manifest,
+            install_dir,
+            ..
+        }) = plugins.get(&id)
+        else {
+            // In particular, `DisablingFailed` never becomes replay authority.
+            continue;
+        };
+        let Some(component) = manifest.components.mod_module.as_ref() else {
+            continue;
+        };
+        if key.storage_id != installed_plugin_identity(manifest, install_dir) {
+            continue;
+        }
+        if cache_marketplace_name(install_dir)
+            .is_some_and(|marketplace| blocked_marketplaces.contains(&marketplace))
+        {
+            continue;
+        }
+        if !view.mods_enabled || !view.workspace_trusted || view.disable_all_mods {
+            continue;
+        }
+
+        let is_builtin = matches!(&manifest.source, PluginSource::BuiltIn);
+        let seat = managed_mod_seats.seat(&key.storage_id);
+        if (view.safe_mode || view.managed_mods_only)
+            && !is_builtin
+            && seat.is_none()
+        {
+            continue;
+        }
+        let (tier, tier_order) = seat.map_or(
+            (if is_builtin { "builtin" } else { "user" }, None),
+            |(tier, order)| (tier, order),
+        );
+        let plugin_key = installed_plugin_identity(manifest, install_dir);
+        let options = configs
+            .get(&plugin_key)
+            .map(|config| config.options.clone())
+            .unwrap_or_default();
+        let options = match resolve_user_config(manifest, &plugin_key, &options, &view.credentials).await {
+            Ok(options) => options,
+            Err(error) => {
+                failures.push(ModReplayFailure {
+                    storage_id: key.storage_id,
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
+        let root = std::fs::canonicalize(install_dir)
+            .unwrap_or_else(|_| install_dir.to_path_buf());
+        modules.push(ModReplayModule {
+            plugin: manifest.name.clone(),
+            storage_id: key.storage_id,
+            root,
+            module: component.clone(),
+            options,
+            tier: tier.to_owned(),
+            tier_order,
+            version: (!manifest.version.is_empty()).then(|| manifest.version.clone()),
+            provenance: mod_plugin_provenance(manifest, install_dir),
+        });
+    }
+    (modules, failures)
+}
+
 impl PluginManager {
+    fn mod_worker_recovery_view(&self) -> ModWorkerRecoveryView {
+        ModWorkerRecoveryView {
+            plugins: self.plugins.clone(),
+            plugin_mod_names: self.plugin_mod_names.clone(),
+            plugin_configs: self.plugin_configs.clone(),
+            blocked_marketplaces: self.blocked_marketplaces.clone(),
+            managed_mod_seats: self.managed_mod_seats.clone(),
+            credentials: self.credentials.clone(),
+            mods_enabled: self.mods_enabled,
+            workspace_trusted: self.workspace_trusted,
+            disable_all_mods: self.disable_all_mods,
+            safe_mode: self.safe_mode,
+            managed_mods_only: self.managed_mods_only,
+        }
+    }
+
+    fn start_mod_worker_failure_supervisor(&self, host: &Arc<hooks::mods::ModHost>) {
+        let Some(mut failures) = host.subscribe_worker_failures() else {
+            return;
+        };
+        let host = Arc::downgrade(host);
+        let view = self.mod_worker_recovery_view();
+        let policy = self.mod_worker_recovery_policy.clone();
+        let lifecycle = self.monitor_lifecycle.clone();
+        tokio::spawn(async move {
+            while let Some(failure) = failures.recv().await {
+                let Some(host) = host.upgrade() else {
+                    break;
+                };
+                let _lifecycle_guard = lifecycle.lock().await;
+                let mods_off = {
+                    let mut policy = policy.lock().await;
+                    policy.record_failure(&failure);
+                    policy.mods_are_off()
+                };
+                let (modules, preparation_failures) =
+                    build_mod_replay_modules(&view, mods_off).await;
+                for replay_failure in preparation_failures {
+                    tracing::warn!(
+                        storage_id = %replay_failure.storage_id,
+                        error = %replay_failure.reason,
+                        "loaded Mod was omitted from worker recovery"
+                    );
+                }
+                match host.recover_epoch(&modules).await {
+                    Ok(replay_failures) => {
+                        for replay_failure in replay_failures {
+                            tracing::warn!(
+                                storage_id = %replay_failure.storage_id,
+                                error = %replay_failure.reason,
+                                "loaded Mod failed worker recovery"
+                            );
+                        }
+                    }
+                    Err(error) => tracing::warn!(
+                        epoch = failure.epoch,
+                        reason = %failure.reason,
+                        error = %error,
+                        "Mod worker recovery failed"
+                    ),
+                }
+            }
+        });
+    }
+
     /// Build a `PluginManager` wired into all engine registries.
     #[must_use]
     #[allow(clippy::too_many_arguments)] // Wiring layer — every dep is required.
@@ -223,23 +528,35 @@ impl PluginManager {
         lsp_registry: Arc<LspRegistry>,
         tool_registry: Arc<RwLock<ToolRegistry>>,
     ) -> Self {
+        let mod_store_root = install_dir.parent().unwrap_or(&install_dir).join("store");
         Self {
-            plugins: RwLock::new(HashMap::new()),
+            plugins: Arc::new(RwLock::new(HashMap::new())),
             install_dir,
             fs,
             http,
             runtime,
             credentials,
-            plugin_configs: RwLock::new(HashMap::new()),
-            blocked_marketplaces: RwLock::new(HashSet::new()),
+            plugin_configs: Arc::new(RwLock::new(HashMap::new())),
+            blocked_marketplaces: Arc::new(RwLock::new(HashSet::new())),
             managed_plugin_names: RwLock::new(HashSet::new()),
+            managed_mod_seats: Arc::new(RwLock::new(ManagedModSeats::default())),
             analytics_bus: Arc::new(AnalyticsBus::with_default_sink()),
             safe_mode: false,
+            mods_enabled: true,
+            workspace_trusted: true,
+            disable_all_mods: false,
+            managed_mods_only: false,
+            sec_default_order: AtomicI64::new(i64::MIN),
             reported_collision_events: Mutex::new(HashSet::new()),
             reported_folder_shadow_events: Mutex::new(HashSet::new()),
             command_registry,
             skill_registry,
             hook_registry,
+            mod_host: Mutex::new(None),
+            mod_store_root,
+            plugin_mod_names: Arc::new(RwLock::new(HashMap::new())),
+            mod_worker_recovery_policy: Arc::new(Mutex::new(ModWorkerRecoveryPolicy::default())),
+            next_mod_registration_order: AtomicU64::new(0),
             output_style_registry,
             mcp_registry,
             lsp_registry,
@@ -252,7 +569,7 @@ impl PluginManager {
             plugin_themes: Arc::new(PluginThemeRegistry::new()),
             plugin_theme_slugs: RwLock::new(HashMap::new()),
             task_registry: None,
-            monitor_lifecycle: Mutex::new(()),
+            monitor_lifecycle: Arc::new(Mutex::new(())),
             #[cfg(test)]
             monitor_test_hooks: Mutex::new(None),
             project_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -335,7 +652,24 @@ impl PluginManager {
     /// callers with no persisted config leave it empty.
     #[must_use]
     pub fn with_plugin_configs(mut self, configs: HashMap<String, PluginUserConfig>) -> Self {
-        self.plugin_configs = RwLock::new(configs);
+        self.plugin_configs = Arc::new(RwLock::new(configs));
+        self
+    }
+
+    /// Apply the effective hook-policy gates to Mod execution. The managed-only
+    /// gate retains exact managed identities seated by `ManagedModSeats`.
+    #[must_use]
+    pub fn with_mod_hook_policy(mut self, disable_all: bool, managed_only: bool) -> Self {
+        self.disable_all_mods = disable_all;
+        self.managed_mods_only = managed_only;
+        self
+    }
+
+    /// Seat the built-in security-default prompt and settings hooks when managed policy
+    /// selects it. The setting also applies to a worker created later.
+    #[must_use]
+    pub fn with_sec_default_order(mut self, order: Option<i64>) -> Self {
+        self.sec_default_order = AtomicI64::new(order.unwrap_or(i64::MIN));
         self
     }
 
@@ -346,7 +680,7 @@ impl PluginManager {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.blocked_marketplaces = RwLock::new(blocked.into_iter().map(Into::into).collect());
+        self.blocked_marketplaces = Arc::new(RwLock::new(blocked.into_iter().map(Into::into).collect()));
         self
     }
 
@@ -361,10 +695,32 @@ impl PluginManager {
         self
     }
 
+    /// Seed exact managed plugin IDs and their Mod-chain seats.
+    #[must_use]
+    pub fn with_managed_mod_seats(mut self, seats: ManagedModSeats) -> Self {
+        self.managed_mod_seats = Arc::new(RwLock::new(seats));
+        self
+    }
+
     /// Stamp whether this session is running under safe mode.
     #[must_use]
     pub fn with_safe_mode(mut self, safe_mode: bool) -> Self {
         self.safe_mode = safe_mode;
+        self
+    }
+
+    /// Prevent plugin code from evaluating before the host has established
+    /// workspace trust. A later trust change requires plugin refresh.
+    #[must_use]
+    pub fn with_workspace_trusted(mut self, trusted: bool) -> Self {
+        self.workspace_trusted = trusted;
+        self
+    }
+
+    /// Disable executable Mods on hosts without a supported JS worker.
+    #[must_use]
+    pub fn with_mods_enabled(mut self, enabled: bool) -> Self {
+        self.mods_enabled = enabled;
         self
     }
 
@@ -381,6 +737,13 @@ impl PluginManager {
     #[must_use]
     pub fn with_project_dir(mut self, project_dir: PathBuf) -> Self {
         self.project_dir = project_dir;
+        self
+    }
+
+    /// Place each Mod's durable key-value store under the configured home.
+    #[must_use]
+    pub fn with_mod_store_root(mut self, store_root: PathBuf) -> Self {
+        self.mod_store_root = store_root;
         self
     }
 
@@ -422,27 +785,31 @@ impl PluginManager {
         task_ids
     }
 
-    /// Replace the persisted plugin config map used by future loads/reloads.
-    pub async fn replace_plugin_configs(&self, configs: HashMap<String, PluginUserConfig>) {
+    /// Atomically publish the settings snapshot consumed by plugin refresh and
+    /// Mod worker recovery. The recovery supervisor uses the same lifecycle
+    /// gate, so it observes either the previous complete snapshot or this one.
+    pub async fn replace_runtime_refresh_state(
+        &self,
+        configs: HashMap<String, PluginUserConfig>,
+        blocked_marketplaces: HashSet<String>,
+        managed_plugin_names: HashSet<String>,
+        sec_default_order: Option<i64>,
+        managed_mod_seats: ManagedModSeats,
+    ) {
+        let _lifecycle_guard = self.monitor_lifecycle.lock().await;
         *self.plugin_configs.write().await = configs;
-    }
-
-    /// Replace the managed blocked-marketplaces set used by future loads.
-    pub async fn replace_blocked_marketplaces<I, S>(&self, blocked: I)
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        *self.blocked_marketplaces.write().await = blocked.into_iter().map(Into::into).collect();
-    }
-
-    /// Replace the managed plugin-name set used by future telemetry emits.
-    pub async fn replace_managed_plugin_names<I, S>(&self, names: I)
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        *self.managed_plugin_names.write().await = names.into_iter().map(Into::into).collect();
+        *self.blocked_marketplaces.write().await = blocked_marketplaces;
+        *self.managed_plugin_names.write().await = managed_plugin_names;
+        self.sec_default_order
+            .store(sec_default_order.unwrap_or(i64::MIN), Ordering::Release);
+        if let Some(host) = self.mod_host.lock().await.as_ref() {
+            host.set_sec_default_order(sec_default_order);
+        }
+        *self.managed_mod_seats.write().await = managed_mod_seats;
+        self.mod_worker_recovery_policy
+            .lock()
+            .await
+            .declared_mod_set_changed(false);
     }
 
     /// Install a plugin from `source`.
@@ -525,6 +892,7 @@ impl PluginManager {
         manifest: PluginManifest,
         install_dir: PathBuf,
     ) -> Result<(), PluginManagerError> {
+        let _lifecycle_guard = self.monitor_lifecycle.lock().await;
         if let Some(marketplace) = cache_marketplace_name(&install_dir) {
             if self
                 .blocked_marketplaces
@@ -537,7 +905,6 @@ impl PluginManager {
                 )));
             }
         }
-        let _lifecycle_guard = self.monitor_lifecycle.lock().await;
         #[cfg(test)]
         if let Some(hooks) = self.monitor_test_hooks.lock().await.clone() {
             hooks.enable_reached.notify_one();
@@ -549,6 +916,7 @@ impl PluginManager {
         {
             return Ok(());
         }
+        let had_mod = self.plugin_mod_names.read().await.contains_key(id);
         self.load_plugin(&manifest, &install_dir).await?;
         self.plugins.write().await.insert(
             *id,
@@ -558,6 +926,13 @@ impl PluginManager {
                 loaded_at: std::time::SystemTime::now(),
             },
         );
+        let admitted_mod = self.plugin_mod_names.read().await.contains_key(id);
+        if had_mod || admitted_mod {
+            self.mod_worker_recovery_policy
+                .lock()
+                .await
+                .declared_mod_set_changed(admitted_mod);
+        }
         Ok(())
     }
 
@@ -934,6 +1309,7 @@ impl PluginManager {
             .await
             .map_err(|e| PluginManagerError::Loader(e.to_string()))?;
         // The substitution context keyed by the bare field name.
+        let mod_options = user_config.clone();
         let subst_ctx: Map<String, Value> = match user_config {
             Value::Object(m) => m,
             _ => Map::new(),
@@ -1423,7 +1799,171 @@ impl PluginManager {
             })
             .collect();
 
+        // Register the Mod before changing the other registries. A syntax or
+        // module-load error must not leave declarative components half loaded.
+        let mod_identity = installed_plugin_identity(manifest, install_dir);
+        let managed_seat = self.managed_mod_seats.read().await.seat(&mod_identity);
+        let is_builtin = matches!(&manifest.source, PluginSource::BuiltIn);
+        let can_load_mod = self.mods_enabled
+            && self.workspace_trusted
+            && !self.disable_all_mods
+            && !((self.safe_mode || self.managed_mods_only)
+                && !is_builtin
+                && managed_seat.is_none());
+        let sec_default_order = self.sec_default_order.load(Ordering::Acquire);
+        let existing_host = self.mod_host.lock().await.clone();
+        let host = if self.mods_enabled
+            && self.workspace_trusted
+            && !self.disable_all_mods
+            && (existing_host.is_some()
+                || sec_default_order != i64::MIN
+                || (can_load_mod && manifest.components.mod_module.is_some()))
+        {
+            let mut guard = self.mod_host.lock().await;
+            let host = match guard.as_ref() {
+                Some(host) => host.clone(),
+                None => {
+                    let host = hooks::mods::ModHost::start_with_store_root(
+                        None,
+                        Some(self.mod_store_root.clone()),
+                    )
+                    .await
+                    .map_err(|error| PluginManagerError::Loader(error.to_string()))?;
+                    if let Some(context) = self.hook_registry.read().await.mod_background_context()
+                    {
+                        host.attach_background_context(context);
+                    }
+                    *guard = Some(host.clone());
+                    host
+                }
+            };
+            host.set_sec_default_order(
+                (sec_default_order != i64::MIN).then_some(sec_default_order),
+            );
+            self.start_mod_worker_failure_supervisor(&host);
+            Some(host)
+        } else {
+            None
+        };
+        let prepared = if can_load_mod {
+            match (&host, &manifest.components.mod_module) {
+                (Some(host), Some(module)) => Some(
+                    host.prepare_module(install_dir, module)
+                        .await
+                        .map_err(|error| PluginManagerError::Loader(error.to_string()))?,
+                ),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(host) = &host {
+            let mut registration = Map::new();
+            registration.insert("name".into(), Value::String(manifest.name.clone()));
+            registration.insert(
+                "tier".into(),
+                Value::String(
+                    managed_seat
+                        .map_or(if is_builtin { "builtin" } else { "user" }, |seat| seat.0)
+                        .into(),
+                ),
+            );
+            registration.insert(
+                "root".into(),
+                Value::String(
+                    std::fs::canonicalize(install_dir)
+                        .unwrap_or_else(|_| install_dir.to_path_buf())
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            );
+            if !manifest.version.is_empty() {
+                registration.insert("version".into(), Value::String(manifest.version.clone()));
+            }
+            registration.insert(
+                "provenance".into(),
+                Value::String(mod_plugin_provenance(manifest, install_dir)),
+            );
+            registration.insert(
+                "uses".into(),
+                prepared.as_ref().map_or_else(
+                    || serde_json::json!({"events":[],"calls":[]}),
+                    |prepared| prepared.uses.clone(),
+                ),
+            );
+            let decision = host
+                .dispatch_plugin_register(Value::Object(registration))
+                .await;
+            let refusal = match decision {
+                Ok(value) => value
+                    .get("refuse")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                Err(error) => Some(error.to_string()),
+            };
+            if let Some(reason) = refusal {
+                if let Some(prepared) = &prepared {
+                    let _ = host.discard_prepared(prepared).await;
+                }
+                return Err(PluginManagerError::Loader(reason));
+            }
+        }
+        let loaded_mod = if !can_load_mod {
+            None
+        } else if let Some(module) = &manifest.components.mod_module {
+            let host = host.as_ref().expect("Mod candidate has a prepared worker");
+            let (mod_tier, tier_order) = if let Some(seat) = managed_seat {
+                seat
+            } else if is_builtin {
+                ("builtin", None)
+            } else {
+                ("user", None)
+            };
+            host.load_with_tier_order_storage_prepared(
+                plugin_name,
+                &mod_identity,
+                install_dir,
+                module,
+                mod_options,
+                mod_tier,
+                tier_order,
+                prepared.as_ref(),
+            )
+            .await
+            .map_err(|error| PluginManagerError::Loader(error.to_string()))?;
+            Some(host.clone())
+        } else {
+            None
+        };
+
         // ---- All inputs validated; mutate the live registries now. ----
+
+        // `command.describe` reads the installed plugin repository identity
+        // and its resolved managed/builtin/user seat, not the slash name's
+        // namespace. Keep the same facts for declarative and Mod commands.
+        let describe_tier =
+            managed_seat.map_or(if is_builtin { "builtin" } else { "user" }, |seat| seat.0);
+        let describe_plugin = mod_plugin_provenance(manifest, install_dir);
+        let describe_provider = serde_json::json!({
+            "plugin": describe_plugin.clone(),
+            "tier": describe_tier,
+        });
+        self.command_registry
+            .write()
+            .await
+            .set_plugin_describe_provider(
+                manifest.id,
+                plugin_name,
+                &describe_plugin,
+                describe_tier,
+            );
+        for definition in &mut agent_defs {
+            // `agent.offer` and `command.describe` share the same installed
+            // identity + resolved seat tier. Agent names are namespaced by
+            // the manifest display name, which is not enough to reconstruct
+            // a marketplace/storage identity after materialization.
+            definition.offer_provider = Some(describe_provider.clone());
+        }
 
         // 1. Commands and prompt skills share the live command catalog.
         if !cmds.is_empty() {
@@ -1454,6 +1994,20 @@ impl PluginManager {
             .write()
             .await
             .register_plugin_hooks(manifest.id, plugin_hooks);
+
+        if let Some(host) = loaded_mod {
+            self.hook_registry.write().await.set_mod_host(host);
+            let order = self
+                .next_mod_registration_order
+                .fetch_add(1, Ordering::Relaxed);
+            self.plugin_mod_names.write().await.insert(
+                manifest.id,
+                ModPluginReplayKey {
+                    storage_id: mod_identity,
+                    order,
+                },
+            );
+        }
 
         // 5. OutputStyles.
         if !styles.is_empty() {
@@ -1501,6 +2055,21 @@ impl PluginManager {
         //    regardless of the state `connect_all` leaves them in.
         if !mcp_scoped.is_empty() {
             let names: Vec<String> = mcp_scoped.iter().map(|cfg| cfg.name.clone()).collect();
+            let managed_scopes = mcp_scoped
+                .iter()
+                .map(|cfg| {
+                    (
+                        cfg.name.clone(),
+                        matches!(
+                            cfg.scope,
+                            mcp::ConfigScope::Enterprise
+                                | mcp::ConfigScope::Settings(
+                                    lingxi_core::types::SettingsScope::Managed
+                                )
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>();
             for name in &names {
                 self.mcp_registry
                     .set_headers_helper_plugin_root(name.clone(), install_dir.to_path_buf())
@@ -1509,8 +2078,24 @@ impl PluginManager {
             self.plugin_mcp_names
                 .write()
                 .await
-                .insert(manifest.id, names);
+                .insert(manifest.id, names.clone());
             self.mcp_registry.connect_all(mcp_scoped).await;
+            let prompts = command_api::mcp_prompts::mcp_prompt_commands(
+                &self.mcp_registry.connected_prompts().await,
+            );
+            let mut commands = self.command_registry.write().await;
+            for (name, managed) in managed_scopes {
+                commands.set_mcp_server_describe_scope(&name, managed);
+            }
+            for command in prompts {
+                if names
+                    .iter()
+                    .any(|server| command.name.starts_with(&format!("{server}:")))
+                    && commands.resolve(&command.name).is_none()
+                {
+                    commands.register_command(command);
+                }
+            }
         }
 
         // 8. LSP servers — plugin-only registration path.
@@ -1681,6 +2266,10 @@ impl PluginManager {
                         self.mcp_registry
                             .remove_headers_helper_plugin_root(name)
                             .await;
+                        self.command_registry
+                            .write()
+                            .await
+                            .unregister_mcp_server_prompts(name);
                     }
                     Err(error) => {
                         remaining.extend(names[idx..].iter().cloned());
@@ -1694,6 +2283,22 @@ impl PluginManager {
             self.plugin_mcp_names.write().await.remove(id);
         }
 
+        let mod_name = { self.plugin_mod_names.read().await.get(id).cloned() };
+        if let Some(name) = mod_name {
+            if let Some(host) = self.mod_host.lock().await.as_ref().cloned() {
+                host.unload(&name.storage_id)
+                    .await
+                    .map_err(|error| PluginManagerError::Loader(error.to_string()))?;
+            }
+            self.plugin_mod_names.write().await.remove(id);
+            self.mod_worker_recovery_policy
+                .lock()
+                .await
+                .declared_mod_set_changed(false);
+            if self.plugin_mod_names.read().await.is_empty() {
+                self.hook_registry.write().await.clear_mod_host();
+            }
+        }
         self.command_registry.write().await.unregister_plugin(id);
         self.skill_registry.write().await.unregister_plugin(id);
         self.hook_registry.write().await.unregister_plugin(id);
@@ -2006,6 +2611,16 @@ fn installed_plugin_identity(manifest: &PluginManifest, install_dir: &Path) -> S
     match cache_marketplace_name(install_dir) {
         Some(marketplace) => format!("{}@{marketplace}", manifest.name),
         None => manifest.name.clone(),
+    }
+}
+
+fn mod_plugin_provenance(manifest: &PluginManifest, install_dir: &Path) -> String {
+    if let Some(marketplace) = cache_marketplace_name(install_dir) {
+        format!("{}@{marketplace}", manifest.name)
+    } else if matches!(&manifest.source, PluginSource::BuiltIn) {
+        format!("{}@builtin", manifest.name)
+    } else {
+        format!("{}@inline", manifest.name)
     }
 }
 
@@ -3344,6 +3959,86 @@ mod monitor_lifecycle_tests {
             Arc::new(RwLock::new(ToolRegistry::new())),
         )
         .with_task_registry(registry)
+    }
+
+    #[tokio::test]
+    async fn runtime_refresh_state_waits_for_the_shared_recovery_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = Arc::new(monitor_manager(tmp.path(), Arc::new(MonitorRegistry::default())).await);
+        let mods_off_marker = std::time::SystemTime::now();
+        {
+            let mut policy = manager.mod_worker_recovery_policy.lock().await;
+            policy.unattributed_crashes = 2;
+            policy.mods_off_at = Some(mods_off_marker.clone());
+        }
+        let lifecycle_guard = manager.monitor_lifecycle.lock().await;
+        let caller = manager.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let mut config = PluginUserConfig::default();
+        config
+            .options
+            .insert("answer".into(), serde_json::Value::from(42));
+        let configs = HashMap::from([("plugin@local".to_owned(), config)]);
+        let mut refresh = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            caller
+                .replace_runtime_refresh_state(
+                    configs,
+                    HashSet::from(["blocked-market".to_owned()]),
+                    HashSet::from(["managed-plugin".to_owned()]),
+                    Some(73),
+                    ManagedModSeats {
+                        enabled: HashSet::from(["guard@org".to_owned()]),
+                        prepend: vec!["guard@org".to_owned()],
+                        append: Vec::new(),
+                    },
+                )
+                .await;
+        });
+        started_rx.await.unwrap();
+        assert!(timeout(Duration::from_millis(10), &mut refresh).await.is_err());
+        drop(lifecycle_guard);
+        refresh.await.unwrap();
+
+        assert_eq!(
+            manager
+                .plugin_configs
+                .read()
+                .await
+                .get("plugin@local")
+                .and_then(|config| config.options.get("answer")),
+            Some(&serde_json::Value::from(42))
+        );
+        assert!(
+            manager
+                .blocked_marketplaces
+                .read()
+                .await
+                .contains("blocked-market")
+        );
+        assert!(
+            manager
+                .managed_plugin_names
+                .read()
+                .await
+                .contains("managed-plugin")
+        );
+        assert_eq!(manager.sec_default_order.load(Ordering::Acquire), 73);
+        assert!(
+            manager
+                .managed_mod_seats
+                .read()
+                .await
+                .enabled
+                .contains("guard@org")
+        );
+        let policy = manager.mod_worker_recovery_policy.lock().await;
+        assert_eq!(policy.unattributed_crashes, 0, "explicit refresh resets s5t count");
+        assert_eq!(
+            policy.mods_off_at.as_ref(),
+            Some(&mods_off_marker),
+            "refresh alone does not admit a Mod"
+        );
     }
 
     #[tokio::test]

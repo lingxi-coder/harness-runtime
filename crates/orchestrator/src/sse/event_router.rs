@@ -14,6 +14,7 @@
 use super::accumulator::{BlockAccumulator, BlockKind, CompletedBlock};
 use super::StreamingError;
 use lingxi_core::host::OutputStream;
+use lingxi_core::types::utf16_json::{Utf16JsonProjection, Utf16JsonString};
 use lingxi_core::types::{ContentBlock, ToolUseId};
 use llm_runtime::{
     ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryContentDelta, HistoryEvent,
@@ -59,13 +60,16 @@ pub enum RouterAction {
         /// non-refusal deltas.
         stop_details: Option<llm_runtime::HistoryStopDetails>,
     },
-    /// `message_delta` arrived with usage but NO `stop_reason` (A3). The
+    /// The current `message_delta` has no string `stop_reason` (A3). The
     /// streaming loop records `output_tokens` and continues.
     RecordUsage {
         /// Cumulative output tokens from this delta's usage.
         output_tokens: u64,
         /// Full usage snapshot from this delta.
         usage: Option<Usage>,
+        /// Apply or clear these details only while the attempt has no sticky
+        /// stop reason. A reasonless delta preserves an existing terminal state.
+        stop_details: Option<llm_runtime::HistoryStopDetails>,
     },
     /// `message_stop` arrived — terminate the per-turn loop.
     EndOfStream,
@@ -88,11 +92,15 @@ pub async fn dispatch_event(
     // is still accumulated into the block; only the on-screen echo is withheld.
     // `false` ⇒ byte-identical live streaming (the no-hook common case).
     suppress_live_text: bool,
+    suppress_live_thinking: bool,
 ) -> Result<RouterAction, StreamingError> {
     match event {
         // Hosted search consumers inspect this semantic event separately. Main
         // conversation attribution remains in the terminal metadata snapshot.
         HistoryEvent::WebSearch { .. } => Ok(RouterAction::Continue),
+        HistoryEvent::ServerFallback { .. }
+        | HistoryEvent::ResponseObserved { .. }
+        | HistoryEvent::CostQuoteObserved { .. } => Ok(RouterAction::Continue),
         HistoryEvent::MessageStart { response } => {
             // No-op for state; the loop already knows the model + id from
             // the turn invocation. claude-code captures `partialMessage`
@@ -144,20 +152,41 @@ pub async fn dispatch_event(
         } => {
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
             if output.wants_partial_stream_events() {
-                let cb_val = reconstruct_content_block_json(&content_block);
-                let event_json = serde_json::to_string(&json!({
-                    "type": "content_block_start",
-                    "index": index,
-                    "content_block": cb_val
-                }))
-                .unwrap_or_default();
+                let event_json = reconstruct_content_block_event_json(index, &content_block);
                 output.emit_stream_event(&event_json, false).await;
             }
             let kind = match &content_block {
-                LlmContentBlock::ProviderContent { protocol, value } => BlockKind::Preserved(ContentBlock::ProviderContent { protocol: protocol.clone(), value: value.clone() }),
-                LlmContentBlock::Text { .. } | LlmContentBlock::TextJsUtf16 { .. } => {
-                    BlockKind::Text
+                LlmContentBlock::ProviderContent { protocol, value }
+                    if protocol == "anthropic_messages" && value["type"] == "text" =>
+                {
+                    BlockKind::PreservedText(ContentBlock::ProviderContent {
+                        protocol: protocol.clone(),
+                        value: value.clone(),
+                    })
                 }
+                LlmContentBlock::ProviderContent { protocol, value } => {
+                    BlockKind::Preserved(ContentBlock::ProviderContent {
+                        protocol: protocol.clone(),
+                        value: value.clone(),
+                    })
+                }
+                LlmContentBlock::Text {
+                    text, citations, ..
+                } => BlockKind::Text {
+                    citations: citations.clone(),
+                    utf16_code_units: None,
+                    initial_text: text.clone(),
+                },
+                LlmContentBlock::TextJsUtf16 {
+                    text,
+                    utf16_code_units,
+                    citations,
+                    ..
+                } => BlockKind::Text {
+                    citations: citations.clone(),
+                    utf16_code_units: Some(utf16_code_units.clone()),
+                    initial_text: text.clone(),
+                },
                 LlmContentBlock::ToolCall { id, name, .. } => BlockKind::ToolUse {
                     // The provider-issued id IS the canonical ToolUseId (byte
                     // parity with claude-code). The provider_id sidecar is left
@@ -208,14 +237,9 @@ pub async fn dispatch_event(
         HistoryEvent::ContentBlockDelta { index, delta } => {
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
             if output.wants_partial_stream_events() {
-                let delta_val = reconstruct_delta_json(&delta);
-                let event_json = serde_json::to_string(&json!({
-                    "type": "content_block_delta",
-                    "index": index,
-                    "delta": delta_val
-                }))
-                .unwrap_or_default();
-                output.emit_stream_event(&event_json, false).await;
+                if let Some(event_json) = reconstruct_delta_event_json(index, &delta) {
+                    output.emit_stream_event(&event_json, false).await;
+                }
             }
             match delta {
                 HistoryContentDelta::TextDelta { text } => {
@@ -230,6 +254,15 @@ pub async fn dispatch_event(
                         output.emit_text(&text).await;
                     }
                 }
+                HistoryContentDelta::TextJsUtf16Delta {
+                    text,
+                    utf16_code_units,
+                } => {
+                    acc.append_text_utf16(index, &utf16_code_units)?;
+                    if !suppress_live_text {
+                        output.emit_text(&text).await;
+                    }
+                }
                 HistoryContentDelta::InputJsonDelta { partial_json } => {
                     acc.append_json(index, &partial_json)?;
                 }
@@ -240,15 +273,25 @@ pub async fn dispatch_event(
                     // `TextDelta` arm above. `signature` is `None` on the
                     // live delta — the cryptographic signature only arrives
                     // on the completed thinking block (`SignatureDelta`).
-                    output.emit_thinking(&thinking, None).await;
+                    if !suppress_live_thinking {
+                        output.emit_thinking(&thinking, None).await;
+                    }
                 }
                 HistoryContentDelta::SignatureDelta { signature } => {
                     acc.set_signature(index, &signature)?;
                 }
-                HistoryContentDelta::CitationsDelta { .. }
-                | HistoryContentDelta::ConnectorTextDelta { .. } => {
-                    // Dropped at M5-04 boundary (parity with M5-02's
-                    // `translate_response_blocks` which drops them).
+                HistoryContentDelta::CitationsDelta { citation } => {
+                    acc.append_citation(index, citation)?;
+                }
+                HistoryContentDelta::TextCitations { citations } => {
+                    acc.set_text_citations(index, citations)?;
+                }
+                HistoryContentDelta::ProviderContentSnapshot { value } => {
+                    acc.set_provider_content_snapshot(index, value)?;
+                }
+                HistoryContentDelta::ConnectorTextDelta { .. } => {
+                    // Connector text deltas are not represented in the local
+                    // content-block accumulator.
                 }
             }
             Ok(RouterAction::Continue)
@@ -265,10 +308,20 @@ pub async fn dispatch_event(
             }
             let completed = acc.stop_block(index)?;
             match completed {
-                CompletedBlock::Text { text } => {
-                    Ok(RouterAction::AppendAssistantBlock(ContentBlock::Text {
-                        text,
-                    }))
+                CompletedBlock::Text {
+                    text,
+                    citations,
+                    utf16_code_units,
+                } => {
+                    let block = match utf16_code_units {
+                        Some(utf16_code_units) => ContentBlock::TextJsUtf16 {
+                            text,
+                            utf16_code_units,
+                            citations,
+                        },
+                        None => ContentBlock::Text { text, citations },
+                    };
+                    Ok(RouterAction::AppendAssistantBlock(block))
                 }
                 CompletedBlock::Thinking {
                     thinking,
@@ -355,13 +408,12 @@ pub async fn dispatch_event(
                     usage: usage_for_billing,
                     stop_details: delta.stop_details,
                 })
-            } else if output_tokens > 0 {
+            } else {
                 Ok(RouterAction::RecordUsage {
                     output_tokens,
                     usage: usage_for_billing,
+                    stop_details: delta.stop_details,
                 })
-            } else {
-                Ok(RouterAction::Continue)
             }
         }
         // NOTE: HistoryEvent has no Ping or Error variants — errors surface as
@@ -390,8 +442,13 @@ pub async fn dispatch_event(
 fn reconstruct_content_block_json(block: &LlmContentBlock) -> Value {
     match block {
         LlmContentBlock::ProviderContent { value, .. } => value.clone(),
-        LlmContentBlock::Text { .. } | LlmContentBlock::TextJsUtf16 { .. } => {
-            json!({"type": "text", "text": ""})
+        LlmContentBlock::Text { citations, .. }
+        | LlmContentBlock::TextJsUtf16 { citations, .. } => {
+            let mut block = json!({"type": "text", "text": ""});
+            if let Some(citations) = citations {
+                block["citations"] = citations.clone().unwrap_or(Value::Null);
+            }
+            block
         }
         LlmContentBlock::ToolCall { id, name, .. } => {
             json!({"type": "tool_use", "id": id, "name": name, "input": {}})
@@ -420,11 +477,56 @@ fn reconstruct_content_block_json(block: &LlmContentBlock) -> Value {
     }
 }
 
+fn reconstruct_content_block_event_json(index: u32, block: &LlmContentBlock) -> String {
+    let value = json!({
+        "type": "content_block_start",
+        "index": index,
+        "content_block": reconstruct_content_block_json(block)
+    });
+    serde_json::to_string(&value).unwrap_or_default()
+}
+
+fn reconstruct_delta_event_json(index: u32, delta: &HistoryContentDelta) -> Option<String> {
+    if let HistoryContentDelta::TextJsUtf16Delta {
+        utf16_code_units, ..
+    } = delta
+    {
+        let value = json!({
+            "type": "content_block_delta",
+            "index": index,
+            "delta": reconstruct_delta_json(delta)?
+        });
+        return Some(
+            Utf16JsonProjection {
+                value,
+                strings: vec![Utf16JsonString {
+                    pointer: "/delta/text".into(),
+                    code_units: utf16_code_units.clone(),
+                }],
+                keys: Vec::new(),
+            }
+            .to_json_string()
+            .unwrap_or_default(),
+        );
+    }
+    reconstruct_delta_json(delta).map(|delta| {
+        serde_json::to_string(&json!({
+            "type": "content_block_delta",
+            "index": index,
+            "delta": delta
+        }))
+        .unwrap_or_default()
+    })
+}
+
 /// Reconstruct the JSON value for a `HistoryContentDelta`
 /// (used in the `content_block_delta` SSE event for P4 partial-messages).
-fn reconstruct_delta_json(delta: &HistoryContentDelta) -> Value {
-    match delta {
+fn reconstruct_delta_json(delta: &HistoryContentDelta) -> Option<Value> {
+    Some(match delta {
         HistoryContentDelta::TextDelta { text } => json!({"type": "text_delta", "text": text}),
+        HistoryContentDelta::TextJsUtf16Delta { text, .. } => {
+            json!({"type": "text_delta", "text": text})
+        }
         HistoryContentDelta::InputJsonDelta { partial_json } => {
             json!({"type": "input_json_delta", "partial_json": partial_json})
         }
@@ -440,7 +542,9 @@ fn reconstruct_delta_json(delta: &HistoryContentDelta) -> Value {
         HistoryContentDelta::ConnectorTextDelta { connector_text } => {
             json!({"type": "connector_text_delta", "connector_text": connector_text})
         }
-    }
+        HistoryContentDelta::TextCitations { .. }
+        | HistoryContentDelta::ProviderContentSnapshot { .. } => return None,
+    })
 }
 
 /// Surface an SSE `usage` snapshot to the output sink as a live usage
@@ -469,6 +573,21 @@ mod tests {
     use crate::test_support::MockOutputStream;
     use llm_runtime::HistoryMessageDelta;
 
+    #[test]
+    fn utf16_partial_delta_keeps_native_json_text_without_private_fields() {
+        let encoded = reconstruct_delta_event_json(
+            7,
+            &HistoryContentDelta::TextJsUtf16Delta {
+                text: "�".into(),
+                utf16_code_units: vec![0xd800],
+            },
+        )
+        .unwrap();
+        assert!(encoded.contains("\\ud800"), "{encoded}");
+        assert!(encoded.contains("text_delta"), "{encoded}");
+        assert!(!encoded.contains("utf16_code_units"), "{encoded}");
+    }
+
     #[tokio::test]
     async fn text_delta_emits_to_output_and_accumulates() {
         let mut acc = BlockAccumulator::new();
@@ -481,10 +600,12 @@ mod tests {
                 content_block: LlmContentBlock::Text {
                     text: String::new(),
                     cache_control: None,
+                    citations: None,
                 },
             },
             &mut acc,
             &out,
+            false,
             false,
         )
         .await
@@ -498,12 +619,95 @@ mod tests {
             &mut acc,
             &out,
             false,
+            false,
         )
         .await
         .expect("delta");
         // OutputStream observed exactly one emit_text("hi")
         let events = mock.snapshot().await;
         assert_eq!(events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn opaque_anthropic_text_deltas_are_visible_and_finish_as_one_raw_block() {
+        let mut acc = BlockAccumulator::new();
+        let mock = Arc::new(MockOutputStream::new());
+        let out: Arc<dyn OutputStream> = mock.clone();
+        dispatch_event(
+            HistoryEvent::ContentBlockStart {
+                index: 3,
+                content_block: LlmContentBlock::ProviderContent {
+                    protocol: "anthropic_messages".into(),
+                    value: json!({
+                        "type":"text",
+                        "text":"",
+                        "future_annotation":{"keep":true}
+                    }),
+                },
+            },
+            &mut acc,
+            &out,
+            false,
+            false,
+        )
+        .await
+        .expect("opaque text start");
+        for text in ["visible ", "answer"] {
+            dispatch_event(
+                HistoryEvent::ContentBlockDelta {
+                    index: 3,
+                    delta: HistoryContentDelta::TextDelta { text: text.into() },
+                },
+                &mut acc,
+                &out,
+                false,
+                false,
+            )
+            .await
+            .expect("opaque text delta");
+        }
+        dispatch_event(
+            HistoryEvent::ContentBlockDelta {
+                index: 3,
+                delta: HistoryContentDelta::ProviderContentSnapshot {
+                    value: json!({
+                        "type":"text",
+                        "text":"visible answer",
+                        "citations":null,
+                        "future_annotation":{"keep":true}
+                    }),
+                },
+            },
+            &mut acc,
+            &out,
+            false,
+            false,
+        )
+        .await
+        .expect("opaque text final snapshot");
+
+        assert_eq!(
+            mock.text_events().await,
+            vec!["visible ".to_owned(), "answer".to_owned()]
+        );
+        assert!(matches!(
+            dispatch_event(
+                HistoryEvent::ContentBlockStop { index: 3 },
+                &mut acc,
+                &out,
+                false,
+                false,
+            )
+            .await
+            .expect("opaque text stop"),
+            RouterAction::AppendAssistantBlock(ContentBlock::ProviderContent {
+                protocol,
+                value,
+            }) if protocol == "anthropic_messages"
+                && value["text"] == "visible answer"
+                && value["citations"].is_null()
+                && value["future_annotation"]["keep"] == true
+        ));
     }
 
     #[tokio::test]
@@ -522,6 +726,7 @@ mod tests {
             &mut acc,
             &out,
             false,
+            false,
         )
         .await
         .expect("ok");
@@ -538,7 +743,7 @@ mod tests {
         let mut acc = BlockAccumulator::new();
         let mock = Arc::new(MockOutputStream::new());
         let out: Arc<dyn OutputStream> = mock.clone();
-        let action = dispatch_event(HistoryEvent::MessageStop, &mut acc, &out, false)
+        let action = dispatch_event(HistoryEvent::MessageStop, &mut acc, &out, false, false)
             .await
             .expect("ok");
         assert!(matches!(action, RouterAction::EndOfStream));
@@ -566,6 +771,7 @@ mod tests {
             },
             &mut acc,
             &out,
+            false,
             false,
         )
         .await

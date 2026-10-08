@@ -425,6 +425,19 @@ fn inspect_missing_required_input(
     })
 }
 
+/// Native 2.1.290 `Urn` returns the organization ceiling as an `other` reason
+/// with this exact user-facing message (`Rrn` + `zl(name, reason)`).
+fn native_organization_ask_result(mut result: PermissionResult) -> PermissionResult {
+    if let PermissionResult::Ask { reason, prompt, .. } = &mut result {
+        let message = "Your organization requires approval for this tool".to_string();
+        *reason = PermissionDecisionReason::Other {
+            reason: message.clone(),
+        };
+        prompt.message = message;
+    }
+    result
+}
+
 /// Build the model-facing `mcp_progress` / `progress` event payload for one
 /// forwarded MCP `notifications/progress` (MCP.4). Mirrors
 /// `services/mcp/client.ts:3104-3112`:
@@ -792,6 +805,10 @@ pub struct MCPTool {
     /// Tighten-only ceiling resolved from the MCP server/config policy. Kept
     /// separate from the wire DTO so discovery-cache entries remain unchanged.
     effective_max_permission: Option<McpToolMaxPermission>,
+    /// Organization ceiling only. Native `mcpInfo.effectiveMaxPermission`
+    /// excludes ordinary `permission_policy` rules; this separate provenance
+    /// feeds the Mod `tool.check` `ceiling` field without changing enforcement.
+    organization_max_permission: Option<McpToolMaxPermission>,
     /// §24b — explicit dispatch target for a per-SUBAGENT inline `mcpServers`
     /// entry. `None` (every existing construction site) preserves today's
     /// behaviour exactly: the server is derived from `full_name`'s parsed
@@ -842,6 +859,7 @@ impl MCPTool {
             always_load: true,
             requires_user_interaction: false,
             effective_max_permission: None,
+            organization_max_permission: None,
             bound_server_key: None,
             mcp_role: None,
         }
@@ -882,6 +900,7 @@ impl MCPTool {
             always_load,
             requires_user_interaction,
             effective_max_permission: effective_max_permission.map(max_permission_from_ceiling),
+            organization_max_permission: None,
             bound_server_key: None,
             mcp_role: None,
         }
@@ -892,6 +911,19 @@ impl MCPTool {
     #[must_use]
     pub fn with_effective_max_permission(mut self, ceiling: McpToolMaxPermission) -> Self {
         self.effective_max_permission = Some(ceiling);
+        self
+    }
+
+    /// Preserve the organization-only permission ceiling used by Native
+    /// `mcpInfo.effectiveMaxPermission`. Local `permission_policy` remains in
+    /// `effective_max_permission` for enforcement but must not create a Mod
+    /// `ceiling` property.
+    #[must_use]
+    pub fn with_organization_max_permission(
+        mut self,
+        ceiling: lingxi_core::host::McpPermissionCeiling,
+    ) -> Self {
+        self.organization_max_permission = Some(max_permission_from_ceiling(ceiling));
         self
     }
 
@@ -955,6 +987,27 @@ impl MCPTool {
             let ceiling = configured_permission_ceiling(config, &dto.tool_name)
                 .map(max_permission_from_ceiling);
             Some((dto.requires_user_interaction, ceiling))
+        })
+    }
+
+    async fn generic_organization_max_permission(
+        &self,
+        full_name: &str,
+    ) -> Option<McpToolMaxPermission> {
+        let registry = self.mcp_registry()?;
+        let connections = registry.connections.read().await;
+        connections.iter().find_map(|(table_key, state)| {
+            let (config, tools) = match state {
+                mcp::McpConnectionState::Connected { config, tools, .. }
+                | mcp::McpConnectionState::Cached { config, tools, .. } => (config, tools),
+                _ => return None,
+            };
+            if table_key != &config.name {
+                return None;
+            }
+            let dto = tools.iter().find(|dto| dto.full_name == full_name)?;
+            configured_organization_max_permission(config, &dto.tool_name)
+                .map(max_permission_from_ceiling)
         })
     }
 
@@ -1384,6 +1437,23 @@ impl Tool for MCPTool {
     fn is_mcp(&self) -> bool {
         true
     }
+    async fn tool_check_permission_ceiling(
+        &self,
+        input: &Value,
+    ) -> Option<McpPermissionCeiling> {
+        let organization_ceiling = if self.full_name.is_none() {
+            self.generic_organization_max_permission(
+                input.get("full_name").and_then(Value::as_str)?,
+            )
+            .await?
+        } else {
+            self.organization_max_permission?
+        };
+        match organization_ceiling {
+            McpToolMaxPermission::Ask => Some(McpPermissionCeiling::Ask),
+            McpToolMaxPermission::Allow | McpToolMaxPermission::Blocked => None,
+        }
+    }
     async fn on_input_schema_rejected(
         &self,
         input: &Value,
@@ -1503,7 +1573,7 @@ impl Tool for MCPTool {
             else {
                 return deny_mcp("MCP tool metadata unavailable; refusing dispatch");
             };
-            return permission::clamp_mcp_permission_result(
+            let result = permission::clamp_mcp_permission_result(
                 allow_mcp("MCP server tool dispatch"),
                 full_name,
                 effective_max_permission,
@@ -1511,6 +1581,14 @@ impl Tool for MCPTool {
                 requires_user_interaction,
                 true,
             );
+            if self
+                .generic_organization_max_permission(full_name)
+                .await
+                == Some(McpToolMaxPermission::Ask)
+            {
+                return native_organization_ask_result(result);
+            }
+            return result;
         }
 
         // MCP client-side ceilings and tool-owned interaction requirements are
@@ -1518,14 +1596,19 @@ impl Tool for MCPTool {
         // this path, so capability authorization stays permissive until a
         // real host signal is available; treating absence as false would deny
         // every ordinary MCP tool.
-        permission::clamp_mcp_permission_result(
+        let result = permission::clamp_mcp_permission_result(
             allow_mcp("MCP server tool dispatch"),
             self.name(),
             self.effective_max_permission,
             None,
             self.requires_user_interaction,
             true,
-        )
+        );
+        if self.organization_max_permission == Some(McpToolMaxPermission::Ask) {
+            native_organization_ask_result(result)
+        } else {
+            result
+        }
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
@@ -3158,6 +3241,27 @@ fn max_permission_from_ceiling(
     }
 }
 
+/// Resolve the organization-side MCP ceiling used by Native
+/// `effectiveMaxPermission`. `tool_permissions` is the host's normalized org
+/// map (Native's `jt(tools[].org_max_permission)` producer); per-tool
+/// `permission_policy` is a local rule and is intentionally excluded.
+pub fn configured_organization_max_permission(
+    config: &mcp::McpServerConfig,
+    tool_name: &str,
+) -> Option<lingxi_core::host::McpPermissionCeiling> {
+    let mut ceiling = config.tool_permissions.get(tool_name).copied();
+    for configured in config
+        .tools
+        .iter()
+        .filter(|configured| configured.name == tool_name)
+    {
+        if let Some(org_ceiling) = configured.org_max_permission {
+            ceiling = Some(ceiling.map_or(org_ceiling, |current| current.strictest(org_ceiling)));
+        }
+    }
+    ceiling
+}
+
 pub async fn build_registered_mcp_tools(
     registry: &McpRegistry,
     ctx: tool_api::BuiltinToolContext,
@@ -3218,6 +3322,13 @@ pub async fn build_registered_mcp_tools(
                         configured_permission_ceiling(config, &dto.tool_name)
                     {
                         tool.with_mcp_permission_ceiling(ceiling)
+                    } else {
+                        tool
+                    };
+                    let tool = if let Some(ceiling) =
+                        configured_organization_max_permission(config, &dto.tool_name)
+                    {
+                        tool.with_organization_max_permission(ceiling)
                     } else {
                         tool
                     };
@@ -3915,6 +4026,86 @@ mod tests {
         assert!(err.contains("/extra/count"));
     }
 
+    #[test]
+    fn organization_ceiling_projection_excludes_local_permission_policy() {
+        let mut config = super::resource_tool_gating_tests::config("srv");
+        config.tools.push(lingxi_core::host::McpConfiguredToolPolicyDto {
+            name: "write".into(),
+            permission_policy: Some(lingxi_core::host::McpToolPermissionPolicy::AlwaysAsk),
+            org_max_permission: None,
+        });
+        assert_eq!(configured_organization_max_permission(&config, "write"), None);
+
+        config.tools[0].org_max_permission = Some(McpPermissionCeiling::Ask);
+        assert_eq!(
+            configured_organization_max_permission(&config, "write"),
+            Some(McpPermissionCeiling::Ask),
+            "Native effectiveMaxPermission is sourced from organization caps"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_org_ask_ceiling_projects_ask_and_exact_reason() {
+        let context = || {
+            tool_api::test_support::ctx_for_file_tools(
+                tool_api::test_support::make_dummy_fs(),
+                std::sync::Arc::new(telemetry::AnalyticsBus::new()),
+                vec![std::path::PathBuf::from("/tmp")],
+            )
+        };
+        let local_only = MCPTool::new_for_tool(
+            context(),
+            "mcp__srv__write".into(),
+            "write".into(),
+            json!({"type":"object"}),
+            None,
+            Some(McpPermissionCeiling::Ask),
+            None,
+            true,
+            false,
+        );
+        assert_eq!(
+            local_only.tool_check_permission_ceiling(&json!({})).await,
+            None,
+            "an enforcement ceiling alone is not organization provenance"
+        );
+
+        let org_capped = MCPTool::new_for_tool(
+            context(),
+            "mcp__srv__write".into(),
+            "write".into(),
+            json!({"type":"object"}),
+            None,
+            Some(McpPermissionCeiling::Ask),
+            None,
+            true,
+            false,
+        )
+        .with_organization_max_permission(McpPermissionCeiling::Ask);
+        assert_eq!(
+            org_capped
+                .tool_check_permission_ceiling(&json!({}))
+                .await,
+            Some(McpPermissionCeiling::Ask)
+        );
+        let result = native_organization_ask_result(permission::clamp_mcp_permission_result(
+            allow_mcp("test"),
+            org_capped.name(),
+            Some(McpToolMaxPermission::Ask),
+            None,
+            false,
+            true,
+        ));
+        let PermissionResult::Ask { reason, prompt, .. } = result else {
+            panic!("an explicit organization ask must remain Ask");
+        };
+        let PermissionDecisionReason::Other { reason } = reason else {
+            panic!("organization Ask must use the Native Other decision reason");
+        };
+        assert_eq!(reason, "Your organization requires approval for this tool");
+        assert_eq!(prompt.message, "Your organization requires approval for this tool");
+    }
+
     #[tokio::test]
     async fn per_tool_permission_ceiling_tightens_tool_check() {
         let ctx = tool_api::test_support::ctx_for_file_tools(
@@ -4403,6 +4594,7 @@ pub(crate) mod cached_resource_test_support {
         registry.connections.write().await.insert(
             name.into(),
             McpConnectionState::Cached {
+                server_info: None,
                 config: cached_server_config(name),
                 connection_id: McpConnectionId::new(),
                 capabilities: behavior.cached_capabilities,
@@ -5723,7 +5915,7 @@ mod resource_tool_gating_tests {
         }
     }
 
-    fn config(name: &str) -> McpServerConfig {
+    pub(super) fn config(name: &str) -> McpServerConfig {
         McpServerConfig {
             name: name.into(),
             spec: McpTransportSpec::InProcess {
@@ -6070,6 +6262,7 @@ mod resource_tool_gating_tests {
         registry.connections.write().await.insert(
             "cached".into(),
             McpConnectionState::Cached {
+                server_info: None,
                 config: cached_config,
                 connection_id: lingxi_core::types::McpConnectionId::new(),
                 capabilities: caps(false),
@@ -6660,6 +6853,7 @@ mod cached_resource_tool_tests {
         registry.connections.write().await.insert(
             scoped_key,
             mcp::McpConnectionState::Cached {
+                server_info: None,
                 config: cached_resource_test_support::cached_server_config("shared"),
                 connection_id: lingxi_core::types::McpConnectionId::new(),
                 capabilities: resource_caps(true),
@@ -6799,6 +6993,7 @@ mod cached_resource_tool_tests {
         registry.connections.write().await.insert(
             scoped_key,
             mcp::McpConnectionState::Cached {
+                server_info: None,
                 config: cached_resource_test_support::cached_server_config("shared"),
                 connection_id: lingxi_core::types::McpConnectionId::new(),
                 capabilities: resource_caps(true),

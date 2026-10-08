@@ -131,6 +131,46 @@ pub enum TaskState {
 }
 
 impl TaskState {
+    pub(crate) fn handback(&self) -> Option<&lingxi_core::host::handback::HandbackState> {
+        match self {
+            Self::LocalAgent(agent) => agent.handback.as_ref(),
+            Self::InProcessTeammate(agent) => agent.handback.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn handback_slot(
+        &mut self,
+    ) -> Option<&mut Option<lingxi_core::host::handback::HandbackState>> {
+        match self {
+            Self::LocalAgent(agent) => Some(&mut agent.handback),
+            Self::InProcessTeammate(agent) => Some(&mut agent.handback),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn archive_handback(
+        &mut self,
+        previous: lingxi_core::host::handback::HandbackState,
+    ) {
+        if previous.report.is_none() && previous.receipt.is_none() {
+            return;
+        }
+        match self {
+            Self::LocalAgent(agent) => agent.handback_history.push(previous),
+            Self::InProcessTeammate(agent) => agent.handback_history.push(previous),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn handback_history(&self) -> &[lingxi_core::host::handback::HandbackState] {
+        match self {
+            Self::LocalAgent(agent) => &agent.handback_history,
+            Self::InProcessTeammate(agent) => &agent.handback_history,
+            _ => &[],
+        }
+    }
+
     /// Whether a completed local-agent turn retains a resumable runner.
     #[must_use]
     pub fn is_parked(&self) -> bool {
@@ -198,6 +238,9 @@ pub struct LocalBashTaskState {
     pub pid: Option<u32>,
     /// Exit code once terminated.
     pub exit_code: Option<i32>,
+    /// Why an automatic lifetime guard stopped this shell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_cause: Option<String>,
     /// Directory the command was launched in (claude-code stores `cwd: Q()` on
     /// the `local_bash` record, 2.1.263 `Xne`). `#[serde(default)]` so records
     /// written before the field existed still parse.
@@ -215,6 +258,25 @@ pub struct LocalBashTaskState {
 /// State specific to an in-process agent task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalAgentTaskState {
+    /// Trusted plugin source captured at admission, independent of any
+    /// rewritten spawn JSON.
+    #[serde(default)]
+    pub agent_spawn_provenance: lingxi_core::host::subagent_spawn::AgentSpawnProvenance,
+    /// Direct Native list lifecycle facts reported by the runner/task registry.
+    /// Missing fields remain unknown and are never derived from parked/status.
+    #[serde(skip)]
+    pub agent_list_lifecycle: lingxi_core::host::task_registry::AgentListLocalLifecycleFacts,
+    /// Spawn-time description used by the agent-list identity projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_description: Option<String>,
+    /// Dynamic report state belongs to the current run, independently of the
+    /// frozen launch request and immutable creator ancestry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handback: Option<lingxi_core::host::handback::HandbackState>,
+    /// Prior admitted reports remain available after the next run resets its
+    /// allowance. These snapshots contain sanitized text only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handback_history: Vec<lingxi_core::host::handback::HandbackState>,
     /// The turn has completed while the persistent runner remains resumable.
     /// Separate from task status so parked agents are not counted as active work.
     #[serde(default)]
@@ -314,11 +376,19 @@ pub struct AgentOutcomeState {
 }
 
 impl AgentOutcomeState {
+    /// Start a fresh turn-set while preserving immutable launch/display data.
+    pub fn reset_run(&mut self) {
+        self.result = None;
+        self.usage = None;
+        self.killed_by = None;
+        self.max_turns_reached = None;
+    }
     /// Merge a terminating run's report in. A `Some` field overwrites; a `None`
     /// leaves the stored value alone, so a later partial report (e.g. a kill
     /// that only carries a worktree) never erases an earlier result.
     pub fn merge(&mut self, incoming: lingxi_core::host::task_registry::AgentTerminalOutcome) {
         let lingxi_core::host::task_registry::AgentTerminalOutcome {
+            handback: _,
             result,
             usage,
             error: _,
@@ -367,6 +437,27 @@ pub struct RemoteAgentTaskState {
 /// State specific to an in-process teammate task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InProcessTeammateTaskState {
+    /// Concrete model route captured from the final admitted SubagentContext.
+    /// Host-only; never persist a provider route as task wire data.
+    #[serde(skip)]
+    pub child_model: Option<String>,
+    /// Explicitly resolved profile for `child_model`, when unambiguous.
+    /// Host-only and omitted from serialized state.
+    #[serde(skip)]
+    pub child_model_profile: Option<String>,
+    /// Trusted plugin source captured at admission, independent of any
+    /// rewritten spawn JSON.
+    #[serde(default)]
+    pub agent_spawn_provenance: lingxi_core::host::subagent_spawn::AgentSpawnProvenance,
+    /// Spawn-time agent type and description, when the caller supplied them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_agent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handback: Option<lingxi_core::host::handback::HandbackState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handback_history: Vec<lingxi_core::host::handback::HandbackState>,
     /// The persistent runner has finished its turn-set and is awaiting work.
     #[serde(default)]
     pub is_idle: bool,

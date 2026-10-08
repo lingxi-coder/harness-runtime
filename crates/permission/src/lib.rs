@@ -47,6 +47,7 @@ pub mod denial_tracking;
 pub mod filesystem;
 pub mod gate;
 pub mod git_bare_repo;
+pub mod handback_review;
 pub mod headless_gate;
 pub mod host_context;
 pub mod internal_writes;
@@ -132,8 +133,9 @@ pub use dangerous_removal::{check_dangerous_removal, is_dangerous_removal_path, 
 pub use defaults_per_tool::{tool_default, tool_default_names, tool_default_row};
 pub use filesystem::FsRoots;
 pub use gate::{
-    PermissionDecision, PermissionGate, PermissionRequest, PermissionResponse, PromptDecision,
-    PromptDefault, PromptError, PromptingGate,
+    ClassifierOnlyOnBlock, ClassifierOnlyOutcome, ClassifierOnlyPolicy,
+    ClassifierOnlyReviewRequest, PermissionDecision, PermissionGate, PermissionRequest,
+    PermissionResponse, PromptDecision, PromptDefault, PromptError, PromptingGate,
 };
 pub use headless_gate::DenyOnAskGate;
 pub use internal_writes::{consume_internal_write, mark_internal_write};

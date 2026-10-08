@@ -24,6 +24,11 @@ pub struct MobileConfig {
     pub build_info: command_api::builtins::BuildInfo,
     /// API base URL (default `https://api.anthropic.com`).
     pub api_base: String,
+    /// Explicit startup Projects-session ingress URL, captured by the native
+    /// host (for example from its `SESSION_INGRESS_URL` startup fact). This is
+    /// not inferred from `api_base`, and `build_mobile` never reads the process
+    /// environment. `None` is a known host input with no startup ingress URL.
+    pub projects_session_startup_url: Option<String>,
     /// Anthropic API key. Empty string is valid — the orchestrator builds and
     /// only fails at `run_turn` with a 401, so slash-command dispatch still
     /// works with no key configured (mirrors the desktop config contract).
@@ -38,6 +43,9 @@ pub struct MobileConfig {
     pub default_model: String,
     /// Capability profile the mobile conversation runs under.
     pub session_mode: session::jsonl::SessionMode,
+    /// Optional host-owned model-invocable skill grants for this session.
+    /// `None` offers every eligible skill; an empty list offers none.
+    pub session_skill_allowlist: Option<Vec<String>>,
     /// Whether the selected mobile workspace has passed the host trust flow.
     /// Defaults false so `/goal` and other hook-backed persistent behaviors fail
     /// closed until the Android/iOS host explicitly records trust.
@@ -105,10 +113,18 @@ impl std::fmt::Debug for MobileConfig {
             .field("build_info", &self.build_info)
             .field("api_base", &self.api_base)
             .field("api_key", &self.api_key)
+            .field(
+                "projects_session_startup_url",
+                &self
+                    .projects_session_startup_url
+                    .as_ref()
+                    .map(|_| "<provided>"),
+            )
             .field("cwd", &self.cwd)
             .field("lingxi_home", &self.lingxi_home)
             .field("default_model", &self.default_model)
             .field("session_mode", &self.session_mode.as_str())
+            .field("session_skill_allowlist", &self.session_skill_allowlist)
             .field("workspace_trusted", &self.workspace_trusted)
             .field("provider_profiles", &self.provider_profiles)
             .field("routing", &self.routing)
@@ -137,11 +153,13 @@ impl Default for MobileConfig {
         Self {
             build_info: command_api::builtins::BuildInfo::default(),
             api_base: "https://api.anthropic.com".to_string(),
+            projects_session_startup_url: None,
             api_key: String::new(),
             cwd: std::path::PathBuf::from("."),
             lingxi_home: std::path::PathBuf::new(),
             default_model: crate::mobile::MobileEngineConfig::default().default_model,
             session_mode: session::jsonl::SessionMode::Code,
+            session_skill_allowlist: None,
             workspace_trusted: false,
             provider_profiles: None,
             routing: None,

@@ -13,7 +13,9 @@ use crate::agent_executor::{AgentExecutionSignal, AgentExecutor};
 use crate::async_registry::{
     AsyncHookRegistry, HookCompletion, HookWork, DEFAULT_ASYNC_HOOK_TIMEOUT_MS,
 };
-use crate::attachment::{self, CancellationTimeout, HookAttachmentIdentity, HookAttachmentSink};
+use crate::attachment::{
+    self, CancellationTimeout, HookAttachmentIdentity, HookAttachmentSink, HookPublicationGuard,
+};
 use crate::definition::{HookDefinition, HookExecutor};
 use crate::events::HookEvent;
 use crate::hook_payload::{
@@ -45,7 +47,7 @@ use crate::prompt_executor::{
 };
 use crate::registry::{HookContext, HookRegistry};
 use crate::response::{
-    AggregateHookResult, HookDecision, HookOutcome, HookResponse, HookResult,
+    AggregateHookResult, ExactHookText, HookDecision, HookOutcome, HookResponse, HookResult,
     PermissionRequestResult,
 };
 use crate::ssrf_guard::SsrfGuard;
@@ -57,8 +59,9 @@ use lingxi_core::host::{
 use mobile_linux_api::ProcessError;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
@@ -69,6 +72,51 @@ pub const HOOK_HTTP_TIMEOUT_MS: u64 = 600_000;
 /// Default command hook timeout (10 minutes — matches
 /// `claude-code/src/utils/hooks.ts:166` `TOOL_HOOK_EXECUTION_TIMEOUT_MS`).
 pub const HOOK_COMMAND_TIMEOUT_MS: u64 = 600_000;
+
+/// Keep host-visible hook side effects inside the executor generation that
+/// admitted them. With no guard, standalone/lifecycle hooks retain their
+/// current behavior.
+async fn publish_hook_side_effect<'a>(
+    guard: Option<&'a dyn HookPublicationGuard>,
+    publication: impl Future<Output = ()> + Send + 'a,
+) -> bool {
+    if let Some(guard) = guard {
+        guard.publish_if_current(Box::pin(publication)).await
+    } else {
+        publication.await;
+        true
+    }
+}
+
+/// Serialize a durable mutation against generation reset. Before admission it
+/// can be rejected; after admission it is allowed to finish so `spawn_blocking`
+/// filesystem work cannot outlive the lease that protected it.
+async fn commit_hook_mutation<'a>(
+    guard: Option<&'a dyn HookPublicationGuard>,
+    mutation: impl Future<Output = ()> + Send + 'a,
+) -> bool {
+    if let Some(guard) = guard {
+        guard.commit_if_current(Box::pin(mutation)).await
+    } else {
+        mutation.await;
+        true
+    }
+}
+
+/// A successful `once` hook removes its definition from the live registry. In
+/// W1 that registry mutation belongs to the same executor generation as the
+/// hook result, so reset must either reject it or wait for it to finish.
+async fn remove_once_hook_if_current(
+    registry: &Arc<RwLock<HookRegistry>>,
+    hook_id: lingxi_core::types::HookId,
+    publication_guard: Option<&dyn HookPublicationGuard>,
+) {
+    let registry = Arc::clone(registry);
+    let mutation = async move {
+        registry.write().await.remove_once_hook(hook_id);
+    };
+    let _ = commit_hook_mutation(publication_guard, mutation).await;
+}
 
 /// Default agent hook timeout (60 seconds — matches
 /// `claude-code/src/utils/hooks/execAgentHook.ts:75` fall-through default).
@@ -214,11 +262,45 @@ pub trait BuiltinHookHandler: Send + Sync {
 /// flow through the same retry / telemetry plumbing.
 type AgentPromptTranscripts = HashMap<
     (lingxi_core::types::SessionId, lingxi_core::types::AgentId),
-    crate::PromptHookTranscript,
+    (
+        crate::registry::HookModelSelection,
+        crate::PromptHookTranscript,
+        AgentStopMetadata,
+    ),
 >;
+
+/// Trusted child metadata published with its logical route and transcript.
+#[derive(Clone, Default)]
+pub struct AgentStopMetadata {
+    pub agent_transcript_path: std::path::PathBuf,
+    pub cwd: std::path::PathBuf,
+    pub last_assistant_message: Option<String>,
+    pub depth: Option<u32>,
+    pub owner: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>>,
+}
+
+enum AgentSpawnerBinding {
+    Owned(Arc<dyn SubagentSpawner>),
+    Borrowed(Weak<dyn SubagentSpawner>),
+}
+
+impl AgentSpawnerBinding {
+    fn snapshot(&self) -> Option<Arc<dyn SubagentSpawner>> {
+        match self {
+            Self::Owned(spawner) => Some(spawner.clone()),
+            Self::Borrowed(spawner) => spawner.upgrade(),
+        }
+    }
+}
 
 pub struct HookExecutorImpl {
     agent_prompt_transcripts: std::sync::Mutex<AgentPromptTranscripts>,
+    subagent_stop_firers: std::sync::Mutex<
+        HashMap<
+            lingxi_core::types::SessionId,
+            Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>,
+        >,
+    >,
     registry: Arc<RwLock<HookRegistry>>,
     http: Arc<dyn HttpTransport>,
     /// Background spawner. The Command arm's child runs on the `ProcessRunner`;
@@ -230,7 +312,7 @@ pub struct HookExecutorImpl {
     /// Optional subagent spawner — attached via [`Self::with_agent_spawner`].
     /// When `None`, the `Agent` arm returns `HookOutcome::Error` with
     /// `stderr: "Hook {id} failed: agent executor not wired"`. M5-06.
-    agent_spawner: Option<Arc<dyn SubagentSpawner>>,
+    agent_spawner: std::sync::OnceLock<AgentSpawnerBinding>,
     /// Optional single-turn LLM runner — attached via
     /// [`Self::with_prompt_runner`]. When `None`, the `Prompt` arm returns a
     /// structured "not wired" no-op (never blocks). The orchestrator wires this
@@ -302,6 +384,11 @@ pub struct HookExecutorImpl {
 }
 
 impl HookExecutorImpl {
+    /// The live Mod worker shared with the owning session, when loaded.
+    pub async fn mod_host(&self) -> Option<Arc<crate::mods::ModHost>> {
+        self.registry.read().await.mod_host()
+    }
+
     /// Build a new executor backed by the supplied registry, HTTP transport,
     /// and runtime spawner.
     ///
@@ -315,12 +402,13 @@ impl HookExecutorImpl {
     ) -> Self {
         Self {
             agent_prompt_transcripts: std::sync::Mutex::new(HashMap::new()),
+            subagent_stop_firers: std::sync::Mutex::new(HashMap::new()),
             registry,
             http,
             runtime,
             builtin_handlers: HashMap::new(),
             ssrf_guard: SsrfGuard::with_defaults(),
-            agent_spawner: None,
+            agent_spawner: std::sync::OnceLock::new(),
             prompt_runner: None,
             process: None,
             sandbox: None,
@@ -429,23 +517,37 @@ impl HookExecutorImpl {
         hook: &HookDefinition,
         hook_event: &str,
         identity: &HookAttachmentIdentity,
+        publication_guard: Option<&dyn HookPublicationGuard>,
     ) -> Option<String> {
         let observer = self.hook_observer.as_ref()?;
         let progress_id = format!("{}:{}", hook.id, identity.tool_use_id);
-        observer
-            .emit_hook_progress_started(
+        if !publish_hook_side_effect(
+            publication_guard,
+            observer.emit_hook_progress_started(
                 &progress_id,
                 &hook.name,
                 hook_event,
                 hook.status_message.as_deref(),
-            )
-            .await;
+            ),
+        )
+        .await
+        {
+            return None;
+        }
         Some(progress_id)
     }
 
-    async fn finish_hook_progress(&self, progress_id: Option<&str>) {
+    async fn finish_hook_progress(
+        &self,
+        progress_id: Option<&str>,
+        publication_guard: Option<&dyn HookPublicationGuard>,
+    ) {
         if let (Some(observer), Some(progress_id)) = (&self.hook_observer, progress_id) {
-            observer.emit_hook_progress_finished(progress_id).await;
+            let _ = publish_hook_side_effect(
+                publication_guard,
+                observer.emit_hook_progress_finished(progress_id),
+            )
+            .await;
         }
     }
 
@@ -474,9 +576,18 @@ impl HookExecutorImpl {
     /// Without this, `HookExecutor::Agent` hooks return a structured
     /// "not wired" error. M5-06.
     #[must_use]
-    pub fn with_agent_spawner(mut self, spawner: Arc<dyn SubagentSpawner>) -> Self {
-        self.agent_spawner = Some(spawner);
+    pub fn with_agent_spawner(self, spawner: Arc<dyn SubagentSpawner>) -> Self {
+        let _ = self.agent_spawner.set(AgentSpawnerBinding::Owned(spawner));
         self
+    }
+
+    /// Borrow the session-owned spawner after constructing the hook/tool graph.
+    /// A weak binding avoids a spawner → hook executor → spawner ownership cycle.
+    /// Each active dispatch upgrades it only for that hook invocation.
+    pub fn attach_agent_spawner(&self, spawner: Weak<dyn SubagentSpawner>) {
+        let _ = self
+            .agent_spawner
+            .set(AgentSpawnerBinding::Borrowed(spawner));
     }
 
     /// Attach a [`HookPromptRunner`] so the `Prompt` arm can evaluate inline
@@ -537,7 +648,10 @@ impl HookExecutorImpl {
             ssrf_guard: self.ssrf_guard.clone(),
             http_hook_policy: self.http_hook_policy.clone(),
             builtin_handlers: self.builtin_handlers.clone(),
-            agent_spawner: self.agent_spawner.clone(),
+            agent_spawner: self
+                .agent_spawner
+                .get()
+                .and_then(AgentSpawnerBinding::snapshot),
             prompt_runner: self.prompt_runner.clone(),
             process: self.process.clone(),
             sandbox: self.sandbox.clone(),
@@ -624,27 +738,163 @@ impl HookExecutorImpl {
 
     /// Publish before the child's terminal event, so parent stop hooks never
     /// race the transcript writer or accidentally evaluate the parent history.
+    /// Store the final logical route and its history in the same snapshot.
     pub fn publish_agent_prompt_transcript(
         &self,
         session_id: lingxi_core::types::SessionId,
         agent_id: lingxi_core::types::AgentId,
+        model_selection: crate::registry::HookModelSelection,
         transcript: crate::PromptHookTranscript,
+        metadata: AgentStopMetadata,
     ) {
-        self.agent_prompt_transcripts
+        if metadata
+            .owner
+            .as_ref()
+            .is_some_and(|owner| !owner.is_current())
+        {
+            return;
+        }
+        let mut snapshots = self
+            .agent_prompt_transcripts
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert((session_id, agent_id), transcript);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if metadata
+            .owner
+            .as_ref()
+            .is_some_and(|owner| !owner.is_current())
+        {
+            return;
+        }
+        let owner = metadata.owner.clone();
+        snapshots.insert(
+            (session_id, agent_id),
+            (model_selection, transcript, metadata),
+        );
+        if owner.as_ref().is_some_and(|owner| !owner.is_current())
+            && snapshots
+                .get(&(session_id, agent_id))
+                .is_some_and(|(_, _, metadata)| match (&metadata.owner, &owner) {
+                    (Some(current), Some(retired)) => Arc::ptr_eq(current, retired),
+                    _ => false,
+                })
+        {
+            snapshots.remove(&(session_id, agent_id));
+        }
     }
 
     pub fn take_agent_prompt_transcript(
         &self,
         session_id: lingxi_core::types::SessionId,
         agent_id: lingxi_core::types::AgentId,
-    ) -> Option<crate::PromptHookTranscript> {
+    ) -> Option<(
+        crate::registry::HookModelSelection,
+        crate::PromptHookTranscript,
+    )> {
+        self.take_agent_stop_snapshot(session_id, agent_id, None, None)
+            .map(|(model, transcript, _)| (model, transcript))
+    }
+
+    fn take_agent_stop_snapshot(
+        &self,
+        session_id: lingxi_core::types::SessionId,
+        agent_id: lingxi_core::types::AgentId,
+        expected_epoch: Option<lingxi_core::types::MessageId>,
+        publication_guard: Option<&dyn HookPublicationGuard>,
+    ) -> Option<(
+        crate::registry::HookModelSelection,
+        crate::PromptHookTranscript,
+        AgentStopMetadata,
+    )> {
+        let mut snapshots = self
+            .agent_prompt_transcripts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if publication_guard.is_some_and(|guard| !guard.is_current()) {
+            return None;
+        }
+        if let Some(expected) = expected_epoch {
+            if snapshots
+                .get(&(session_id, agent_id))?
+                .2
+                .owner
+                .as_ref()
+                .map(|owner| owner.epoch_id())
+                != Some(expected)
+            {
+                return None;
+            }
+        }
+        snapshots
+            .remove(&(session_id, agent_id))
+            .filter(|(_, _, metadata)| {
+                metadata
+                    .owner
+                    .as_ref()
+                    .is_none_or(|owner| owner.is_current())
+            })
+    }
+
+    /// Discard only the cancelled producer's own snapshot. Reused identities
+    /// and a newer session epoch must not be erased by an old worker's Drop.
+    pub fn discard_agent_prompt_transcript(
+        &self,
+        session_id: lingxi_core::types::SessionId,
+        agent_id: lingxi_core::types::AgentId,
+        owner: Option<&Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>>,
+    ) {
+        let mut snapshots = self
+            .agent_prompt_transcripts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let expected = owner.map(|owner| owner.epoch_id());
+        if snapshots
+            .get(&(session_id, agent_id))
+            .is_some_and(|(_, _, metadata)| {
+                metadata.owner.as_ref().map(|owner| owner.epoch_id()) == expected
+            })
+        {
+            snapshots.remove(&(session_id, agent_id));
+        }
+    }
+
+    /// Bind the finalized host owner for one session epoch. Different session
+    /// ids may share the executor; retired owners never claim a new spawn.
+    pub fn bind_subagent_stop_firer(
+        &self,
+        session_id: lingxi_core::types::SessionId,
+        firer: Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>,
+    ) {
+        let mut firers = self
+            .subagent_stop_firers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        firers.retain(|_, owner| owner.is_current());
+        if let Some(previous) = firers.insert(session_id, firer) {
+            previous.retire();
+        }
         self.agent_prompt_transcripts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&(session_id, agent_id))
+            .retain(|_, (_, _, metadata)| {
+                metadata
+                    .owner
+                    .as_ref()
+                    .is_none_or(|owner| owner.is_current())
+            });
+    }
+
+    /// Capture the exact owner at admission/restore. A retained producer must
+    /// keep this Arc instead of consulting a later session binding at stop.
+    pub fn subagent_stop_firer(
+        &self,
+        session_id: lingxi_core::types::SessionId,
+    ) -> Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>> {
+        self.subagent_stop_firers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .filter(|owner| owner.is_current())
+            .cloned()
     }
 
     /// Remove every named runtime hook scoped to `session_id`.
@@ -720,13 +970,20 @@ impl HookExecutorImpl {
             });
             if hook.blocking {
                 let progress_id = self
-                    .begin_hook_progress(hook, &hook_event, &attachment_id)
+                    .begin_hook_progress(
+                        hook,
+                        &hook_event,
+                        &attachment_id,
+                        ctx.publication_guard.as_deref(),
+                    )
                     .await;
                 // Emit hook_started BEFORE dispatch (for --include-hook-events).
                 if let Some(observer) = &self.hook_observer {
-                    observer
-                        .emit_hook_started(&hook.id.to_string(), &hook.name, &hook_event)
-                        .await;
+                    let _ = publish_hook_side_effect(
+                        ctx.publication_guard.as_deref(),
+                        observer.emit_hook_started(&hook.id.to_string(), &hook.name, &hook_event),
+                    )
+                    .await;
                 }
                 // Bound this hook by the remaining batch budget. Once the batch
                 // deadline has passed, `timeout_at` fires immediately, so the
@@ -758,8 +1015,9 @@ impl HookExecutorImpl {
                     };
                     // Emit timeout hook_response before merging.
                     if let Some(observer) = &self.hook_observer {
-                        observer
-                            .emit_hook_response(
+                        let _ = publish_hook_side_effect(
+                            ctx.publication_guard.as_deref(),
+                            observer.emit_hook_response(
                                 &hook.id.to_string(),
                                 &hook.name,
                                 &hook_event,
@@ -768,16 +1026,39 @@ impl HookExecutorImpl {
                                 &timed_out.stderr,
                                 timed_out.exit_code,
                                 "timeout",
-                            )
-                            .await;
+                            ),
+                        )
+                        .await;
                     }
-                    self.finish_hook_progress(progress_id.as_deref()).await;
+                    self.finish_hook_progress(
+                        progress_id.as_deref(),
+                        ctx.publication_guard.as_deref(),
+                    )
+                    .await;
                     // hook runs are bounded by the batch deadline — fits u64
                     #[allow(clippy::cast_possible_truncation)]
                     let run_ms = run_started.elapsed().as_millis() as u64;
-                    self.publish_run_attachment(&mut agg, hook, &attachment_id, &timed_out, run_ms)
-                        .await;
-                    Self::merge(&mut agg, hook, timed_out, &hook_event, self.eval_confined);
+                    let Some(outputs) = self
+                        .publish_run_attachment(
+                            &mut agg,
+                            hook,
+                            &attachment_id,
+                            &timed_out,
+                            run_ms,
+                            ctx.publication_guard.as_deref(),
+                        )
+                        .await
+                    else {
+                        break;
+                    };
+                    Self::merge(
+                        &mut agg,
+                        hook,
+                        timed_out,
+                        &hook_event,
+                        self.eval_confined,
+                        &outputs,
+                    );
                     break;
                 };
                 // Emit hook_response AFTER dispatch (for --include-hook-events).
@@ -791,8 +1072,8 @@ impl HookExecutorImpl {
                     let resp_text = result
                         .response
                         .as_ref()
-                        .and_then(|r| r.system_message.as_deref())
-                        .unwrap_or("");
+                        .and_then(|r| r.system_message.as_ref())
+                        .map_or("", |text| text.display.as_str());
                     let combined_output = if resp_text.is_empty() {
                         result.stdout.clone()
                     } else if result.stdout.is_empty() {
@@ -800,8 +1081,9 @@ impl HookExecutorImpl {
                     } else {
                         format!("{}\n{}", result.stdout, resp_text)
                     };
-                    observer
-                        .emit_hook_response(
+                    let _ = publish_hook_side_effect(
+                        ctx.publication_guard.as_deref(),
+                        observer.emit_hook_response(
                             &hook.id.to_string(),
                             &hook.name,
                             &hook_event,
@@ -810,22 +1092,50 @@ impl HookExecutorImpl {
                             &result.stderr,
                             result.exit_code,
                             outcome_str,
-                        )
-                        .await;
+                        ),
+                    )
+                    .await;
                 }
                 if !is_runtime_async_backgrounded(&result) {
-                    self.finish_hook_progress(progress_id.as_deref()).await;
+                    self.finish_hook_progress(
+                        progress_id.as_deref(),
+                        ctx.publication_guard.as_deref(),
+                    )
+                    .await;
                 }
                 // hook runs are bounded by the batch deadline — fits u64
                 #[allow(clippy::cast_possible_truncation)]
                 let run_ms = run_started.elapsed().as_millis() as u64;
                 if hook.once && matches!(result.outcome, HookOutcome::Success) {
-                    self.registry.write().await.remove_once_hook(hook.id);
+                    remove_once_hook_if_current(
+                        &self.registry,
+                        hook.id,
+                        ctx.publication_guard.as_deref(),
+                    )
+                    .await;
                 }
                 // ONE transcript attachment per hook run — same as `execute`.
-                self.publish_run_attachment(&mut agg, hook, &attachment_id, &result, run_ms)
-                    .await;
-                Self::merge(&mut agg, hook, result, &hook_event, self.eval_confined);
+                let Some(outputs) = self
+                    .publish_run_attachment(
+                        &mut agg,
+                        hook,
+                        &attachment_id,
+                        &result,
+                        run_ms,
+                        ctx.publication_guard.as_deref(),
+                    )
+                    .await
+                else {
+                    continue;
+                };
+                Self::merge(
+                    &mut agg,
+                    hook,
+                    result,
+                    &hook_event,
+                    self.eval_confined,
+                    &outputs,
+                );
                 // #45(b): no early break on first `Block`. SessionEnd's decision is
                 // a shutdown-path verdict that is never consumed for blocking, and
                 // claude's `cH` runner runs every matched hook regardless; running
@@ -835,8 +1145,8 @@ impl HookExecutorImpl {
             } else {
                 // B5 non-blocking hooks are backgrounded (not awaited), so they
                 // never consume the batch deadline — identical to `execute`.
-                if let Some(attachment) = self.background_hook(hook, &event, &ctx).await {
-                    agg.hook_attachments.push(attachment);
+                if let Some(attachments) = self.background_hook(hook, &event, &ctx).await {
+                    agg.hook_attachments.extend(attachments);
                 }
             }
         }
@@ -900,13 +1210,20 @@ impl HookExecutorImpl {
             });
             if hook.blocking {
                 let progress_id = self
-                    .begin_hook_progress(hook, &hook_event, &attachment_id)
+                    .begin_hook_progress(
+                        hook,
+                        &hook_event,
+                        &attachment_id,
+                        ctx.publication_guard.as_deref(),
+                    )
                     .await;
                 // Emit hook_started BEFORE dispatch (for --include-hook-events).
                 if let Some(observer) = &self.hook_observer {
-                    observer
-                        .emit_hook_started(&hook.id.to_string(), &hook.name, &hook_event)
-                        .await;
+                    let _ = publish_hook_side_effect(
+                        ctx.publication_guard.as_deref(),
+                        observer.emit_hook_started(&hook.id.to_string(), &hook.name, &hook_event),
+                    )
+                    .await;
                 }
                 // Synchronous path — unchanged from M5-06.
                 let run_started = std::time::Instant::now();
@@ -929,8 +1246,8 @@ impl HookExecutorImpl {
                     let resp_text = result
                         .response
                         .as_ref()
-                        .and_then(|r| r.system_message.as_deref())
-                        .unwrap_or("");
+                        .and_then(|r| r.system_message.as_ref())
+                        .map_or("", |text| text.display.as_str());
                     let combined_output = if resp_text.is_empty() {
                         result.stdout.clone()
                     } else if result.stdout.is_empty() {
@@ -938,8 +1255,9 @@ impl HookExecutorImpl {
                     } else {
                         format!("{}\n{}", result.stdout, resp_text)
                     };
-                    observer
-                        .emit_hook_response(
+                    let _ = publish_hook_side_effect(
+                        ctx.publication_guard.as_deref(),
+                        observer.emit_hook_response(
                             &hook.id.to_string(),
                             &hook.name,
                             &hook_event,
@@ -948,24 +1266,52 @@ impl HookExecutorImpl {
                             &result.stderr,
                             result.exit_code,
                             outcome_str,
-                        )
-                        .await;
+                        ),
+                    )
+                    .await;
                 }
                 if !is_runtime_async_backgrounded(&result) {
-                    self.finish_hook_progress(progress_id.as_deref()).await;
+                    self.finish_hook_progress(
+                        progress_id.as_deref(),
+                        ctx.publication_guard.as_deref(),
+                    )
+                    .await;
                 }
                 // `once` runtime removal (claude-code `registerSkillHooks.ts:35-36`,
                 // `utils/hooks.ts:2918-2919`): drop the hook from the registry
                 // only after it runs with a *success* outcome, so it never fires
                 // again. An erroring `once` hook is left in place.
                 if hook.once && matches!(result.outcome, HookOutcome::Success) {
-                    self.registry.write().await.remove_once_hook(hook.id);
+                    remove_once_hook_if_current(
+                        &self.registry,
+                        hook.id,
+                        ctx.publication_guard.as_deref(),
+                    )
+                    .await;
                 }
                 // ONE transcript attachment per hook run (claude persists one
                 // for every run — 26 048 records in real 2.1.220 transcripts).
-                self.publish_run_attachment(&mut agg, hook, &attachment_id, &result, run_ms)
-                    .await;
-                Self::merge(&mut agg, hook, result, &hook_event, self.eval_confined);
+                let Some(outputs) = self
+                    .publish_run_attachment(
+                        &mut agg,
+                        hook,
+                        &attachment_id,
+                        &result,
+                        run_ms,
+                        ctx.publication_guard.as_deref(),
+                    )
+                    .await
+                else {
+                    continue;
+                };
+                Self::merge(
+                    &mut agg,
+                    hook,
+                    result,
+                    &hook_event,
+                    self.eval_confined,
+                    &outputs,
+                );
                 // #45(b): NO early break on the first `Block`. claude-code's `cH`
                 // runner dispatches every matched hook (BIN off 205755512) and
                 // folds `blocked = some(t.blocked)` afterwards, so later hooks'
@@ -976,8 +1322,8 @@ impl HookExecutorImpl {
             } else {
                 // B5 config-`async` path: background the hook and continue. It
                 // is excluded from `agg`, so it cannot block.
-                if let Some(attachment) = self.background_hook(hook, &event, &ctx).await {
-                    agg.hook_attachments.push(attachment);
+                if let Some(attachments) = self.background_hook(hook, &event, &ctx).await {
+                    agg.hook_attachments.extend(attachments);
                 }
             }
         }
@@ -1031,7 +1377,12 @@ impl HookExecutorImpl {
             });
             if hook.blocking {
                 let progress_id = self
-                    .begin_hook_progress(hook, &hook_event, &attachment_id)
+                    .begin_hook_progress(
+                        hook,
+                        &hook_event,
+                        &attachment_id,
+                        ctx.publication_guard.as_deref(),
+                    )
                     .await;
                 let run_started = std::time::Instant::now();
                 let result = self
@@ -1039,22 +1390,49 @@ impl HookExecutorImpl {
                     .dispatch(hook, &event, &ctx, progress_id.as_deref())
                     .await;
                 if !is_runtime_async_backgrounded(&result) {
-                    self.finish_hook_progress(progress_id.as_deref()).await;
+                    self.finish_hook_progress(
+                        progress_id.as_deref(),
+                        ctx.publication_guard.as_deref(),
+                    )
+                    .await;
                 }
                 // hook runs are bounded by the runner timeout — u128 ms fits u64
                 #[allow(clippy::cast_possible_truncation)]
                 let run_ms = run_started.elapsed().as_millis() as u64;
                 if hook.once && matches!(result.outcome, HookOutcome::Success) {
-                    self.registry.write().await.remove_once_hook(hook.id);
+                    remove_once_hook_if_current(
+                        &self.registry,
+                        hook.id,
+                        ctx.publication_guard.as_deref(),
+                    )
+                    .await;
                 }
                 // ONE transcript attachment per hook run — same as `execute`.
-                self.publish_run_attachment(&mut agg, hook, &attachment_id, &result, run_ms)
-                    .await;
-                Self::merge(&mut agg, hook, result, &hook_event, self.eval_confined);
+                let Some(outputs) = self
+                    .publish_run_attachment(
+                        &mut agg,
+                        hook,
+                        &attachment_id,
+                        &result,
+                        run_ms,
+                        ctx.publication_guard.as_deref(),
+                    )
+                    .await
+                else {
+                    continue;
+                };
+                Self::merge(
+                    &mut agg,
+                    hook,
+                    result,
+                    &hook_event,
+                    self.eval_confined,
+                    &outputs,
+                );
                 // #45(b): no early break on first `Block` — see `execute`. All
                 // matched hooks dispatch; `merge` keeps `Block` sticky.
-            } else if let Some(attachment) = self.background_hook(hook, &event, &ctx).await {
-                agg.hook_attachments.push(attachment);
+            } else if let Some(attachments) = self.background_hook(hook, &event, &ctx).await {
+                agg.hook_attachments.extend(attachments);
             }
         }
         agg
@@ -1085,8 +1463,29 @@ impl HookExecutorImpl {
         if matches!(&event, HookEvent::SubagentStop { agent_id, .. } if *agent_id == exclude_agent_id)
         {
             // Consume even if hooks are disabled or none match.
-            ctx.prompt_transcript =
-                self.take_agent_prompt_transcript(ctx.session_id, exclude_agent_id);
+            match self.take_agent_stop_snapshot(
+                ctx.session_id,
+                exclude_agent_id,
+                ctx.subagent_stop_epoch,
+                ctx.publication_guard.as_deref(),
+            ) {
+                Some((model_selection, transcript, metadata)) => {
+                    ctx.model_selection = Some(model_selection);
+                    ctx.prompt_transcript = Some(transcript);
+                    ctx.last_assistant_message = metadata.last_assistant_message;
+                    if let Some(depth) = metadata.depth {
+                        ctx.agent_depth = Some(depth);
+                    }
+                    if !metadata.agent_transcript_path.as_os_str().is_empty() {
+                        ctx.agent_transcript_path = Some(metadata.agent_transcript_path);
+                    }
+                    if !metadata.cwd.as_os_str().is_empty() {
+                        ctx.cwd = metadata.cwd;
+                    }
+                }
+                None if ctx.subagent_stop_epoch.is_some() => return AggregateHookResult::default(),
+                None => ctx.prompt_transcript = None,
+            }
         }
         // #41 runner-head gate (`h$`).
         if let Some(skipped) = self.policy_disable_gate(&event) {
@@ -1111,7 +1510,12 @@ impl HookExecutorImpl {
             });
             if hook.blocking {
                 let progress_id = self
-                    .begin_hook_progress(hook, &hook_event, &attachment_id)
+                    .begin_hook_progress(
+                        hook,
+                        &hook_event,
+                        &attachment_id,
+                        ctx.publication_guard.as_deref(),
+                    )
                     .await;
                 let run_started = std::time::Instant::now();
                 let result = self
@@ -1119,22 +1523,49 @@ impl HookExecutorImpl {
                     .dispatch(hook, &event, &ctx, progress_id.as_deref())
                     .await;
                 if !is_runtime_async_backgrounded(&result) {
-                    self.finish_hook_progress(progress_id.as_deref()).await;
+                    self.finish_hook_progress(
+                        progress_id.as_deref(),
+                        ctx.publication_guard.as_deref(),
+                    )
+                    .await;
                 }
                 // hook runs are bounded by the runner timeout — u128 ms fits u64
                 #[allow(clippy::cast_possible_truncation)]
                 let run_ms = run_started.elapsed().as_millis() as u64;
                 if hook.once && matches!(result.outcome, HookOutcome::Success) {
-                    self.registry.write().await.remove_once_hook(hook.id);
+                    remove_once_hook_if_current(
+                        &self.registry,
+                        hook.id,
+                        ctx.publication_guard.as_deref(),
+                    )
+                    .await;
                 }
                 // ONE transcript attachment per hook run — same as `execute`.
-                self.publish_run_attachment(&mut agg, hook, &attachment_id, &result, run_ms)
-                    .await;
-                Self::merge(&mut agg, hook, result, &hook_event, self.eval_confined);
+                let Some(outputs) = self
+                    .publish_run_attachment(
+                        &mut agg,
+                        hook,
+                        &attachment_id,
+                        &result,
+                        run_ms,
+                        ctx.publication_guard.as_deref(),
+                    )
+                    .await
+                else {
+                    continue;
+                };
+                Self::merge(
+                    &mut agg,
+                    hook,
+                    result,
+                    &hook_event,
+                    self.eval_confined,
+                    &outputs,
+                );
                 // #45(b): no early break on first `Block` — see `execute`. All
                 // matched hooks dispatch; `merge` keeps `Block` sticky.
-            } else if let Some(attachment) = self.background_hook(hook, &event, &ctx).await {
-                agg.hook_attachments.push(attachment);
+            } else if let Some(attachments) = self.background_hook(hook, &event, &ctx).await {
+                agg.hook_attachments.extend(attachments);
             }
         }
         agg
@@ -1166,46 +1597,53 @@ impl HookExecutorImpl {
         id: &HookAttachmentIdentity,
         result: &HookResult,
         elapsed_ms: u64,
-    ) {
-        if let Some(value) = build_run_attachment_persisting(
-            self.attachment_sink.as_ref(),
-            hook,
-            id,
-            result,
-            elapsed_ms,
-        )
-        .await
-        {
-            self.publish_attachment(agg, value).await;
-        }
-        // O2: `hook_system_message` — transcript + TUI only. Its renderer entry
-        // is `hook_system_message:()=>[]` (BIN off 238109329), so this record
-        // must NEVER reach the model; it exists so the systemMessage the hook
-        // emitted is recoverable from the transcript. The oracle guards on
-        // truthiness (`if(q.systemMessage)`), so an empty string emits nothing.
-        // ONE record per hook result, not one per aggregate.
-        let system_message = result
-            .response
-            .as_ref()
-            .and_then(|r| r.system_message.as_deref())
-            .unwrap_or_default();
-        if !system_message.is_empty() {
-            let mut value = attachment::system_message_attachment(id, system_message);
-            if let Some(reference) =
-                persist_large_hook_output(self.attachment_sink.as_ref(), system_message).await
-            {
-                value["content"] = serde_json::Value::String(reference);
+        publication_guard: Option<&dyn HookPublicationGuard>,
+    ) -> Option<PreparedHookOutputs> {
+        let sink = self.attachment_sink.as_ref();
+        let (published_tx, published_rx) = tokio::sync::oneshot::channel();
+        // Keep large-output files and their attachment rows in one publication
+        // lease. Reset cannot split the pair and leave a stale dangling file.
+        let publication = async {
+            let outputs = prepare_hook_outputs(sink, result).await;
+            let mut attachments = Vec::with_capacity(2);
+            if let Some(value) = build_run_attachment(hook, id, result, elapsed_ms, &outputs) {
+                if let Some(sink) = sink {
+                    sink.record(value.clone()).await;
+                }
+                attachments.push(value);
             }
-            self.publish_attachment(agg, value).await;
+            // O2: `hook_system_message` — transcript + TUI only. Its renderer
+            // entry is `hook_system_message:()=>[]` (BIN off 238109329), so
+            // this record must NEVER reach the model. The oracle guards on
+            // truthiness (`if(q.systemMessage)`), so empty emits nothing.
+            if let Some(system_message) = &outputs.system_message {
+                let value = attachment::system_message_attachment(id, system_message);
+                if let Some(sink) = sink {
+                    sink.record(value.clone()).await;
+                }
+                attachments.push(value);
+            }
+            let _ = published_tx.send((attachments, outputs));
+        };
+        let published = if sink.is_none() {
+            // Without a sink this only prepares private aggregate data. The
+            // caller publishes those attachments under its own generation
+            // fence; reserving a durable lease here delays the real append.
+            if publication_guard.is_some_and(|guard| !guard.is_current()) {
+                return None;
+            }
+            publication.await;
+            publication_guard.is_none_or(|guard| guard.is_current())
+        } else {
+            commit_hook_mutation(publication_guard, publication).await
+        };
+        if published {
+            if let Ok((attachments, outputs)) = published_rx.await {
+                agg.hook_attachments.extend(attachments);
+                return Some(outputs);
+            }
         }
-    }
-
-    /// Carry one attachment on the aggregate and, when wired, the sink.
-    async fn publish_attachment(&self, agg: &mut AggregateHookResult, value: serde_json::Value) {
-        agg.hook_attachments.push(value.clone());
-        if let Some(sink) = &self.attachment_sink {
-            sink.record(value).await;
-        }
+        None
     }
 
     /// Route a `blocking == false` hook to the background async registry (B5).
@@ -1221,10 +1659,17 @@ impl HookExecutorImpl {
         hook: &HookDefinition,
         event: &HookEvent,
         ctx: &HookContext,
-    ) -> Option<serde_json::Value> {
+    ) -> Option<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>> {
         let identity = attachment_identity(event);
         let hook_event = format!("{:?}", event.event_type());
-        let progress_id = self.begin_hook_progress(hook, &hook_event, &identity).await;
+        let progress_id = self
+            .begin_hook_progress(
+                hook,
+                &hook_event,
+                &identity,
+                ctx.publication_guard.as_deref(),
+            )
+            .await;
         let Some(registry) = &self.async_registry else {
             // No registry wired: run inline but exclude the decision from the
             // aggregate so the "non-blocking can't block" contract still holds.
@@ -1234,22 +1679,26 @@ impl HookExecutorImpl {
                 .dispatch(hook, event, ctx, progress_id.as_deref())
                 .await;
             if hook.once && matches!(result.outcome, HookOutcome::Success) {
-                self.registry.write().await.remove_once_hook(hook.id);
+                remove_once_hook_if_current(
+                    &self.registry,
+                    hook.id,
+                    ctx.publication_guard.as_deref(),
+                )
+                .await;
             }
             #[allow(clippy::cast_possible_truncation)]
             let run_ms = run_started.elapsed().as_millis() as u64;
-            let attachment = build_run_attachment_persisting(
+            let attachment = persist_hook_run_attachment(
                 self.attachment_sink.as_ref(),
                 hook,
                 &identity,
                 &result,
                 run_ms,
+                ctx.publication_guard.as_deref(),
             )
             .await;
-            if let (Some(sink), Some(value)) = (&self.attachment_sink, &attachment) {
-                sink.record(value.clone()).await;
-            }
-            self.finish_hook_progress(progress_id.as_deref()).await;
+            self.finish_hook_progress(progress_id.as_deref(), ctx.publication_guard.as_deref())
+                .await;
             return attachment;
         };
         let dispatcher = self.dispatcher();
@@ -1281,21 +1730,29 @@ impl HookExecutorImpl {
                 )
                 .await;
             if once && matches!(result.outcome, HookOutcome::Success) {
-                hook_registry.write().await.remove_once_hook(hook_id);
+                remove_once_hook_if_current(
+                    &hook_registry,
+                    hook_id,
+                    ctx_owned.publication_guard.as_deref(),
+                )
+                .await;
             }
             result
         });
         if let Err(e) = registry
-            .spawn_with_completion_and_rewake(
+            .spawn_with_completion_and_rewake_for_event(
                 hook.id,
                 hook.async_timeout,
                 work,
                 completion,
                 rewake_message,
+                Some(hook_event),
+                ctx.publication_guard.clone(),
             )
             .await
         {
-            self.finish_hook_progress(progress_id.as_deref()).await;
+            self.finish_hook_progress(progress_id.as_deref(), ctx.publication_guard.as_deref())
+                .await;
             tracing::warn!(
                 hook_id = %hook.id,
                 error = %e,
@@ -1370,6 +1827,7 @@ impl Dispatcher {
         &self,
         hook: &HookDefinition,
         hook_event: &str,
+        publication_guard: Option<Arc<dyn HookPublicationGuard>>,
     ) -> Option<HookProgressFrames> {
         let observer = self.hook_observer.as_ref()?.clone();
         // `if(!Q9i(e.hookEvent))return()=>{}` — no poll, no live pipe reads, when
@@ -1386,6 +1844,7 @@ impl Dispatcher {
         let hook_id = hook.id.to_string();
         let hook_name = hook.name.clone();
         let event = hook_event.to_string();
+        let poll_publication_guard = publication_guard.clone();
         let sleeper = self.runtime.clone();
         let task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> =
             Box::pin(async move {
@@ -1407,11 +1866,16 @@ impl Dispatcher {
                         continue;
                     }
                     last = Some(output.clone());
-                    observer
-                        .emit_hook_progress_frame(
+                    let accepted = publish_hook_side_effect(
+                        poll_publication_guard.as_deref(),
+                        observer.emit_hook_progress_frame(
                             &hook_id, &hook_name, &event, &stdout, &stderr, &output,
-                        )
-                        .await;
+                        ),
+                    )
+                    .await;
+                    if !accepted {
+                        return;
+                    }
                 }
             });
         let handle = self.runtime.spawn("hook_progress", task).await.ok();
@@ -1486,11 +1950,15 @@ impl Dispatcher {
                 });
                 match evaluated {
                     Ok(value) => {
-                        let stdout = serde_json::to_string(&value).unwrap_or_default();
+                        let stdout = value
+                            .to_json_string()
+                            .expect("function hook JSON projection was validated on parse");
                         // Reuse the SAME response parser every other arm uses:
                         // a function hook must not get a private decision
                         // dialect the rest of the system does not understand.
-                        let response = parse_response(&stdout, expected_event).ok();
+                        let response =
+                            crate::hook_payload::parse_response_projection(&value, expected_event)
+                                .ok();
                         HookResult {
                             outcome: HookOutcome::Success,
                             stdout,
@@ -1795,7 +2263,11 @@ impl Dispatcher {
                 // its `stdout`/`stderr` `data` listeners, and hand the runner a
                 // live observer so the accumulator actually fills.
                 let progress_frames = self
-                    .begin_hook_progress_frames(hook, &format!("{:?}", event.event_type()))
+                    .begin_hook_progress_frames(
+                        hook,
+                        &format!("{:?}", event.event_type()),
+                        ctx.publication_guard.clone(),
+                    )
                     .await;
                 let live_observer: Option<Arc<dyn lingxi_core::host::HookOutputObserver>> =
                     progress_frames.as_ref().map(|frames| {
@@ -1865,13 +2337,15 @@ impl Dispatcher {
                             // output; on overrun the registry publishes a timeout
                             // result, matching claude's `asyncTimeout` semantics.
                             match registry
-                                .spawn_with_completion_and_rewake(
+                                .spawn_with_completion_and_rewake_for_event(
                                     hook_id,
                                     Some(async_timeout),
                                     work,
                                     completion,
                                     hook.async_rewake
                                         .then(|| hook.rewake_message.clone().unwrap_or_default()),
+                                    Some(format!("{:?}", event.event_type())),
+                                    ctx.publication_guard.clone(),
                                 )
                                 .await
                             {
@@ -1944,7 +2418,7 @@ impl Dispatcher {
                         prompt,
                         &body,
                         expected_event,
-                        ctx.inherit.clone(),
+                        ctx,
                         model.as_deref(),
                     )
                     .await;
@@ -1977,6 +2451,7 @@ impl Dispatcher {
                     _ => Duration::from_millis(HOOK_PROMPT_TIMEOUT_MS),
                 };
                 let exec = PromptExecutor {
+                    model_selection: ctx.model_selection.clone(),
                     transcript: ctx.prompt_transcript.clone(),
                     runner: self.prompt_runner.clone(),
                     timeout: effective_timeout,
@@ -2138,6 +2613,7 @@ impl HookExecutorImpl {
         r: HookResult,
         hook_event: &str,
         eval_confined: bool,
+        outputs: &PreparedHookOutputs,
     ) {
         let mut r = r;
         // PreModelSwitch is a gate: execution failures before a hook can
@@ -2276,7 +2752,7 @@ impl HookExecutorImpl {
             if resp.interrupt == Some(true) {
                 agg.interrupt = true;
             }
-            if let Some(msg) = &resp.system_message {
+            if let Some(msg) = &outputs.system_message {
                 agg.system_messages.push(msg.clone());
             }
             // `additionalContext` is kept on its OWN aggregate channel, distinct
@@ -2285,7 +2761,7 @@ impl HookExecutorImpl {
             // whereas `system_messages` is transcript-facing only (`:4258`). It is
             // injected as its own <system-reminder> message, not folded into the
             // tool_result content (claude-code `toolExecution.ts:845`).
-            if let Some(ctx) = &resp.additional_context {
+            if let Some(ctx) = &outputs.additional_context {
                 agg.additional_contexts.push(ctx.clone());
             }
             // B4: OR-fold the preventContinuation (`continue:false`) signal so
@@ -2397,7 +2873,7 @@ impl HookExecutorImpl {
             }
             // `initialUserMessage` (SessionStart output): keep the latest —
             // `if(p.initialUserMessage)$os=p.initialUserMessage` last-wins.
-            if let Some(m) = &resp.initial_user_message {
+            if let Some(m) = &outputs.initial_user_message {
                 agg.initial_user_message = Some(m.clone());
             }
             // `reloadSkills` (SessionStart output): OR-fold — `if(p.reloadSkills)u=!0`.
@@ -2942,7 +3418,10 @@ fn build_lifecycle_envelope_body(
             };
             Some(("TaskCreated", serde_json::to_string(&payload).ok()?))
         }
-        HookEvent::UserPromptSubmit { prompt } => {
+        HookEvent::UserPromptSubmit {
+            prompt,
+            prompt_projection,
+        } => {
             let payload = UserPromptSubmitPayload {
                 hook_event_name: HookEventNameUserPromptSubmit,
                 session_id: b.session_id,
@@ -2956,7 +3435,17 @@ fn build_lifecycle_envelope_body(
                 prompt: prompt.clone(),
                 session_title: b.session_title,
             };
-            Some(("UserPromptSubmit", serde_json::to_string(&payload).ok()?))
+            let mut projected = lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                serde_json::to_value(&payload).ok()?,
+            );
+            if let Some(exact) = prompt_projection {
+                // Never apply an unrelated sidecar to the hook's display prompt.
+                if exact.value.as_str() != Some(prompt.as_str()) {
+                    return None;
+                }
+                projected.set_field("prompt", exact.clone()).ok()?;
+            }
+            Some(("UserPromptSubmit", projected.to_json_string().ok()?))
         }
         HookEvent::SessionStart { source, .. } => {
             let payload = SessionStartPayload {
@@ -3226,6 +3715,7 @@ fn build_lifecycle_envelope_body(
         HookEvent::AgentSpawn {
             agent_type,
             model,
+            model_profile,
             cwd,
             background,
             parent_agent_id,
@@ -3239,6 +3729,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_type: agent_type.clone(),
                 model: model.clone(),
+                model_profile: model_profile.clone(),
                 background: *background,
                 parent_agent_id: parent_agent_id.as_ref().map(ToString::to_string),
             };
@@ -3651,8 +4142,9 @@ fn map_text_hook_output(
     exit_code: i32,
     expected_event: &'static str,
 ) -> (HookResult, bool) {
-    if stdout.trim_start().starts_with('{') {
-        match parse_response(&stdout, expected_event) {
+    let trimmed_stdout = ExactHookText::from_text(stdout.clone()).trim_js().display;
+    if trimmed_stdout.starts_with('{') {
+        match parse_response(&trimmed_stdout, expected_event) {
             Ok(parsed) => {
                 if expected_event == "PostModelSwitch" && exit_code != 0 {
                     return (
@@ -3873,20 +4365,24 @@ fn attachment_completion(
     observer: Option<Arc<dyn OutputStream>>,
     progress_id: Option<String>,
 ) -> Option<HookCompletion> {
-    if sink.is_none() && observer.is_none() {
-        return None;
-    }
     Some(Box::new(move |result| {
         Box::pin(async move {
             let transferred_again = is_runtime_async_backgrounded(&result);
             #[allow(clippy::cast_possible_truncation)]
             let run_ms = run_started.elapsed().as_millis() as u64;
-            if let Some(sink) = sink {
+            let outputs = prepare_hook_outputs(sink.as_ref(), &result).await;
+            if let Some(sink) = sink.as_ref() {
                 if let Some(value) =
-                    build_run_attachment_persisting(Some(&sink), &hook, &identity, &result, run_ms)
-                        .await
+                    build_run_attachment(&hook, &identity, &result, run_ms, &outputs)
                 {
                     sink.record(value).await;
+                }
+                if let Some(system_message) = outputs.system_message.as_ref() {
+                    sink.record(attachment::system_message_attachment(
+                        &identity,
+                        system_message,
+                    ))
+                    .await;
                 }
             }
             // A configured-async command can itself print the runtime async
@@ -3898,6 +4394,27 @@ fn attachment_completion(
                     observer.emit_hook_progress_finished(&progress_id).await;
                 }
             }
+
+            // The later async-hook response consumer must receive the same
+            // transformed strings whose attachment/file work completed above.
+            // Mutate only the four Fse output fields; preserve all decision and
+            // lifecycle metadata from the original result.
+            let mut result = result;
+            if let Some(stdout) = outputs.stdout_content {
+                result.stdout = stdout.display;
+            }
+            if let Some(response) = result.response.as_mut() {
+                if let Some(text) = outputs.system_message {
+                    response.system_message = Some(text);
+                }
+                if let Some(text) = outputs.additional_context {
+                    response.additional_context = Some(text);
+                }
+                if let Some(text) = outputs.initial_user_message {
+                    response.initial_user_message = Some(text);
+                }
+            }
+            result
         })
     }))
 }
@@ -3924,29 +4441,81 @@ fn attachment_identity(event: &HookEvent) -> HookAttachmentIdentity {
     }
 }
 
-/// Build the ONE transcript `attachment` payload for a completed hook run, or
-/// `None` for a run that BLOCKED or was moved to the runtime-marker async path.
-///
-/// Outcome → payload mapping, per the 2.1.220 command-hook runner
-/// (BIN off 237798900–237806040):
-///
-/// | run outcome | claude arm | payload |
-/// |---|---|---|
-/// | `Success` | `Ce.status===0` / `Tfn` | `hook_success` |
-/// | `Error` (non-blocking) | `Ce.status` non-zero, non-2 | `hook_non_blocking_error` |
-/// | `Error` + `Block` decision | `Ce.status===2` | *(none — `hook_blocking_error`)* |
-/// | `Timeout` / `Cancelled` | `Ce.aborted` | `hook_cancelled` |
-///
-/// `content` on `hook_success` is `""` whenever the hook returned parsable
-/// JSON — claude routes that through `Tfn`, which hardcodes `content:""`
-/// (BIN off 237778629); all 25 901 mined `hook_success` records have it empty.
-/// Plain-text output instead carries `jKe(stdout.trim())`.
+#[derive(Debug, Clone, Default)]
+struct PreparedHookOutputs {
+    stdout_content: Option<ExactHookText>,
+    system_message: Option<ExactHookText>,
+    additional_context: Option<ExactHookText>,
+    initial_user_message: Option<ExactHookText>,
+}
+
+/// Apply 2.1.291's `Fse` to the four outputs it transforms. `stdout` only
+/// reaches this path for successful plain-text command output; JSON responses
+/// have an empty `hook_success.content` instead.
+async fn prepare_hook_outputs(
+    sink: Option<&Arc<dyn HookAttachmentSink>>,
+    result: &HookResult,
+) -> PreparedHookOutputs {
+    let mut outputs = PreparedHookOutputs::default();
+    if matches!(result.outcome, HookOutcome::Success) && result.response.is_none() {
+        let stdout = ExactHookText::from_text(result.stdout.clone()).trim_js();
+        outputs.stdout_content = Some(format_hook_output(sink, stdout, "stdout").await);
+    }
+    if let Some(response) = &result.response {
+        // Native processes systemMessage, additionalContext, then
+        // initialUserMessage in this order (2.1.291 hook-runner window
+        // 192680000..192723500).
+        if let Some(message) = response.system_message.as_ref().filter(|s| !s.is_empty()) {
+            outputs.system_message =
+                Some(format_hook_output(sink, message.clone(), "systemMessage").await);
+        }
+        if let Some(context) = response
+            .additional_context
+            .as_ref()
+            .filter(|s| !s.is_empty())
+        {
+            outputs.additional_context =
+                Some(format_hook_output(sink, context.clone(), "additionalContext").await);
+        }
+        if let Some(message) = response
+            .initial_user_message
+            .as_ref()
+            .filter(|s| !s.is_empty())
+        {
+            outputs.initial_user_message =
+                Some(format_hook_output(sink, message.clone(), "initialUserMessage").await);
+        }
+    }
+    outputs
+}
+
+async fn format_hook_output(
+    sink: Option<&Arc<dyn HookAttachmentSink>>,
+    text: ExactHookText,
+    source: &str,
+) -> ExactHookText {
+    if text.len_utf16() <= attachment::HOOK_OUTPUT_INLINE_LIMIT {
+        return text;
+    }
+    let persisted = match sink {
+        Some(sink) => sink.persist_large_output(&text).await,
+        None => Err("tool result was not saved".into()),
+    };
+    match persisted {
+        Ok(output) => attachment::persisted_output_wrapper(&output, &text),
+        Err(error) => attachment::failed_persistence_fallback(&text, source, &error),
+    }
+}
+
+/// Build one exact transcript attachment for a completed hook run, or `None`
+/// for a blocking run or the runtime-marker async placeholder.
 fn build_run_attachment(
     hook: &HookDefinition,
     id: &HookAttachmentIdentity,
     result: &HookResult,
     elapsed_ms: u64,
-) -> Option<serde_json::Value> {
+    outputs: &PreparedHookOutputs,
+) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
     // `{"async":true}` returns this empty success only to keep the originating
     // turn non-blocking. It is not a completed run and must never be persisted;
     // the Dispatcher records the eventual result once the detached process
@@ -3976,9 +4545,9 @@ fn build_run_attachment(
     match result.outcome {
         HookOutcome::Success => {
             let content = if result.response.is_some() {
-                String::new()
+                ExactHookText::default()
             } else {
-                attachment::inline_hook_output(result.stdout.trim())
+                outputs.stdout_content.clone().unwrap_or_default()
             };
             Some(attachment::success_attachment(
                 id,
@@ -3992,59 +4561,70 @@ fn build_run_attachment(
                 elapsed_ms,
             ))
         }
-        HookOutcome::Error => Some(attachment::non_blocking_error_attachment(
-            id,
-            &result.stderr,
-            &result.stdout,
-            // claude's spawn-failure arm reports `exitCode:1` when the child
-            // never produced a status (BIN off 237806040).
-            result.exit_code.unwrap_or(1),
-            Some(&command),
-            Some(elapsed_ms),
-        )),
-        HookOutcome::Timeout | HookOutcome::Cancelled => {
-            Some(attachment::cancelled_attachment(
+        HookOutcome::Error => Some(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+            attachment::non_blocking_error_attachment(
                 id,
+                &result.stderr,
+                &result.stdout,
+                // claude's spawn-failure arm reports `exitCode:1` when the child
+                // never produced a status (BIN off 237806040).
+                result.exit_code.unwrap_or(1),
                 Some(&command),
                 Some(elapsed_ms),
-                Some(CancellationTimeout {
-                    // `timedOut: !outerSignal?.aborted` — true when the hook's
-                    // own deadline fired, false when the caller aborted it.
-                    timed_out: matches!(result.outcome, HookOutcome::Timeout),
-                    timeout_ms: attachment_timeout_ms(hook),
-                }),
+            ),
+        )),
+        HookOutcome::Timeout | HookOutcome::Cancelled => {
+            Some(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                attachment::cancelled_attachment(
+                    id,
+                    Some(&command),
+                    Some(elapsed_ms),
+                    Some(CancellationTimeout {
+                        // `timedOut: !outerSignal?.aborted` — true when the hook's
+                        // own deadline fired, false when the caller aborted it.
+                        timed_out: matches!(result.outcome, HookOutcome::Timeout),
+                        timeout_ms: attachment_timeout_ms(hook),
+                    }),
+                ),
             ))
         }
     }
 }
 
-async fn persist_large_hook_output(
-    sink: Option<&Arc<dyn HookAttachmentSink>>,
-    text: &str,
-) -> Option<String> {
-    if text.chars().count() <= attachment::HOOK_OUTPUT_INLINE_LIMIT {
-        return None;
-    }
-    match sink {
-        Some(sink) => sink.persist_large_output(text).await,
-        None => None,
-    }
-}
-
-async fn build_run_attachment_persisting(
+/// Build and persist all attachment rows for a completed output under the same
+/// executor-generation lease as its large-output files.
+async fn persist_hook_run_attachment(
     sink: Option<&Arc<dyn HookAttachmentSink>>,
     hook: &HookDefinition,
     id: &HookAttachmentIdentity,
     result: &HookResult,
     elapsed_ms: u64,
-) -> Option<serde_json::Value> {
-    let mut value = build_run_attachment(hook, id, result, elapsed_ms)?;
-    if matches!(result.outcome, HookOutcome::Success) && result.response.is_none() {
-        if let Some(reference) = persist_large_hook_output(sink, result.stdout.trim()).await {
-            value["content"] = serde_json::Value::String(reference);
+    publication_guard: Option<&dyn HookPublicationGuard>,
+) -> Option<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>> {
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let publication = async {
+        let outputs = prepare_hook_outputs(sink, result).await;
+        let mut attachments = Vec::with_capacity(2);
+        if let Some(attachment) = build_run_attachment(hook, id, result, elapsed_ms, &outputs) {
+            if let Some(sink) = sink {
+                sink.record(attachment.clone()).await;
+            }
+            attachments.push(attachment);
         }
+        if let Some(system_message) = outputs.system_message.as_ref() {
+            let attachment = attachment::system_message_attachment(id, system_message);
+            if let Some(sink) = sink {
+                sink.record(attachment.clone()).await;
+            }
+            attachments.push(attachment);
+        }
+        let _ = result_tx.send(attachments);
+    };
+    if commit_hook_mutation(publication_guard, publication).await {
+        result_rx.await.ok()
+    } else {
+        None
     }
-    Some(value)
 }
 
 /// The deadline in force for a hook — `re = q.timeout ? q.timeout*1000 : i`
@@ -4218,19 +4798,129 @@ mod attachment_wiring_tests {
 
     #[derive(Default)]
     struct RecordingSink {
-        seen: Mutex<Vec<Value>>,
+        seen: Mutex<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
         large_outputs: Mutex<Vec<String>>,
+    }
+
+    struct GateRecordSink {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        seen: Mutex<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
+        future_dropped: Arc<std::sync::atomic::AtomicBool>,
+        released: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct RecordFutureDrop {
+        dropped_before_release: Arc<std::sync::atomic::AtomicBool>,
+        released: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for RecordFutureDrop {
+        fn drop(&mut self) {
+            if !self.released.load(std::sync::atomic::Ordering::SeqCst) {
+                self.dropped_before_release
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[async_trait]
+    impl HookAttachmentSink for GateRecordSink {
+        async fn record(&self, attachment: lingxi_core::types::utf16_json::Utf16JsonProjection) {
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                let _ = entered.send(());
+            }
+            let _drop = RecordFutureDrop {
+                dropped_before_release: Arc::clone(&self.future_dropped),
+                released: Arc::clone(&self.released),
+            };
+            let release = self.release.lock().unwrap().take();
+            if let Some(release) = release {
+                let _ = release.await;
+                self.released
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.seen.lock().unwrap().push(attachment);
+        }
+    }
+
+    struct TestPublicationGuard {
+        root: lingxi_core::host::CancellationToken,
+        publication_lock: Arc<tokio::sync::Mutex<()>>,
+    }
+
+    impl crate::attachment::HookPublicationGuard for TestPublicationGuard {
+        fn is_current(&self) -> bool {
+            !self.root.is_cancelled()
+        }
+
+        fn generation_cancellation_token(&self) -> Option<lingxi_core::host::CancellationToken> {
+            Some(self.root.clone())
+        }
+
+        fn publish_if_current<'a>(
+            &'a self,
+            publication: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            let root = self.root.clone();
+            let lock = Arc::clone(&self.publication_lock);
+            Box::pin(async move {
+                let _guard = tokio::select! {
+                    biased;
+                    () = root.cancelled() => return false,
+                    guard = lock.lock_owned() => guard,
+                };
+                if root.is_cancelled() {
+                    return false;
+                }
+                tokio::select! {
+                    biased;
+                    () = root.cancelled() => false,
+                    () = publication => true,
+                }
+            })
+        }
+
+        fn commit_if_current<'a>(
+            &'a self,
+            mutation: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            let root = self.root.clone();
+            let lock = Arc::clone(&self.publication_lock);
+            Box::pin(async move {
+                let _guard = tokio::select! {
+                    biased;
+                    () = root.cancelled() => return false,
+                    guard = lock.lock_owned() => guard,
+                };
+                if root.is_cancelled() {
+                    return false;
+                }
+                mutation.await;
+                true
+            })
+        }
     }
 
     #[async_trait]
     impl HookAttachmentSink for RecordingSink {
-        async fn record(&self, attachment: Value) {
+        async fn record(&self, attachment: lingxi_core::types::utf16_json::Utf16JsonProjection) {
             self.seen.lock().unwrap().push(attachment);
         }
 
-        async fn persist_large_output(&self, text: &str) -> Option<String> {
-            self.large_outputs.lock().unwrap().push(text.to_string());
-            Some("(Full output saved to: /session/tool-results/hook.txt)".into())
+        async fn persist_large_output(
+            &self,
+            text: &ExactHookText,
+        ) -> Result<attachment::PersistedHookOutput, String> {
+            self.large_outputs
+                .lock()
+                .unwrap()
+                .push(text.display.clone());
+            Ok(attachment::PersistedHookOutput {
+                path: "/session/tool-results/hook.txt".into(),
+                persisted_text: text.clone(),
+                truncated_at_bytes: None,
+            })
         }
     }
 
@@ -4412,19 +5102,25 @@ mod attachment_wiring_tests {
         let seen = sink.seen.lock().unwrap().clone();
         assert_eq!(seen, agg.hook_attachments, "sink sees the same records");
         let a = &seen[0];
-        assert_eq!(a["type"], "hook_success");
-        assert_eq!(a["hookName"], "PostToolUse:Bash");
-        assert_eq!(a["hookEvent"], "PostToolUse");
-        assert_eq!(a["toolUseID"], "toolu_01ApkBwAZMCAza47B5nAWiGS");
+        assert_eq!(a.value["type"], "hook_success");
+        assert_eq!(a.value["hookName"], "PostToolUse:Bash");
+        assert_eq!(a.value["hookEvent"], "PostToolUse");
+        assert_eq!(a.value["toolUseID"], "toolu_01ApkBwAZMCAza47B5nAWiGS");
         // Plain-text exit-0 arm: `content = jKe(stdout.trim())`.
-        assert_eq!(a["content"], "formatted");
-        assert_eq!(a["stdout"], "formatted\n");
-        assert_eq!(a["stderr"], "");
-        assert_eq!(a["exitCode"], 0);
-        assert_eq!(a["command"], "./hooks/fmt.sh");
-        assert!(a["durationMs"].is_u64(), "durationMs present: {a}");
+        assert_eq!(a.value["content"], "formatted");
+        assert_eq!(a.value["stdout"], "formatted\n");
+        assert_eq!(a.value["stderr"], "");
+        assert_eq!(a.value["exitCode"], 0);
+        assert_eq!(a.value["command"], "./hooks/fmt.sh");
+        assert!(a.value["durationMs"].is_u64(), "durationMs present: {a:?}");
         // Key ORDER is load-bearing.
-        let keys: Vec<&str> = a.as_object().unwrap().keys().map(String::as_str).collect();
+        let keys: Vec<&str> = a
+            .value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         assert_eq!(
             keys,
             [
@@ -4455,10 +5151,222 @@ mod attachment_wiring_tests {
             [output.as_str()]
         );
         assert_eq!(
-            agg.hook_attachments[0]["content"],
-            "(Full output saved to: /session/tool-results/hook.txt)"
+            agg.hook_attachments[0].value["content"],
+            format!(
+                "<persisted-output>\nOutput too large (9.8KB). Full output saved to: /session/tool-results/hook.txt\n\nPreview (first 2KB):\n{}\n...\n</persisted-output>",
+                "x".repeat(attachment::HOOK_OUTPUT_PREVIEW_LIMIT)
+            )
         );
-        assert_eq!(agg.hook_attachments[0]["stdout"], output);
+        assert_eq!(agg.hook_attachments[0].value["stdout"], output);
+    }
+
+    #[tokio::test]
+    async fn fse_persists_stdout_and_all_three_json_hook_outputs() {
+        let sink = Arc::new(RecordingSink::default());
+        let stdout = "s".repeat(attachment::HOOK_OUTPUT_INLINE_LIMIT + 1);
+        let system = "m".repeat(attachment::HOOK_OUTPUT_INLINE_LIMIT + 2);
+        let additional = "c".repeat(attachment::HOOK_OUTPUT_INLINE_LIMIT + 3);
+        let initial = "i".repeat(attachment::HOOK_OUTPUT_INLINE_LIMIT + 4);
+
+        let mut stdout_hook = post_hook();
+        stdout_hook.events = vec![HookEventType::SessionStart];
+        let mut stdout_registry = HookRegistry::new();
+        stdout_registry.register(stdout_hook);
+        let stdout_executor = HookExecutorImpl::new(
+            Arc::new(RwLock::new(stdout_registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_process_runner(
+            Arc::new(FixedRunner(Mutex::new(Some(Ok(out(&stdout, "", 0)))))),
+            Arc::new(StubSandbox),
+        )
+        .with_attachment_sink(sink.clone());
+        let event = HookEvent::SessionStart {
+            session_id: lingxi_core::types::SessionId::nil(),
+            source: "startup".into(),
+        };
+        let stdout_aggregate = stdout_executor
+            .execute(event.clone(), HookContext::default())
+            .await;
+        assert!(stdout_aggregate.hook_attachments[0].value["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("<persisted-output>"));
+
+        let response = serde_json::json!({
+            "systemMessage": system,
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": additional,
+                "initialUserMessage": initial,
+            }
+        })
+        .to_string();
+        let mut response_hook = post_hook();
+        response_hook.events = vec![HookEventType::SessionStart];
+        let mut response_registry = HookRegistry::new();
+        response_registry.register(response_hook);
+        let response_executor = HookExecutorImpl::new(
+            Arc::new(RwLock::new(response_registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_process_runner(
+            Arc::new(FixedRunner(Mutex::new(Some(Ok(out(&response, "", 0)))))),
+            Arc::new(StubSandbox),
+        )
+        .with_attachment_sink(sink.clone());
+        let response_aggregate = response_executor
+            .execute(event, HookContext::default())
+            .await;
+
+        assert_eq!(sink.large_outputs.lock().unwrap().len(), 4);
+        assert!(response_aggregate.system_messages[0]
+            .display
+            .starts_with("<persisted-output>"));
+        assert!(response_aggregate.additional_contexts[0]
+            .display
+            .starts_with("<persisted-output>"));
+        assert!(response_aggregate
+            .initial_user_message
+            .as_ref()
+            .unwrap()
+            .display
+            .starts_with("<persisted-output>"));
+        let system_attachment = response_aggregate
+            .hook_attachments
+            .iter()
+            .find(|item| item.value["type"] == "hook_system_message")
+            .expect("systemMessage transcript row");
+        assert!(system_attachment.value["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("<persisted-output>"));
+    }
+
+    #[tokio::test]
+    async fn fse_threshold_counts_js_utf16_units() {
+        let exactly = ExactHookText::from_text("😀".repeat(5_000));
+        assert_eq!(exactly.len_utf16(), attachment::HOOK_OUTPUT_INLINE_LIMIT);
+        let inline = format_hook_output(None, exactly.clone(), "stdout").await;
+        assert_eq!(inline, exactly);
+
+        let over = ExactHookText::from_text("😀".repeat(5_001));
+        assert_eq!(over.len_utf16(), attachment::HOOK_OUTPUT_INLINE_LIMIT + 2);
+        let fallback = format_hook_output(None, over, "stdout").await;
+        assert!(fallback.display.ends_with(
+            "\n\n[Hook stdout truncated at 10000 chars — persist-to-disk failed: tool result was not saved]"
+        ));
+        let suffix = "\n\n[Hook stdout truncated at 10000 chars — persist-to-disk failed: tool result was not saved]";
+        assert_eq!(
+            fallback.utf16_code_units.len(),
+            attachment::HOOK_OUTPUT_INLINE_LIMIT + suffix.encode_utf16().count()
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_waits_for_admitted_hook_attachment_persistence() {
+        let mut registry = HookRegistry::new();
+        registry.register(post_hook());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let future_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sink = Arc::new(GateRecordSink {
+            entered: Mutex::new(Some(entered_tx)),
+            release: Mutex::new(Some(release_rx)),
+            seen: Mutex::new(Vec::new()),
+            future_dropped: Arc::clone(&future_dropped),
+            released: Arc::clone(&released),
+        });
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_process_runner(
+            Arc::new(FixedRunner(Mutex::new(Some(Ok(out("done", "", 0)))))),
+            Arc::new(StubSandbox),
+        )
+        .with_attachment_sink(sink.clone());
+        let root = lingxi_core::host::CancellationToken::new();
+        let guard = Arc::new(TestPublicationGuard {
+            root: root.clone(),
+            publication_lock: Arc::new(tokio::sync::Mutex::new(())),
+        });
+        let mut context = HookContext::default();
+        context.publication_guard = Some(guard.clone());
+
+        let execution = tokio::spawn(async move { exec.execute(post_event(), context).await });
+        entered_rx.await.expect("sink reached its real record call");
+        root.cancel();
+        let reset_lock = Arc::clone(&guard.publication_lock);
+        let reset_waiting = tokio::spawn(async move { reset_lock.lock_owned().await });
+        assert!(
+            guard.publication_lock.clone().try_lock_owned().is_err(),
+            "the admitted sink mutation must retain its lease until persistence finishes"
+        );
+        release_tx.send(()).expect("release admitted sink mutation");
+        let aggregate = execution.await.expect("hook execution completed");
+        let _reset_lease = reset_waiting
+            .await
+            .expect("reset acquired publication lease");
+
+        assert_eq!(
+            sink.seen.lock().unwrap().len(),
+            1,
+            "an admitted mutation completes before reset returns"
+        );
+        assert!(
+            !future_dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the durable sink future must not be cancelled after admission"
+        );
+        assert!(
+            aggregate.hook_attachments.len() == 1,
+            "the executor returns its committed attachment; the actor generation fence owns result acceptance"
+        );
+    }
+
+    #[tokio::test]
+    async fn obsolete_success_does_not_remove_a_once_hook_from_the_live_registry() {
+        let mut hook = post_hook();
+        hook.once = true;
+        let hook_id = hook.id;
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let registry = Arc::new(RwLock::new(registry));
+        let exec = HookExecutorImpl::new(
+            Arc::clone(&registry),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_process_runner(
+            Arc::new(FixedRunner(Mutex::new(Some(Ok(out("done", "", 0)))))),
+            Arc::new(StubSandbox),
+        );
+        let sink = Arc::new(RecordingSink::default());
+        let exec = exec.with_attachment_sink(sink);
+        let root = lingxi_core::host::CancellationToken::new();
+        root.cancel();
+        let mut context = HookContext::default();
+        context.publication_guard = Some(Arc::new(TestPublicationGuard {
+            root,
+            publication_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }));
+
+        let aggregate = exec.execute(post_event(), context).await;
+
+        assert!(
+            registry
+                .read()
+                .await
+                .all_hooks()
+                .iter()
+                .any(|registered| registered.id == hook_id),
+            "a success from an obsolete generation must not mutate the shared once-hook registry"
+        );
+        assert!(aggregate.hook_attachments.is_empty());
     }
 
     /// An engine without an async registry executes config-non-blocking hooks
@@ -4491,7 +5399,10 @@ mod attachment_wiring_tests {
         assert_eq!(agg.decision, None, "non-blocking hooks cannot gate a turn");
         assert_eq!(agg.hook_attachments.len(), 1);
         assert_eq!(sink.seen.lock().unwrap().as_slice(), agg.hook_attachments);
-        assert_eq!(agg.hook_attachments[0]["content"], "background complete");
+        assert_eq!(
+            agg.hook_attachments[0].value["content"],
+            "background complete"
+        );
     }
 
     /// O2: the aggregate carries the blocking hook's `command` so the CALLER
@@ -4594,9 +5505,12 @@ mod attachment_wiring_tests {
             2,
             "run-outcome record plus the system-message record, got {seen:?}"
         );
-        assert_eq!(seen[0]["type"], "hook_success", "run outcome comes FIRST");
         assert_eq!(
-            serde_json::to_string(&seen[1]).unwrap(),
+            seen[0].value["type"], "hook_success",
+            "run outcome comes FIRST"
+        );
+        assert_eq!(
+            seen[1].to_json_string().unwrap(),
             r#"{"type":"hook_system_message","content":"reformatted 3 files","hookName":"PostToolUse:Bash","toolUseID":"toolu_01ApkBwAZMCAza47B5nAWiGS","hookEvent":"PostToolUse"}"#
         );
     }
@@ -4634,8 +5548,8 @@ mod attachment_wiring_tests {
         exec.execute(post_event(), HookContext::default()).await;
 
         let seen = sink.seen.lock().unwrap().clone();
-        assert_eq!(seen[0]["type"], "hook_success");
-        assert_eq!(seen[0]["content"], "");
+        assert_eq!(seen[0].value["type"], "hook_success");
+        assert_eq!(seen[0].value["content"], "");
     }
 
     /// Any non-zero exit that is NOT the exit-2 block ⇒ `hook_non_blocking_error`.
@@ -4648,7 +5562,13 @@ mod attachment_wiring_tests {
 
         let seen = sink.seen.lock().unwrap().clone();
         let a = &seen[0];
-        let keys: Vec<&str> = a.as_object().unwrap().keys().map(String::as_str).collect();
+        let keys: Vec<&str> = a
+            .value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         assert_eq!(
             keys,
             [
@@ -4663,10 +5583,10 @@ mod attachment_wiring_tests {
                 "durationMs"
             ]
         );
-        assert_eq!(a["type"], "hook_non_blocking_error");
-        assert_eq!(a["stderr"], "boom");
-        assert_eq!(a["stdout"], "partial");
-        assert_eq!(a["exitCode"], 1);
+        assert_eq!(a.value["type"], "hook_non_blocking_error");
+        assert_eq!(a.value["stderr"], "boom");
+        assert_eq!(a.value["stdout"], "partial");
+        assert_eq!(a.value["exitCode"], 1);
     }
 
     /// exit 2 is claude's BLOCKING arm — it yields a `blockingError`, never a
@@ -4698,7 +5618,13 @@ mod attachment_wiring_tests {
 
         let seen = sink.seen.lock().unwrap().clone();
         let a = &seen[0];
-        let keys: Vec<&str> = a.as_object().unwrap().keys().map(String::as_str).collect();
+        let keys: Vec<&str> = a
+            .value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         assert_eq!(
             keys,
             [
@@ -4712,9 +5638,9 @@ mod attachment_wiring_tests {
                 "timeoutMs"
             ]
         );
-        assert_eq!(a["type"], "hook_cancelled");
-        assert_eq!(a["timedOut"], true);
-        assert_eq!(a["timeoutMs"], 90_000, "hook.timeout (90s) in ms");
+        assert_eq!(a.value["type"], "hook_cancelled");
+        assert_eq!(a.value["timedOut"], true);
+        assert_eq!(a.value["timeoutMs"], 90_000, "hook.timeout (90s) in ms");
     }
 
     /// Non-tool events mint a fresh uuid `toolUseID` and use the bare event
@@ -4746,8 +5672,8 @@ mod attachment_wiring_tests {
         .await;
 
         let seen = sink.seen.lock().unwrap().clone();
-        assert_eq!(seen[0]["hookName"], "Stop");
-        let tuid = seen[0]["toolUseID"].as_str().unwrap();
+        assert_eq!(seen[0].value["hookName"], "Stop");
+        let tuid = seen[0].value["toolUseID"].as_str().unwrap();
         assert_eq!(tuid.len(), 36, "plain uuid, not a toolu_ id: {tuid}");
         let hyphens: Vec<usize> = tuid.match_indices('-').map(|(i, _)| i).collect();
         assert_eq!(hyphens, [8, 13, 18, 23], "uuid hyphenation: {tuid}");

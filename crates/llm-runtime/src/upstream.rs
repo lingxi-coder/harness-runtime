@@ -1,16 +1,14 @@
 //! Projection between LingXi's host contracts and the independent wire client.
 //! Provider encoding and decoding are always delegated to lingxi-llm-client.
-use crate::convert::input_projection::native_family;
 #[cfg(test)]
 use crate::convert::input_projection::{message_content, replay_companion};
 #[cfg(test)]
-use crate::history_projection::{project_response, HistoryProjector as Decoder};
+use crate::history_projection::{HistoryProjector as Decoder, project_response};
 use crate::*;
 use lingxi_llm_client::{self as client, protocol as wire};
-use serde_json::json;
 #[cfg(test)]
 use serde_json::Value;
-use std::collections::BTreeMap;
+use serde_json::json;
 
 fn invalid(error: impl std::fmt::Display) -> LlmError {
     LlmError::InvalidRequest {
@@ -75,11 +73,27 @@ pub(crate) fn profile(profile: &ProviderProfile) -> Result<wire::ProviderProfile
     };
     if let Some(original) = profile.wire_profile.as_ref().or(builtin.as_ref()) {
         for model in &mut projected.models {
-            if let Some(source) = original.models.iter().find(|source| {
-                source.display_model == model.display_model
-                    && source.request_model == model.request_model
-            }) {
+            if let Some(source) = original
+                .models
+                .iter()
+                .find(|source| {
+                    source.display_model == model.display_model
+                        && source.request_model == model.request_model
+                })
+                .or_else(|| {
+                    // Display labels may be changed by the host. Directory facts
+                    // belong to a wire model, but duplicate wire rows still need
+                    // their exact display identity to select the correct row.
+                    let mut matches = original
+                        .models
+                        .iter()
+                        .filter(|source| source.request_model == model.request_model);
+                    let source = matches.next()?;
+                    matches.next().is_none().then_some(source)
+                })
+            {
                 model.info = source.info.clone();
+                model.foundry = source.foundry.clone();
                 model.pricing = source.pricing.clone();
                 model.billing_mode = source.billing_mode;
                 // The host owns its six conversation capability switches. Keep
@@ -121,12 +135,14 @@ pub(crate) fn profile(profile: &ProviderProfile) -> Result<wire::ProviderProfile
             projected.pricing = original.pricing.clone();
         }
     }
-    projected.pricing.billing_mode = match profile.pricing.billing_mode {
-        lingxi_core::host::ModelBillingMode::PerToken => wire::BillingMode::PerToken,
-        lingxi_core::host::ModelBillingMode::Subscription => wire::BillingMode::Subscription,
-        lingxi_core::host::ModelBillingMode::Free => wire::BillingMode::Free,
-        lingxi_core::host::ModelBillingMode::Unknown => wire::BillingMode::Unknown,
-    };
+    if let Some(mode) = profile.pricing.billing_mode {
+        projected.pricing.billing_mode = match mode {
+            lingxi_core::host::ModelBillingMode::PerToken => wire::BillingMode::PerToken,
+            lingxi_core::host::ModelBillingMode::Subscription => wire::BillingMode::Subscription,
+            lingxi_core::host::ModelBillingMode::Free => wire::BillingMode::Free,
+            lingxi_core::host::ModelBillingMode::Unknown => wire::BillingMode::Unknown,
+        };
+    }
     for model in &mut projected.models {
         if let Some((_, price)) = profile.pricing.overrides.iter().find(|(name, _)| {
             name == &model.display_model
@@ -212,23 +228,52 @@ pub(crate) fn request(
     Ok(input)
 }
 
-pub(crate) fn message_string_overrides(
-    req: &LlmRequest,
-    family: wire::ProtocolFamily,
-) -> Result<BTreeMap<String, Vec<u16>>, LlmError> {
-    Ok(
-        if native_family(family) == wire::ProtocolFamily::AnthropicMessages {
-            req.execution.message_json_string_overrides.clone()
-        } else {
-            BTreeMap::new()
-        },
-    )
-}
-
 /// Translate SDK failures into the host execution error contract.
 pub(crate) fn error(error: wire::LlmError) -> LlmError {
     use wire::LlmError as E;
     match error {
+        E::ProviderResponse {
+            status,
+            request_id,
+            body,
+            classification,
+            retry_after,
+        } => {
+            use wire::LlmErrorKind as K;
+            let message = format!(
+                "{status} {}",
+                json!({"error":body.get("error").cloned().unwrap_or_else(|| json!({"message":body.to_string()})),
+                "provider_response":{"status":status,"request_id":request_id,"body":body,"classification":classification,"retry_after_ms":retry_after.map(|delay| delay.as_millis())}})
+            );
+            match classification {
+                K::Authentication => LlmError::Authentication { message },
+                K::PermissionDenied => LlmError::PermissionDenied { message },
+                K::InvalidRequest => LlmError::InvalidRequest { message },
+                K::RateLimited => LlmError::RateLimited {
+                    retry_after,
+                    scope: None,
+                },
+                K::QuotaExceeded => LlmError::QuotaExceeded,
+                K::ContextOverflow => LlmError::ContextOverflow { token_gap: 0 },
+                K::RequestTooLarge => LlmError::RequestTooLarge,
+                K::ModelUnavailable => LlmError::ModelUnavailable,
+                K::ProviderInternal => LlmError::ProviderInternal,
+                K::ProviderTimeout => LlmError::ProviderTimeout {
+                    message,
+                    status: Some(status),
+                },
+                K::Overloaded => LlmError::Overloaded { repeated: false },
+                K::Transport | K::ProviderFileProcessing => LlmError::Transport { message },
+                K::TransportTimeout => LlmError::TransportTimeout { message },
+                K::FileUploadOutcomeUnknown => LlmError::FileUploadOutcomeUnknown { message },
+                K::TlsCert => LlmError::tls_cert(message),
+                K::StreamInterrupted => LlmError::StreamInterrupted { message },
+                K::CostUnavailable => LlmError::CostUnavailable { message },
+                K::UnsupportedCapability => LlmError::UnsupportedCapability {
+                    capability: message,
+                },
+            }
+        }
         E::Authentication { message } => LlmError::Authentication { message },
         E::PermissionDenied { message } => LlmError::PermissionDenied { message },
         E::InvalidRequest { message } => LlmError::InvalidRequest { message },
@@ -243,6 +288,7 @@ pub(crate) fn error(error: wire::LlmError) -> LlmError {
         E::RequestTooLarge { .. } => LlmError::RequestTooLarge,
         E::ModelUnavailable { .. } => LlmError::ModelUnavailable,
         E::ProviderInternal { .. } => LlmError::ProviderInternal,
+        E::ProviderTimeout { message, status } => LlmError::ProviderTimeout { message, status },
         E::Overloaded { .. } => LlmError::Overloaded { repeated: false },
         E::Transport { message } | E::ProviderFileProcessing { message, .. } => {
             LlmError::Transport { message }
@@ -605,9 +651,11 @@ mod upgrade_tests {
         let events = decoder
             .events(vec![Ok(wire::StreamEvent::BlockEnd { block: 0 })])
             .unwrap();
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, HistoryEvent::ContentBlockStop { index: 0 })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, HistoryEvent::ContentBlockStop { index: 0 }))
+        );
         let companion = events
             .iter()
             .find_map(|event| match event {
@@ -683,7 +731,7 @@ mod upgrade_tests {
             content: vec![ContentBlock::ToolResult {
                 tool_call_id: "call-1".into(),
                 output: json!("clicked"),
-                is_error: false,
+                is_error: Some(false),
                 cache_control: None,
                 cache_reference: None,
             }],
@@ -722,6 +770,7 @@ mod upgrade_tests {
         history.push(ContentBlock::Text {
             text: "retained".into(),
             cache_control: Some(CacheControl::Ephemeral),
+            citations: None,
         });
         req.messages.push(Message {
             role: "assistant".into(),
@@ -760,9 +809,11 @@ mod upgrade_tests {
                 }),
             ])
             .unwrap();
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, HistoryEvent::MessageDelta { usage: None, .. })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, HistoryEvent::MessageDelta { usage: None, .. }))
+        );
         let observation = events
             .iter()
             .find_map(|event| match event {
@@ -788,6 +839,54 @@ mod upgrade_tests {
         )
         .unwrap();
         assert!(replay.is_empty());
+    }
+
+    #[test]
+    fn host_labels_preserve_wire_facts_without_guessing_duplicate_rows() {
+        let mut host = crate::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|profile| profile.profile_name == "anthropic")
+            .unwrap();
+        host.models.truncate(1);
+        let mut source = host.wire_profile.clone().unwrap();
+        source
+            .models
+            .retain(|model| model.request_model == host.models[0].request_model);
+        assert_eq!(source.models.len(), 1);
+        source.models[0].info.features.effort.default = Some(wire::ReasoningEffort::Low);
+        host.models[0].display_model = "custom label".into();
+        host.wire_profile = Some(source.clone());
+        assert_eq!(
+            profile(&host).unwrap().models[0]
+                .info
+                .features
+                .effort
+                .default,
+            Some(wire::ReasoningEffort::Low)
+        );
+        let mut duplicate = source.models[0].clone();
+        duplicate.display_model = "second row".into();
+        duplicate.info.features.effort.default = Some(wire::ReasoningEffort::High);
+        source.models.push(duplicate);
+        host.wire_profile = Some(source);
+        assert_eq!(
+            profile(&host).unwrap().models[0]
+                .info
+                .features
+                .effort
+                .default,
+            None
+        );
+        host.models[0].display_model = "second row".into();
+        assert_eq!(
+            profile(&host).unwrap().models[0]
+                .info
+                .features
+                .effort
+                .default,
+            Some(wire::ReasoningEffort::High)
+        );
     }
 
     #[test]
@@ -871,6 +970,7 @@ mod route_adaptation_tests {
                 wire::ContentBlock::Text {
                     text: "retained".into(),
                     thought_signature: None,
+                    citations: None,
                 },
             ],
         });
@@ -893,9 +993,211 @@ mod route_adaptation_tests {
             Some(&vec![0xd800])
         );
         assert_eq!(request.input.messages[0].content.len(), 2);
-        assert!(request
-            .execution
-            .message_json_string_overrides
-            .contains_key("/messages/0/content/1/text"));
+        assert!(
+            request
+                .execution
+                .message_json_string_overrides
+                .contains_key("/messages/0/content/1/text")
+        );
+    }
+}
+
+#[cfg(test)]
+mod fallback_billing_mode_inheritance_tests {
+    use super::*;
+    use lingxi_llm_client::protocol::{InferenceReport, Submission};
+    use lingxi_llm_client::providers::anthropic::fallback_response::{
+        UsageIteration, UsageIterations,
+    };
+
+    fn fallback_iterations(model: &str) -> UsageIterations {
+        UsageIterations {
+            served_fallback_model: Some(model.to_string()),
+            entries: vec![UsageIteration {
+                r#type: "fallback_message".into(),
+                model: Some(model.to_string()),
+                input_tokens: 1_000.0,
+                output_tokens: 1_000.0,
+                cache_read_input_tokens: 0.0,
+                cache_creation_input_tokens: 0.0,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn omitted_mode_inherits_pinned_anthropic_row_and_explicit_unknown_does_not() {
+        // This consumes the real bundled profile from deps/llm-client at the
+        // full revision pinned in the root Cargo.toml
+        // (0c6a907d897a54e656700c00cf335d91b10dca0b); it introduces no tariff.
+        let mut host = crate::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|profile| profile.profile_name == "anthropic")
+            .expect("pinned Anthropic provider profile");
+        assert_eq!(host.provider_id, ProviderId::AnthropicFirstParty);
+        let model = host
+            .models
+            .iter()
+            .find(|model| model.request_model == "claude-opus-4-6")
+            .expect("pinned Anthropic model row")
+            .clone();
+        let source = host.wire_profile.as_ref().expect("SDK source snapshot");
+        let source_row = source
+            .models
+            .iter()
+            .find(|row| {
+                row.display_model == model.display_model && row.request_model == model.request_model
+            })
+            .expect("exact source model row");
+        assert_eq!(source.pricing.billing_mode, wire::BillingMode::PerToken);
+        assert_eq!(source_row.billing_mode, None);
+        let source_rates = source_row.pricing.as_ref().expect("real model rates");
+        let expected_total = (1_000.0 * source_rates.input_per_million.unwrap() / 1_000_000.0)
+            + (1_000.0 * source_rates.output_per_million.unwrap() / 1_000_000.0);
+
+        host.pricing.billing_mode = None;
+        let inherited = profile(&host).expect("project user profile with inherited source mode");
+        assert_eq!(inherited.pricing.billing_mode, wire::BillingMode::PerToken);
+        let snapshot =
+            client::FrozenPricing::capture(&inherited, &model.display_model, &model.request_model)
+                .expect("capture exact pinned model row");
+        let quote = snapshot
+            .estimate_anthropic_server_fallback(
+                &fallback_iterations(&model.request_model),
+                Some(&model.request_model),
+                None,
+                &InferenceReport::default(),
+                Submission::Interactive,
+            )
+            .expect("native quote succeeds")
+            .expect("served model enters native quote path");
+        assert_eq!(
+            quote.completeness,
+            client::AnthropicFallbackCostCompleteness::Complete
+        );
+        assert!((quote.total_cost_usd.unwrap() - expected_total).abs() < 1e-12);
+
+        host.pricing.billing_mode = Some(lingxi_core::host::ModelBillingMode::Unknown);
+        let explicit_unknown = profile(&host).expect("project explicit unknown override");
+        assert_eq!(
+            explicit_unknown.pricing.billing_mode,
+            wire::BillingMode::Unknown
+        );
+        let snapshot = client::FrozenPricing::capture(
+            &explicit_unknown,
+            &model.display_model,
+            &model.request_model,
+        )
+        .expect("capture exact pinned model row");
+        let quote = snapshot
+            .estimate_anthropic_server_fallback(
+                &fallback_iterations(&model.request_model),
+                Some(&model.request_model),
+                None,
+                &InferenceReport::default(),
+                Submission::Interactive,
+            )
+            .expect("native quote succeeds")
+            .expect("served model enters native quote path");
+        assert_eq!(
+            quote.completeness,
+            client::AnthropicFallbackCostCompleteness::Incomplete
+        );
+        assert!(quote.total_cost_usd.is_none());
+    }
+
+    #[test]
+    fn cloud_claude_wrappers_without_source_rates_stay_incomplete() {
+        let model = "claude-opus-4-6";
+        let sdk_profiles = client::builtin_providers().expect("pinned SDK catalog");
+        let wrappers = [
+            (
+                "bedrock-claude-user",
+                ProviderId::BedrockClaude,
+                ProtocolFamily::BedrockClaude,
+                "bedrock-claude",
+                "https://bedrock-runtime.us-east-1.amazonaws.com",
+                AuthStrategy::AwsSigV4,
+                Some(SigningConfig {
+                    region: "us-east-1".into(),
+                    service: "bedrock".into(),
+                }),
+            ),
+            (
+                "vertex-claude-user",
+                ProviderId::VertexClaude,
+                ProtocolFamily::VertexClaude,
+                "vertex-claude",
+                "https://vertex.example.com",
+                AuthStrategy::GcpToken,
+                None,
+            ),
+            (
+                "foundry-claude-user",
+                ProviderId::FoundryClaude,
+                ProtocolFamily::FoundryClaude,
+                "foundry-claude",
+                "https://foundry.example.com",
+                AuthStrategy::ApiKey,
+                None,
+            ),
+        ];
+
+        for (profile_name, provider_id, protocol, sdk_id, base_url, auth, signing) in wrappers {
+            assert!(sdk_profiles.iter().all(|source| {
+                source.provider_id.as_str() != sdk_id || source.protocol != protocol
+            }));
+            let host = ProviderProfile {
+                wire_profile: None,
+                regions: lingxi_llm_client::protocol::Region::all(),
+                provider_id,
+                profile_name: profile_name.into(),
+                base_url: base_url.into(),
+                protocol,
+                auth,
+                credential: CredentialConfig::HostManaged {
+                    id: profile_name.into(),
+                },
+                models: vec![ModelProfile {
+                    display_model: model.into(),
+                    request_model: model.into(),
+                    billing_model: model.into(),
+                    aliases: Vec::new(),
+                    description: None,
+                    metadata: Default::default(),
+                    capabilities: Capabilities::default(),
+                }],
+                pricing: PricingConfig::default(),
+                signing,
+                azure: None,
+                supports_websockets: false,
+                supports_websocket_compression: false,
+                websocket_connect_timeout_ms: None,
+                vision_delegate: None,
+                connection: Default::default(),
+            };
+            let projected = profile(&host).expect("project unpriced cloud wrapper");
+            assert_eq!(projected.pricing.billing_mode, wire::BillingMode::Unknown);
+            assert!(projected.models[0].pricing.is_none());
+            let snapshot = client::FrozenPricing::capture(&projected, model, model)
+                .expect("capture configured cloud model identity");
+            let quote = snapshot
+                .estimate_anthropic_server_fallback(
+                    &fallback_iterations(model),
+                    Some(model),
+                    None,
+                    &InferenceReport::default(),
+                    Submission::Interactive,
+                )
+                .expect("cloud quote path succeeds")
+                .expect("served model enters native quote path");
+            assert_eq!(
+                quote.completeness,
+                client::AnthropicFallbackCostCompleteness::Incomplete,
+                "{profile_name} has no exact SDK row or tariff"
+            );
+            assert!(quote.total_cost_usd.is_none());
+        }
     }
 }

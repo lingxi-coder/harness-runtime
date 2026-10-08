@@ -10,13 +10,14 @@
 //! `TASK_STATUSES`).
 
 use crate::id::TaskType;
-use crate::registry::TaskRegistry;
+use crate::registry::{AgentWaitNotificationClaim, TaskRegistry};
 use crate::state::{TaskState, TaskStatus};
 use crate::task_trait::{TaskError, TaskSpawnInput};
 use async_trait::async_trait;
 use lingxi_core::host::task_registry::{
-    MonitorRegistration, TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord,
-    TaskRegistryError, TaskRegistryHandle, TaskUpdatePatch, WorkflowRecord,
+    AgentTaskFacts, AgentTerminalSnapshot, AgentTerminalWaitOutcome, AgentTerminalWaitReason,
+    FieldPresence, MonitorRegistration, TaskCreateInput, TaskListFilter, TaskOutputChunk,
+    TaskRecord, TaskRegistryError, TaskRegistryHandle, TaskUpdatePatch, WorkflowRecord,
 };
 use std::path::PathBuf;
 
@@ -39,6 +40,46 @@ fn task_type_from_wire(s: &str) -> Result<TaskType, TaskRegistryError> {
             )));
         }
     })
+}
+
+/// Native `pae` → `kfo`/`n5r` result extraction for an Agent task transcript:
+/// scan assistant rows from newest to oldest, concatenate only text blocks
+/// without separators, and return the first non-empty string without trimming.
+fn native_agent_transcript_text(messages: &[lingxi_core::types::ConversationMessage]) -> String {
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
+
+    for message in messages.iter().rev() {
+        let ConversationMessage::Assistant { content, .. } = message else {
+            continue;
+        };
+        let text = content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect::<String>();
+        if !text.is_empty() {
+            return text;
+        }
+    }
+    String::new()
+}
+
+fn agent_wait_deadline(
+    timeout: Option<std::time::Duration>,
+) -> Result<Option<tokio::time::Instant>, TaskRegistryError> {
+    match timeout {
+        None => Ok(None),
+        Some(timeout) => tokio::time::Instant::now()
+            .checked_add(timeout)
+            .map(Some)
+            .ok_or_else(|| {
+                TaskRegistryError::InvalidInput("Agent wait timeout is out of range".into())
+            }),
+    }
 }
 
 pub(crate) fn task_type_to_wire(t: TaskType) -> &'static str {
@@ -82,6 +123,88 @@ pub(crate) fn status_to_wire(s: TaskStatus) -> &'static str {
         TaskStatus::Failed => "failed",
         TaskStatus::Killed => "killed",
     }
+}
+
+fn optional_string<T: Into<String>>(value: Option<T>) -> FieldPresence<String> {
+    value.map_or(FieldPresence::Missing, |value| {
+        FieldPresence::Value(value.into())
+    })
+}
+
+fn optional_json_string(value: Option<String>) -> FieldPresence<serde_json::Value> {
+    value.map_or(FieldPresence::Missing, |value| {
+        FieldPresence::Value(serde_json::Value::String(value))
+    })
+}
+
+fn agent_task_facts(state: &TaskState, source_order: usize) -> AgentTaskFacts {
+    let base = state.base();
+    let mut facts = AgentTaskFacts {
+        source_order,
+        parent_id: optional_json_string(base.creator_agent_id.map(|id| id.as_uuid().to_string())),
+        row_description: FieldPresence::Value(serde_json::Value::String(base.description.clone())),
+        ..AgentTaskFacts::default()
+    };
+    match state {
+        TaskState::LocalAgent(agent) => {
+            let exposed_id = agent.agent_id.as_uuid().to_string();
+            facts.stable_agent_id = FieldPresence::Value(exposed_id.clone());
+            facts.agent_type = FieldPresence::Value(agent.subagent_type.clone());
+            facts.spawned_description = optional_string(agent.spawned_description.clone());
+            facts.spawned_by = agent.agent_spawn_provenance.hook_caller.clone();
+            facts.hook_origin = agent.agent_spawn_provenance.hook_origin.clone();
+            facts.is_idle = agent.agent_list_lifecycle.is_idle.clone();
+            facts.finalizing = agent.agent_list_lifecycle.finalizing.clone();
+            facts.keepalive_reasons = agent.agent_list_lifecycle.keepalive_reasons.clone();
+            facts.activity_agent_id = FieldPresence::Value(exposed_id);
+            facts.is_backgrounded = FieldPresence::Value(agent.is_backgrounded);
+        }
+        TaskState::InProcessTeammate(teammate) => {
+            let stable_id = teammate.agent_id.as_uuid().to_string();
+            facts.stable_agent_id = FieldPresence::Value(stable_id.clone());
+            facts.resumable_agent_id = FieldPresence::Value(stable_id.clone());
+            facts.teammate_id =
+                optional_json_string(base.creator_teammate_name.as_ref().map(|name| {
+                    match base
+                        .creator_team_name
+                        .as_deref()
+                        .filter(|team| !team.is_empty())
+                    {
+                        Some(team) => format!("{name}@{team}"),
+                        None => name.clone(),
+                    }
+                }));
+            facts.name = optional_json_string(base.creator_teammate_name.clone());
+            facts.team_name = optional_string(base.creator_team_name.clone());
+            facts.child_model = optional_string(teammate.child_model.clone());
+            facts.child_model_profile = optional_string(teammate.child_model_profile.clone());
+            facts.agent_type = optional_string(teammate.spawned_agent_type.clone());
+            facts.spawned_description = optional_string(teammate.spawned_description.clone());
+            facts.spawned_by = teammate.agent_spawn_provenance.hook_caller.clone();
+            facts.hook_origin = teammate.agent_spawn_provenance.hook_origin.clone();
+            facts.is_idle = FieldPresence::Value(teammate.is_idle);
+            facts.awaiting_plan_approval =
+                FieldPresence::Value(teammate.awaiting_plan_approval && !base.status.is_terminal());
+            facts.activity_agent_id = FieldPresence::Value(stable_id);
+        }
+        TaskState::LocalBash(shell) => {
+            facts.activity_agent_id = optional_string(
+                base.creator_agent_id
+                    .map(|agent_id| agent_id.as_uuid().to_string()),
+            );
+            facts.is_backgrounded = shell
+                .is_backgrounded
+                .map_or(FieldPresence::Missing, FieldPresence::Value);
+        }
+        TaskState::MonitorMcp(_) | TaskState::Monitor(_) => {
+            facts.activity_agent_id = optional_string(
+                base.creator_agent_id
+                    .map(|agent_id| agent_id.as_uuid().to_string()),
+            );
+        }
+        _ => {}
+    }
+    facts
 }
 
 pub(crate) fn state_to_record(s: &TaskState) -> TaskRecord {
@@ -232,6 +355,7 @@ pub(crate) fn state_to_record(s: &TaskState) -> TaskRecord {
         },
         error,
         stage,
+        agent_facts: Some(agent_task_facts(s, 0)),
     }
 }
 
@@ -418,6 +542,72 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
 
 #[async_trait]
 impl TaskRegistryHandle for TaskRegistry {
+    async fn handback_scope(&self) -> Option<lingxi_core::host::handback::HandbackSessionScope> {
+        TaskRegistry::handback_scope(self).await
+    }
+    async fn begin_handback_run(
+        &self,
+        input: lingxi_core::host::handback::BeginHandbackRun,
+    ) -> Result<lingxi_core::host::handback::HandbackRunToken, TaskRegistryError> {
+        TaskRegistry::begin_handback_run(self, input)
+            .await
+            .map_err(task_err_to_registry_err)
+    }
+    async fn handback_state(
+        &self,
+        token: &lingxi_core::host::handback::HandbackRunToken,
+    ) -> Option<lingxi_core::host::handback::HandbackState> {
+        TaskRegistry::handback_state(self, token).await
+    }
+    async fn handback_state_for_agent(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+    ) -> Option<lingxi_core::host::handback::HandbackState> {
+        TaskRegistry::handback_state_for_agent(self, agent_id).await
+    }
+    async fn handback_history_for_agent(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+    ) -> Vec<lingxi_core::host::handback::HandbackState> {
+        TaskRegistry::handback_history_for_agent(self, agent_id).await
+    }
+    async fn pending_handback_reports_for(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+    ) -> Vec<lingxi_core::host::handback::HandbackEnvelope> {
+        TaskRegistry::pending_handback_reports_for(self, agent_id).await
+    }
+    async fn acknowledge_handback_consumption(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        receipt: &lingxi_core::host::handback::HandbackReceipt,
+    ) -> bool {
+        TaskRegistry::acknowledge_handback_consumption(self, agent_id, receipt).await
+    }
+    async fn try_deliver_handback(
+        &self,
+        token: &lingxi_core::host::handback::HandbackRunToken,
+        report: lingxi_core::host::handback::PreparedHandbackReport,
+    ) -> lingxi_core::host::handback::HandbackAdmissionOutcome {
+        TaskRegistry::try_deliver_handback(self, token, report).await
+    }
+    async fn next_handback_bounce(
+        &self,
+        token: &lingxi_core::host::handback::HandbackRunToken,
+    ) -> Option<u8> {
+        TaskRegistry::next_handback_bounce(self, token).await
+    }
+    async fn set_handback_disposition(
+        &self,
+        token: &lingxi_core::host::handback::HandbackRunToken,
+        disposition: lingxi_core::host::handback::HandbackDisposition,
+    ) {
+        TaskRegistry::set_handback_disposition(self, token, disposition).await
+    }
+    async fn agent_waiting_on_owned_work(&self, agent_id: lingxi_core::types::AgentId) -> bool {
+        TaskRegistry::agent_waiting_on_owned_work(self, agent_id).await
+    }
+
     async fn send_human_task_message(
         &self,
         id: &str,
@@ -579,6 +769,7 @@ impl TaskRegistryHandle for TaskRegistry {
             // The per-type hook-payload extras are likewise unpopulated at the
             // placeholder-create point; they fill in once `state_to_record` reads
             // a real spawned state.
+            agent_facts: None,
             ..Default::default()
         })
     }
@@ -624,13 +815,183 @@ impl TaskRegistryHandle for TaskRegistry {
         Ok(self.get(id).await.as_ref().map(state_to_record))
     }
 
+    async fn wait_for_agent_terminal(
+        &self,
+        raw_agent_id: &str,
+        cancel: tokio_util::sync::CancellationToken,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<AgentTerminalWaitOutcome, TaskRegistryError> {
+        // Native UOt observes the raw Agent `agentId` without UUID parsing or
+        // alias normalization. Keep the lifecycle subscription before the
+        // first ordered registry snapshot; periodic reads remain authoritative
+        // because lifecycle messages can be unrelated to this agent.
+        let mut _lifecycle = TaskRegistry::subscribe_task_lifecycle(self);
+        let mut deadline = agent_wait_deadline(timeout)?;
+        let mut observed_task_id: Option<String> = None;
+        let mut last_transcript: Option<String> = None;
+        let mut active_claim: Option<AgentWaitNotificationClaim> = None;
+        loop {
+            let state = TaskRegistry::list(self)
+                .await
+                .into_iter()
+                .find(|state| {
+                    matches!(state, TaskState::LocalAgent(agent) if agent.agent_id.as_uuid().to_string() == raw_agent_id)
+                });
+
+            if let Some(state) = state {
+                let TaskState::LocalAgent(agent) = &state else {
+                    continue;
+                };
+                let task_id = state.base().id.clone();
+                if observed_task_id.is_none() {
+                    // K3 claims the completion notification once the matching
+                    // registry row is first observed. Do not call mark_notified:
+                    // that public TaskOutput helper also changes parked-rest
+                    // state, while Native K3 only updates this bit.
+                    if let Some(claim) =
+                        TaskRegistry::claim_agent_wait_notification(self, &task_id, raw_agent_id)
+                            .await?
+                    {
+                        observed_task_id = Some(task_id.clone());
+                        active_claim = Some(claim);
+                        // Native starts a fresh ten-minute settle budget at
+                        // first observation; time spent waiting for startup
+                        // does not consume it.
+                        deadline = match agent_wait_deadline(timeout) {
+                            Ok(deadline) => deadline,
+                            Err(error) => {
+                                if let Some(claim) = active_claim.take() {
+                                    claim.release().await;
+                                }
+                                return Err(error);
+                            }
+                        };
+                    }
+                }
+                if observed_task_id.is_some() {
+                    let transcript_text = native_agent_transcript_text(&agent.messages);
+                    last_transcript = Some(transcript_text.clone());
+                    let snapshot = AgentTerminalSnapshot {
+                        task_id: task_id.clone(),
+                        native_transcript_text: transcript_text,
+                        error: agent.error.clone(),
+                    };
+                    let terminal_outcome = match state.base().status {
+                        TaskStatus::Completed => {
+                            Some(AgentTerminalWaitOutcome::Completed(snapshot))
+                        }
+                        TaskStatus::Failed => Some(AgentTerminalWaitOutcome::Failed(snapshot)),
+                        TaskStatus::Killed => Some(AgentTerminalWaitOutcome::Killed(snapshot)),
+                        TaskStatus::Pending | TaskStatus::Running | TaskStatus::Paused => None,
+                    };
+                    if let Some(outcome) = terminal_outcome {
+                        if let Some(claim) = active_claim.take() {
+                            claim.finish().await;
+                        }
+                        return Ok(outcome);
+                    }
+                }
+            } else if observed_task_id.is_some() {
+                if let Some(claim) = active_claim.take() {
+                    claim.release().await;
+                }
+                // The real Claude registry can read its transcript store after
+                // a task row disappears. This registry has no shared transcript
+                // reader port, so retain only the last exact conversation
+                // snapshot observed while the row was live.
+                return Ok(AgentTerminalWaitOutcome::Evicted {
+                    native_transcript_text: last_transcript,
+                });
+            }
+
+            // Native tests terminal status before AbortSignal/deadline. An
+            // abort after observing a live task restores notification
+            // eligibility (qOt) but never cancels that launched worker.
+            if cancel.is_cancelled() {
+                if let Some(claim) = active_claim.take() {
+                    claim.release().await;
+                }
+                return Ok(AgentTerminalWaitOutcome::Interrupted {
+                    reason: AgentTerminalWaitReason::Aborted,
+                    observed_task_id,
+                });
+            }
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                if let Some(claim) = active_claim.take() {
+                    claim.release().await;
+                }
+                return Ok(AgentTerminalWaitOutcome::Interrupted {
+                    reason: if observed_task_id.is_some() {
+                        AgentTerminalWaitReason::SettleTimeout
+                    } else {
+                        AgentTerminalWaitReason::StartupTimeout
+                    },
+                    observed_task_id,
+                });
+            }
+
+            let poll_interval = std::time::Duration::from_millis(150);
+            let sleep_for = deadline.map_or(poll_interval, |deadline| {
+                deadline
+                    .saturating_duration_since(tokio::time::Instant::now())
+                    .min(poll_interval)
+            });
+            tokio::time::sleep(sleep_for).await;
+            while _lifecycle.try_recv().is_ok() {}
+        }
+    }
+
+    async fn wait_for_agent_settled(&self, task_id: &str) -> Result<(), TaskRegistryError> {
+        loop {
+            let state = TaskRegistry::list(self)
+                .await
+                .into_iter()
+                .find(|state| state.base().id == task_id);
+            match state {
+                None => return Ok(()),
+                Some(state) if state.base().status.is_terminal() => return Ok(()),
+                Some(_) => tokio::time::sleep(std::time::Duration::from_millis(150)).await,
+            }
+        }
+    }
+
+    async fn replace_agent_transcript_messages(
+        &self,
+        task_id: &str,
+        messages: Vec<lingxi_core::types::ConversationMessage>,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::replace_agent_transcript_messages(self, task_id, messages)
+            .await
+            .map_err(|error| TaskRegistryError::Internal(error.to_string()))
+    }
+
+    async fn update_agent_list_local_fact(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        update: lingxi_core::host::task_registry::AgentListLocalFactUpdate,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::update_agent_list_local_fact(self, agent_id, update)
+            .await
+            .map_err(|error| TaskRegistryError::Internal(error.to_string()))
+    }
+
+    async fn set_team_member_active(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        active: bool,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::set_team_member_active(self, agent_id, active)
+            .await
+            .map_err(task_err_to_registry_err)
+    }
+
     async fn list(&self, filter: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError> {
         let want_status = match filter.status.as_deref() {
             Some(s) => Some(status_from_wire(s)?),
             None => None,
         };
         let mut out = Vec::new();
-        for state in self.list().await {
+        for (source_order, state) in self.list().await.into_iter().enumerate() {
             if !self.workflow_visible_in_current_session(&state) {
                 continue;
             }
@@ -640,6 +1001,9 @@ impl TaskRegistryHandle for TaskRegistry {
                 }
             }
             let mut record = state_to_record(&state);
+            if let Some(facts) = record.agent_facts.as_mut() {
+                facts.source_order = source_order;
+            }
             record.completed_agent_visible = self.completed_agent_visible(&record.task_id).await;
             out.push(record);
         }
@@ -1226,6 +1590,16 @@ impl TaskRegistryHandle for TaskRegistry {
         TaskRegistry::mark_shell_supervised(self, id).await;
     }
 
+    async fn settle_background_bash_deadline(
+        &self,
+        id: &str,
+        exit_code: Option<i32>,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::settle_background_bash_deadline(self, id, exit_code)
+            .await
+            .map_err(task_err_to_registry_err)
+    }
+
     async fn settle_background_bash(
         &self,
         id: &str,
@@ -1243,16 +1617,6 @@ impl TaskRegistryHandle for TaskRegistry {
         TaskRegistry::mark_notified(self, id)
             .await
             .map_err(task_err_to_registry_err)
-    }
-
-    async fn mark_rested(
-        &self,
-        id: &str,
-        result: Option<String>,
-        usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
-    ) {
-        // Dispatch to the inherent arm-rest path (no-op for unknown/terminal).
-        TaskRegistry::mark_task_rested(self, id, result, usage, None, None, None).await;
     }
 
     async fn take_pending_task_notifications(
@@ -1280,10 +1644,10 @@ impl TaskRegistryHandle for TaskRegistry {
         for state in TaskRegistry::list(self).await {
             match state {
                 TaskState::LocalAgent(agent) if agent.agent_id == agent_id => {
-                    return agent.is_parked
+                    return agent.is_parked;
                 }
                 TaskState::InProcessTeammate(agent) if agent.agent_id == agent_id => {
-                    return agent.is_idle
+                    return agent.is_idle;
                 }
                 _ => {}
             }
@@ -1659,6 +2023,12 @@ mod tests {
                 creator_agent_id: None,
             };
             let state = TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+                handback: None,
+                handback_history: Vec::new(),
+
+                agent_spawn_provenance: Default::default(),
+                agent_list_lifecycle: Default::default(),
+                spawned_description: None,
                 is_parked: false,
                 is_observer: false,
                 observed_agent_id: None,
@@ -1787,6 +2157,7 @@ mod tests {
                 command: "cargo build".into(),
                 pid: None,
                 exit_code: None,
+                stop_cause: None,
                 cwd: None,
                 is_backgrounded: None,
             }))
@@ -1897,6 +2268,7 @@ mod tests {
                 command: "echo visible".into(),
                 pid: None,
                 exit_code: None,
+                stop_cause: None,
                 cwd: None,
                 is_backgrounded: None,
             }))
@@ -1952,6 +2324,7 @@ mod tests {
             command: "cargo build --release".into(),
             pid: None,
             exit_code: None,
+            stop_cause: None,
             cwd: None,
             is_backgrounded: None,
         });
@@ -1992,6 +2365,12 @@ mod tests {
             creator_agent_id: None,
         };
         let state = TaskState::LocalAgent(crate::state::LocalAgentTaskState {
+            handback: None,
+            handback_history: Vec::new(),
+
+            agent_spawn_provenance: Default::default(),
+            agent_list_lifecycle: Default::default(),
+            spawned_description: None,
             is_parked: false,
             is_observer: false,
             observed_agent_id: None,

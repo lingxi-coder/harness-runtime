@@ -5,7 +5,9 @@
 //! covers handler status sinks and early-return paths without polling races.
 use crate::state::TaskState;
 use serde_json::{json, Map, Value};
+use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::ops::{Deref, DerefMut};
 use std::sync::Mutex;
 use tokio::sync::{mpsc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -13,6 +15,9 @@ use tokio::sync::{mpsc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[derive(Default)]
 pub(crate) struct TaskRows {
     rows: RwLock<HashMap<String, TaskState>>,
+    /// JavaScript object property order is observable by `$.agent.list`'s
+    /// duplicate reducer. Keep insertion order separately from the hash table.
+    order: Mutex<Vec<String>>,
     subscribers: Mutex<Vec<mpsc::UnboundedSender<Value>>>,
 }
 
@@ -167,6 +172,18 @@ impl TaskRows {
         self.rows.read().await
     }
 
+    pub(crate) async fn ordered_states(&self) -> Vec<TaskState> {
+        let rows = self.rows.read().await;
+        let order = self
+            .order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        order
+            .iter()
+            .filter_map(|id| rows.get(id).cloned())
+            .collect()
+    }
+
     pub(crate) async fn write(&self) -> TaskWriteGuard<'_> {
         let rows = self.rows.write().await;
         let listening = self
@@ -184,6 +201,7 @@ impl TaskRows {
         });
         TaskWriteGuard {
             rows,
+            order: &self.order,
             before,
             subscribers: &self.subscribers,
         }
@@ -192,6 +210,7 @@ impl TaskRows {
 
 pub(crate) struct TaskWriteGuard<'a> {
     rows: RwLockWriteGuard<'a, HashMap<String, TaskState>>,
+    order: &'a Mutex<Vec<String>>,
     before: Option<HashMap<String, Projection>>,
     subscribers: &'a Mutex<Vec<mpsc::UnboundedSender<Value>>>,
 }
@@ -207,6 +226,53 @@ impl DerefMut for TaskWriteGuard<'_> {
     }
 }
 impl TaskWriteGuard<'_> {
+    /// Insert a task row while preserving first-insertion order. Replacing an
+    /// existing key does not move its property, matching a JavaScript object.
+    pub(crate) fn insert<I>(&mut self, id: I, state: TaskState) -> Option<TaskState>
+    where
+        I: Into<String>,
+    {
+        let id = id.into();
+        let existed = self.rows.contains_key(&id);
+        let previous = self.rows.insert(id.clone(), state);
+        if !existed {
+            self.order
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(id);
+        }
+        previous
+    }
+
+    /// Remove the row and its order entry. A later insert of this ID is a new
+    /// property and therefore appears at the end of the registry snapshot.
+    pub(crate) fn remove<Q>(&mut self, id: &Q) -> Option<TaskState>
+    where
+        String: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let removed = self.rows.remove(id);
+        if removed.is_some() {
+            self.order
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|candidate| candidate.borrow() != id);
+        }
+        removed
+    }
+
+    /// Retain rows while pruning the matching ordered-key ledger.
+    pub(crate) fn retain<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&String, &mut TaskState) -> bool,
+    {
+        self.rows.retain(|id, state| keep(id, state));
+        self.order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|id| self.rows.contains_key(id));
+    }
+
     /// Emit a logical mutation boundary while retaining the row lock. This is
     /// used when a shell's start and already-received exit publish atomically.
     pub(crate) fn checkpoint(&mut self) {

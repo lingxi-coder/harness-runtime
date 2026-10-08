@@ -21,9 +21,9 @@
 //! typed error so unit tests can assert on the failure mode.
 
 use crate::definition::{
-    parse_effort_value, parse_int_radix10, AgentCacheTtl, AgentDefinition, AgentEffort,
-    AgentIsolation, AgentMcpServerSpec, AgentModel, AgentPermissionMode, AgentSource,
-    AgentToolPolicy, ObserverSpec, EFFORT_LEVELS,
+    AgentCacheTtl, AgentDefinition, AgentEffort, AgentIsolation, AgentMcpServerSpec, AgentModel,
+    AgentPermissionMode, AgentSource, AgentToolPolicy, EFFORT_LEVELS, ObserverSpec,
+    parse_effort_value, parse_int_radix10,
 };
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -118,6 +118,8 @@ struct Frontmatter {
     max_turns: Option<serde_yaml::Value>,
     #[serde(default)]
     background: Option<serde_yaml::Value>,
+    #[serde(default, rename = "omitInstructions")]
+    omit_instructions: Option<serde_yaml::Value>,
     #[serde(default)]
     memory: Option<serde_yaml::Value>,
     #[serde(default)]
@@ -334,8 +336,7 @@ pub fn parse_agent_markdown(
     // (6) memory: validate against VALID_MEMORY_SCOPES; invalid -> log + None.
     let memory = parse_memory(fm.memory.as_ref(), path_for_error);
 
-    // (7) isolation: valid set is ['worktree'] (3P) / ['worktree','remote']
-    // (ant); invalid -> log + None.
+    // (7) isolation preference. The host checks execution capabilities.
     let isolation = parse_isolation(fm.isolation.as_ref(), path_for_error);
 
     // (8) effort: parse_effort_value; raw present but None -> log invalid.
@@ -450,7 +451,16 @@ pub fn parse_agent_markdown(
         initial_prompt,
         color,
         observer,
+        omit_instructions: matches!(
+            fm.omit_instructions.as_ref(),
+            Some(serde_yaml::Value::Bool(true))
+        ) || fm
+            .omit_instructions
+            .as_ref()
+            .and_then(serde_yaml::Value::as_str)
+            == Some("true"),
         cache_ttl: parse_cache_ttl_yaml(fm.experimental.as_ref()),
+        offer_provider: None,
     })
 }
 
@@ -725,18 +735,16 @@ fn parse_memory(
     }
 }
 
-/// claude isolation coercion: valid set ['worktree'] (3P) / ['worktree','remote']
-/// (ant); invalid -> log.
+/// Parse the isolation preference; execution capability is checked by the host.
 fn parse_isolation(value: Option<&serde_yaml::Value>, path: &Path) -> Option<AgentIsolation> {
     let Some(raw) = value.and_then(yaml_as_string) else {
         return None;
     };
-    let ant = std::env::var("USER_TYPE").as_deref() == Ok("ant");
     match raw.as_str() {
         "worktree" => Some(AgentIsolation::Worktree),
-        "remote" if ant => Some(AgentIsolation::Remote),
+        "remote" => Some(AgentIsolation::Remote),
         _ => {
-            let valid = if ant { "worktree, remote" } else { "worktree" };
+            let valid = "worktree, remote";
             tracing::debug!(
                 path = %path.display(),
                 "Agent file has invalid isolation value. Valid options: {valid}"
@@ -1108,6 +1116,12 @@ pub fn parse_agent_from_json(
         }
     };
 
+    let omit_instructions = match obj.get("omitInstructions") {
+        None => false,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => return None,
+    };
+
     // isolation: `z.enum(['worktree','remote'])`. Availability of the remote
     // runner is checked later; the public JSON schema accepts both values.
     let isolation = match obj.get("isolation") {
@@ -1209,7 +1223,9 @@ pub fn parse_agent_from_json(
         initial_prompt,
         color: None,
         observer,
+        omit_instructions,
         cache_ttl: parse_cache_ttl_json(obj.get("experimental")),
+        offer_provider: None,
     })
 }
 
@@ -1397,6 +1413,15 @@ fn validate_flag_agent_schema(name: &str, definition: &serde_json::Value) -> Res
         }
     }
 
+    if let Some(value) = obj.get("omitInstructions") {
+        if !value.is_boolean() {
+            return Err(invalid_json_type(
+                &format!("{name}.omitInstructions"),
+                "boolean",
+                Some(value),
+            ));
+        }
+    }
     if let Some(value) = obj.get("background") {
         if !value.is_boolean() {
             return Err(invalid_json_type(
@@ -1501,22 +1526,6 @@ pub fn parse_agents_from_flag_json_checked(raw: &str) -> Result<Vec<AgentDefinit
         out.push(parsed);
     }
     Ok(out)
-}
-
-/// Parse the `--agents <json>` CLI flag payload.
-///
-/// The checked variant owns the 2.1.246 fatal error payload. This compatibility
-/// wrapper remains for non-CLI composition roots and logs before returning an
-/// empty catalog; the CLI calls the checked variant and exits before build.
-#[must_use]
-pub fn parse_agents_from_flag_json(raw: &str) -> Vec<AgentDefinition> {
-    match parse_agents_from_flag_json_checked(raw) {
-        Ok(agents) => agents,
-        Err(error) => {
-            tracing::error!("Invalid --agents configuration: {error}");
-            Vec::new()
-        }
-    }
 }
 
 /// Read a JSON value as a string only when it is a JSON string.
@@ -2825,18 +2834,15 @@ mod tests {
     }
 
     #[test]
-    fn isolation_worktree_and_remote_rejected_on_non_ant() {
-        // NOTE: relies on USER_TYPE != "ant" in the test env.
+    fn isolation_accepts_worktree_and_remote() {
         assert_eq!(
             md("---\nname: a\ndescription: d\nisolation: worktree\n---\n").isolation,
             Some(AgentIsolation::Worktree)
         );
-        if std::env::var("USER_TYPE").as_deref() != Ok("ant") {
-            assert_eq!(
-                md("---\nname: a\ndescription: d\nisolation: remote\n---\n").isolation,
-                None
-            );
-        }
+        assert_eq!(
+            md("---\nname: a\ndescription: d\nisolation: remote\n---\n").isolation,
+            Some(AgentIsolation::Remote)
+        );
     }
 
     #[test]
@@ -2853,6 +2859,26 @@ mod tests {
             md("---\nname: a\ndescription: d\neffort: bogus\n---\n").effort,
             None
         );
+    }
+
+    #[test]
+    fn generic_effort_levels_parse_in_markdown_and_json() {
+        for level in ["none", "minimal"] {
+            assert_eq!(
+                md(&format!(
+                    "---\nname: a\ndescription: d\neffort: {level}\n---\n"
+                ))
+                .effort,
+                Some(AgentEffort::Level(level.into()))
+            );
+            let json =
+                serde_json::json!({"a": {"description": "d", "prompt": "p", "effort": level}})
+                    .to_string();
+            assert_eq!(
+                parse_agents_from_flag_json_checked(&json).unwrap()[0].effort,
+                Some(AgentEffort::Level(level.into()))
+            );
+        }
     }
 
     #[test]
@@ -3269,7 +3295,7 @@ mod tests {
         // The binary's own help example.
         let raw =
             r#"{"reviewer": {"description": "Reviews code", "prompt": "You are a code reviewer"}}"#;
-        let out = parse_agents_from_flag_json(raw);
+        let out = parse_agents_from_flag_json_checked(raw).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].agent_type, "reviewer");
         assert_eq!(out[0].when_to_use, "Reviews code");
@@ -3281,16 +3307,16 @@ mod tests {
     }
 
     #[test]
-    fn flag_json_syntax_error_yields_no_agents() {
-        // `Ba(r)` throws → `De(g)` (logged), no agents, no abort.
-        assert!(parse_agents_from_flag_json("{not json").is_empty());
+    fn flag_json_syntax_error_is_rejected() {
+        // Syntax failures must reach the caller before runtime construction.
+        assert!(parse_agents_from_flag_json_checked("{not json").is_err());
     }
 
     #[test]
-    fn flag_json_non_object_yields_no_agents() {
+    fn flag_json_non_object_is_rejected() {
         // `DBm()` is a record schema — arrays/scalars fail the record parse.
-        assert!(parse_agents_from_flag_json("[1,2]").is_empty());
-        assert!(parse_agents_from_flag_json("\"x\"").is_empty());
+        assert!(parse_agents_from_flag_json_checked("[1,2]").is_err());
+        assert!(parse_agents_from_flag_json_checked("\"x\"").is_err());
     }
 
     #[test]
@@ -3299,7 +3325,7 @@ mod tests {
         // filtering of `parseAgentsFromJson`): `good` is dropped too.
         let raw = r#"{"good": {"description": "d", "prompt": "p"},
                       "bad": {"description": "", "prompt": "p"}}"#;
-        assert!(parse_agents_from_flag_json(raw).is_empty());
+        assert!(parse_agents_from_flag_json_checked(raw).is_err());
     }
 
     #[test]
@@ -3310,7 +3336,7 @@ mod tests {
             parse_agents_from_flag_json_checked(raw).unwrap_err(),
             "-bad: agent names must not start with '-'"
         );
-        assert!(parse_agents_from_flag_json(raw).is_empty());
+        assert!(parse_agents_from_flag_json_checked(raw).is_err());
     }
 
     #[test]
@@ -3368,6 +3394,57 @@ mod tests {
             let parsed = parse_agents_from_flag_json_checked(raw).unwrap();
             assert_eq!(parsed.len(), 1);
             assert!(parsed[0].observer.is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod omit_instruction_tests {
+    use super::*;
+
+    #[test]
+    fn omit_yaml_literal_and_string_true_are_accepted_for_files_and_plugins() {
+        for source in [
+            AgentSource::Plugin,
+            AgentSource::Settings(lingxi_core::types::SettingsScope::Project),
+        ] {
+            for (raw, expected) in [
+                ("true", true),
+                ("'true'", true),
+                ("false", false),
+                ("'TRUE'", false),
+                ("1", false),
+            ] {
+                let definition = parse_agent_markdown(
+                    &format!(
+                        "---\nname: worker\ndescription: task\nomitInstructions: {raw}\n---\nprompt"
+                    ),
+                    source,
+                    "/tmp".into(),
+                    Path::new("/tmp/worker.md"),
+                )
+                .unwrap();
+                assert_eq!(definition.omit_instructions, expected, "{raw}");
+            }
+        }
+    }
+
+    #[test]
+    fn omit_json_is_strictly_boolean() {
+        for value in [serde_json::json!(true), serde_json::json!(false)] {
+            let raw = serde_json::json!({"worker":{"description":"task","prompt":"prompt","omitInstructions":value}}).to_string();
+            assert_eq!(
+                parse_agents_from_flag_json_checked(&raw).unwrap()[0].omit_instructions,
+                value.as_bool().unwrap()
+            );
+        }
+        for value in [
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::Value::Null,
+        ] {
+            let raw = serde_json::json!({"worker":{"description":"task","prompt":"prompt","omitInstructions":value}}).to_string();
+            assert!(parse_agents_from_flag_json_checked(&raw).is_err());
         }
     }
 }

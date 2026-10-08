@@ -1,5 +1,5 @@
 //! M4-05 parity driver — asserts every locked literal from
-//! `parity/fixtures/agent_task_tools.json` appears byte-for-byte in
+//! `parity/fixtures/agent_task_tools.json`, excluding removed Agent aliases, appears in
 //! production source (constants, telemetry NAMES array, task-id regex).
 
 #![allow(clippy::unwrap_used)]
@@ -10,7 +10,6 @@ use test_harness::parity::load_fixture;
 #[derive(Deserialize)]
 struct ToolNames {
     agent: String,
-    agent_legacy_alias: String,
     send_message: String,
     task_create: String,
     task_get: String,
@@ -24,8 +23,6 @@ struct ToolNames {
 struct ConstantsLock {
     #[serde(rename = "AGENT_TOOL_NAME")]
     agent_tool_name: String,
-    #[serde(rename = "LEGACY_AGENT_TOOL_NAME")]
-    legacy_agent_tool_name: String,
     #[serde(rename = "SEND_MESSAGE_TOOL_NAME")]
     send_message_tool_name: String,
     #[serde(rename = "SEND_MESSAGE_CLAIM_WINDOW_RUST")]
@@ -56,10 +53,6 @@ fn fx() -> Fixture {
 fn agent_task_tool_names_match_production_constants() {
     let f = fx();
     assert_eq!(f.tool_names.agent, tool_agent::agent::AGENT_TOOL_NAME);
-    assert_eq!(
-        f.tool_names.agent_legacy_alias,
-        tool_agent::agent::LEGACY_AGENT_TOOL_NAME
-    );
     assert_eq!(
         f.tool_names.send_message,
         tool_ui::send_message::SEND_MESSAGE_TOOL_NAME
@@ -179,10 +172,6 @@ fn constants_lock_block_matches_production() {
     assert_eq!(
         f.constants_lock.agent_tool_name,
         tool_agent::agent::AGENT_TOOL_NAME
-    );
-    assert_eq!(
-        f.constants_lock.legacy_agent_tool_name,
-        tool_agent::agent::LEGACY_AGENT_TOOL_NAME
     );
     assert_eq!(
         f.constants_lock.send_message_tool_name,

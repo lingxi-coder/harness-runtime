@@ -11,6 +11,7 @@ use crate::shell_expansion::{
     execute_shell_commands_in_prompt, ShellExpansionCtx, ShellExpansionProvider, ShellOut,
     ShellPermissionDecision, ShellPermissionGate, ShellRunError, ShellRunner,
 };
+use crate::ModCommandRunContext;
 use async_trait::async_trait;
 use hooks::events::{HookEvent, PromptExpansionType};
 use hooks::registry::HookContext;
@@ -22,6 +23,14 @@ use serde_json::{Map, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// Selected model identity supplied by the owning session for bundled prompts.
+pub type BundledPromptModelProvider = Arc<
+    dyn Fn() -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send>,
+        > + Send
+        + Sync,
+>;
 
 /// Supplies the per-dispatch [`HookContext`] (session id, cwd, transcript path,
 /// permission mode) for the `UserPromptExpansion` hook. The dispatcher does not
@@ -70,6 +79,22 @@ pub type McpPromptResolver = Arc<
 pub type SkillInvocationObserver = Arc<
     dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
 >;
+
+/// Host bridge that runs `command.run` middleware around a resolved ordinary
+/// command. The supplied dispatcher exposes the core path so a hook's `next`
+/// can execute rewritten arguments without recursively entering the same chain.
+#[async_trait]
+pub trait ModCommandRunInterceptor: Send + Sync {
+    /// Dispatch a resolved command through Mods, preserving the core result's
+    /// prompt and side effects when a hook calls `next`.
+    async fn run(
+        &self,
+        dispatcher: &RegistrySlashDispatcher,
+        command: &str,
+        args: &str,
+        context: ModCommandRunContext,
+    ) -> SlashDispatchResult;
+}
 
 /// The `UserPromptExpansion` firing dependencies threaded into a
 /// [`RegistrySlashDispatcher`]: the engine's hook executor plus the
@@ -138,6 +163,7 @@ impl ShellPermissionGate for DenyShellPermissionGate {
 /// runtime. Dispatching only takes a read lock.
 pub struct RegistrySlashDispatcher {
     registry: Arc<RwLock<CommandRegistry>>,
+    mod_command_interceptor: Option<Arc<dyn ModCommandRunInterceptor>>,
     /// `UserPromptExpansion` firing deps (#39). `None` keeps the dispatcher a
     /// strict no-op for that event — the default for every existing caller and
     /// for hosts without a hook-capable engine. Wired by the composition root
@@ -171,6 +197,7 @@ pub struct RegistrySlashDispatcher {
     /// the default stays display-only for existing embedded/mobile callers.
     injected_messages_as_turns: bool,
     prompt_paths: Option<Arc<dyn Fn() -> (PathBuf, PathBuf) + Send + Sync>>,
+    bundled_prompt_model: Option<BundledPromptModelProvider>,
     /// Permission gate that receives each input's frontmatter
     /// `disallowed-tools` (claude-code `Tbt(setToolPermissionContext, …)`).
     /// `None` — every existing caller — leaves the field inert, so a host that
@@ -217,6 +244,7 @@ impl RegistrySlashDispatcher {
     pub fn new(registry: Arc<RwLock<CommandRegistry>>) -> Self {
         Self {
             registry,
+            mod_command_interceptor: None,
             expansion_hooks: None,
             shell_expansion: None,
             skill_usage_home: None,
@@ -225,8 +253,19 @@ impl RegistrySlashDispatcher {
             skill_invocation_observer: None,
             injected_messages_as_turns: false,
             prompt_paths: None,
+            bundled_prompt_model: None,
             permission_gate: None,
         }
+    }
+
+    /// Intercept ordinary slash commands at the command-run boundary.
+    #[must_use]
+    pub fn with_mod_command_interceptor(
+        mut self,
+        interceptor: Arc<dyn ModCommandRunInterceptor>,
+    ) -> Self {
+        self.mod_command_interceptor = Some(interceptor);
+        self
     }
 
     /// Supply the session project root and live cwd for checked bundled expansion.
@@ -236,6 +275,13 @@ impl RegistrySlashDispatcher {
         paths: Arc<dyn Fn() -> (PathBuf, PathBuf) + Send + Sync>,
     ) -> Self {
         self.prompt_paths = Some(paths);
+        self
+    }
+
+    /// Supply the live selected model; an absent provider means absent model context.
+    #[must_use]
+    pub fn with_bundled_prompt_model(mut self, provider: BundledPromptModelProvider) -> Self {
+        self.bundled_prompt_model = Some(provider);
         self
     }
 
@@ -375,6 +421,7 @@ impl RegistrySlashDispatcher {
     pub fn clone_shared(&self) -> Self {
         Self {
             registry: self.registry.clone(),
+            mod_command_interceptor: self.mod_command_interceptor.clone(),
             // The `UserPromptExpansion` wiring (executor + context provider) is
             // cheap to clone (two `Arc`s) and must travel with the shared
             // dispatcher so every consumer fires the event identically.
@@ -392,6 +439,7 @@ impl RegistrySlashDispatcher {
             skill_invocation_observer: self.skill_invocation_observer.clone(),
             injected_messages_as_turns: self.injected_messages_as_turns,
             prompt_paths: self.prompt_paths.clone(),
+            bundled_prompt_model: self.bundled_prompt_model.clone(),
             // The gate must travel too: a shared dispatcher that did not clear
             // the command denies would leave the previous skill's restrictions
             // standing for every input routed through the clone.
@@ -442,20 +490,10 @@ impl RegistrySlashDispatcher {
     }
 }
 
-#[async_trait]
-impl SlashCommandDispatcher for RegistrySlashDispatcher {
-    async fn dispatch(&self, raw: &str) -> SlashDispatchResult {
-        // 0. `Tbt(setToolPermissionContext, result.disallowedTools ?? [])` —
-        //    REPLACE, once per processed user input. Resolved BEFORE the
-        //    early-outs below so a plain prompt, an unknown name, or a builtin
-        //    all clear the previous command's denies; that clearing is what
-        //    gives a skill's `disallowed-tools` its "until the next user
-        //    message" lifetime.
-        if let Some(gate) = self.permission_gate.as_ref() {
-            let denies = self.command_input_denies(raw).await;
-            gate.set_command_input_denies(&denies, false);
-        }
-
+impl RegistrySlashDispatcher {
+    /// Execute an already-admitted slash command without firing Mod middleware.
+    /// A `command.run` core callback uses this to prevent recursive dispatch.
+    pub async fn dispatch_without_mod_hooks(&self, raw: &str) -> SlashDispatchResult {
         // 1. Detect slash prefix.
         if !raw.starts_with('/') {
             return SlashDispatchResult::NotASlashCommand;
@@ -530,15 +568,37 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
                         },
                         |paths| paths(),
                     );
-                    let content =
-                        match pf.try_build_at(&parsed.raw_args, &project_root, &cwd, false) {
-                            Ok(content) => content,
+                    let model = match self
+                        .bundled_prompt_model
+                        .as_ref()
+                        .filter(|_| pf.needs_model_context())
+                    {
+                        Some(provider) => match provider().await {
+                            Ok(model) => model,
                             Err(error) => {
                                 return SlashDispatchResult::Handled {
                                     display: format!("{} expansion failed: {error}", command.name),
                                 }
                             }
-                        };
+                        },
+                        None => None,
+                    };
+                    let content = match pf.try_build_at(
+                        &parsed.raw_args,
+                        crate::BundledPromptContext {
+                            project_root: &project_root,
+                            cwd: &cwd,
+                            is_preload: false,
+                            main_loop_model: model.as_deref(),
+                        },
+                    ) {
+                        Ok(content) => content,
+                        Err(error) => {
+                            return SlashDispatchResult::Handled {
+                                display: format!("{} expansion failed: {error}", command.name),
+                            }
+                        }
+                    };
                     self.observe_skill_invocation(&command.name).await;
                     self.fire_user_prompt_expansion(
                         &command.name,
@@ -779,6 +839,43 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
     }
 }
 
+#[async_trait]
+impl SlashCommandDispatcher for RegistrySlashDispatcher {
+    async fn dispatch(&self, raw: &str) -> SlashDispatchResult {
+        // Clear or replace this input's command-scoped tool restrictions even
+        // when a Mod answers without calling the core command.
+        if let Some(gate) = self.permission_gate.as_ref() {
+            let denies = self.command_input_denies(raw).await;
+            gate.set_command_input_denies(&denies, false);
+        }
+        if let (Some(interceptor), Some(parsed)) = (
+            self.mod_command_interceptor.as_ref(),
+            parse_slash_command(raw),
+        ) {
+            let resolved = {
+                let registry = self.registry.read().await;
+                registry.resolve(&parsed.name).and_then(|command| {
+                    let disabled = matches!(command.kind, SlashCommandKind::Builtin { .. })
+                        && crate::builtin_support::names::is_command_env_disabled(&command.name);
+                    (!disabled && registry.mod_owner_of(&command.name).is_none())
+                        .then(|| command.name.clone())
+                })
+            };
+            if let Some(command) = resolved {
+                return interceptor
+                    .run(
+                        self,
+                        &command,
+                        &parsed.raw_args,
+                        crate::mod_catalog::current_command_context(),
+                    )
+                    .await;
+            }
+        }
+        self.dispatch_without_mod_hooks(raw).await
+    }
+}
+
 fn bind_mcp_prompt_arguments(
     declarations: &[lingxi_core::host::McpPromptArgumentDto],
     positional: &[String],
@@ -939,6 +1036,54 @@ mod tests {
         }
         reg.register_alias("continue".to_string(), "resume".to_string());
         RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
+    }
+
+    #[cfg(feature = "builtin-handlers")]
+    #[tokio::test]
+    async fn stateless_bundled_prompt_does_not_require_a_model_route() {
+        let mut registry = CommandRegistry::new();
+        crate::builtins::register_bundled_skills(&mut registry, true);
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)))
+            .with_bundled_prompt_model(Arc::new(|| {
+                Box::pin(async { Err("model route is unavailable".into()) })
+            }));
+        assert!(matches!(dispatcher.dispatch("/dataviz revenue").await,
+            SlashDispatchResult::RunAsTurn { prompt } if prompt.contains("revenue")));
+        assert!(matches!(dispatcher.dispatch("/loop check").await,
+            SlashDispatchResult::Handled { display } if display == "loop expansion failed: model route is unavailable"));
+    }
+
+    #[cfg(feature = "builtin-handlers")]
+    #[tokio::test]
+    async fn bundled_loop_reads_live_model_and_shared_clone_keeps_it() {
+        let _guard = crate::builtins::bundled::loop_skill::LOOP_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let model = Arc::new(RwLock::new("claude-fable-5".to_string()));
+        let mut registry = CommandRegistry::new();
+        crate::builtins::register_bundled_skills(&mut registry, true);
+        let provider_model = model.clone();
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)))
+            .with_bundled_prompt_model(Arc::new(move || {
+                let model = provider_model.clone();
+                Box::pin(async move { Ok(Some(model.read().await.clone())) })
+            }));
+        let get_prompt = |result| match result {
+            SlashDispatchResult::RunAsTurn { prompt } => prompt,
+            other => panic!("expected model turn, got {other:?}"),
+        };
+        let first = get_prompt(dispatcher.dispatch("/loop check the deploy").await);
+        assert!(first.contains("3. **Briefly confirm**"));
+        assert!(first.contains("immediately BEFORE calling ScheduleWakeup"));
+        *model.write().await = "claude-sonnet-5-5".into();
+        let second = get_prompt(
+            dispatcher
+                .clone_shared()
+                .dispatch("/loop check the deploy")
+                .await,
+        );
+        assert!(second.contains("3. **Decide whether the loop continues.**"));
+        assert!(second.contains("4. **After the wakeup is armed, briefly confirm**"));
     }
 
     #[tokio::test]
@@ -2026,10 +2171,11 @@ mod tests {
             fn try_build_at(
                 &self,
                 args: &str,
-                root: &std::path::Path,
-                cwd: &std::path::Path,
-                preload: bool,
+                context: crate::BundledPromptContext<'_>,
             ) -> std::io::Result<String> {
+                let root = context.project_root;
+                let cwd = context.cwd;
+                let preload = context.is_preload;
                 assert_eq!(args, "task");
                 assert_eq!(root, std::path::Path::new("/project"));
                 assert_eq!(cwd, std::path::Path::new("/project/subdir"));

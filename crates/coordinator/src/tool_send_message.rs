@@ -606,7 +606,9 @@ impl SendMessageTool {
             || (ctx.agent_id.is_none() && ctx.agent_name.is_none());
         if !is_lead {
             let action = if approve { "approve" } else { "reject" };
-            return Err(ToolError::InvalidInput(format!("Only the team lead can {action} plans. Teammates cannot {action} their own or other plans.")));
+            return Err(ToolError::InvalidInput(format!(
+                "Only the team lead can {action} plans. Teammates cannot {action} their own or other plans."
+            )));
         }
         let to_id = self.resolve_recipient(addr).await?;
         let mode = self
@@ -1115,6 +1117,7 @@ mod tests {
 
     fn fresh_ctx() -> ToolUseContext {
         ToolUseContext {
+            agent_spawn_provenance: Default::default(),
             options: ToolUseOptions {
                 debug: false,
                 verbose: false,
@@ -1129,13 +1132,19 @@ mod tests {
             messages: vec![],
             tool_use_id: None,
             assistant_message_id: None,
+            assistant_message: None,
+            same_turn_tool_uses: Vec::new(),
             agent_id: None,
+            nested_memory_triggers: std::sync::Arc::default(),
             agent_name: None,
             observer: None,
             observer_pairings: None,
             team_name: None,
             origin_session_id: None,
+            instruction_context: None,
             tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
+            trusted_effective_permission_mode: None,
+            classifier_only_review: None,
             content_replacement_state: None,
             session: None,
             subagent_registry: None,
@@ -1305,7 +1314,8 @@ mod tests {
         assert_eq!(delivered[0].content, "x".repeat(100));
         let expected = format!(
             "{{\"success\":true,\"message\":\"Message sent to scout's inbox\",\"msg_id\":{},\"routing\":{{\"sender\":\"team-lead\",\"target\":\"@scout\",\"summary\":\"inspect results\",\"content\":\"{}…\"}}}}",
-            json!(delivered[0].message_id), "x".repeat(49)
+            json!(delivered[0].message_id),
+            "x".repeat(49)
         );
         assert_eq!(result.model_content.as_deref(), Some(expected.as_str()));
         assert_eq!(result.data.to_string(), expected);
@@ -1953,6 +1963,7 @@ mod tests {
                         name: "team-lead".into(),
                         agent_type: None,
                         model: None,
+                        model_profile: None,
                         joined_at: 0,
                         tmux_pane_id: String::new(),
                         cwd: String::new(),
@@ -1963,6 +1974,7 @@ mod tests {
                         name: "nova".into(),
                         agent_type: None,
                         model: None,
+                        model_profile: None,
                         joined_at: 0,
                         tmux_pane_id: String::new(),
                         cwd: String::new(),
@@ -2214,7 +2226,12 @@ mod tests {
         let tool = SendMessageTool::new(registry, preview_ascii);
         for (approve, action) in [(true, "approve"), (false, "reject")] {
             let error = tool.call(json!({"to":"planner","message":{"type":"plan_approval_response","request_id":"plan-1@planner","approve":approve}}), ctx_as(worker), fresh_tx()).await.unwrap_err();
-            assert_eq!(error.model_facing_message(), format!("Only the team lead can {action} plans. Teammates cannot {action} their own or other plans."));
+            assert_eq!(
+                error.model_facing_message(),
+                format!(
+                    "Only the team lead can {action} plans. Teammates cannot {action} their own or other plans."
+                )
+            );
         }
         assert!(mailbox.drain().is_empty());
     }

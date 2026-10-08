@@ -1,0 +1,821 @@
+{
+  "version": "2.1.287",
+  "native_sha256": "6eab8333fe2121553100d8f40bfada384a3e989b94f947e18ba6677a6fcb41ea",
+  "sourceByteRanges": [
+    {
+      "label": "native pure schema dependency",
+      "start": 178308215,
+      "end": 178319857,
+      "sha256": "7937729d686f4b04d732397a99a2b5bc051de27751c50ca2c80a23ec84890644"
+    },
+    {
+      "label": "native pure schema dependency",
+      "start": 178319858,
+      "end": 178410352,
+      "sha256": "bf0b9819eea4ab1b4e8a70ffb924d5f5a1a62c148ea2ebf839429258515b91aa"
+    },
+    {
+      "label": "native pure schema dependency",
+      "start": 178237228,
+      "end": 178238209,
+      "sha256": "91b433ccc5add9cada15ca727fd71e45dc2b3042168625a06d879b12cab45945"
+    },
+    {
+      "label": "var T3=",
+      "start": 185896707,
+      "end": 185896922,
+      "sha256": "3ed02c8126706aad0a531b1a989663e570ae136f5378e428da5d9953ad8cde16"
+    },
+    {
+      "label": "var C3=",
+      "start": 185899162,
+      "end": 185899449,
+      "sha256": "8f488640a6ebd0cc63eb390ebea11147067412e127c5dab157e59e1275764c85"
+    },
+    {
+      "label": "var nor=",
+      "start": 189069255,
+      "end": 189069557,
+      "sha256": "dc6f79788cb08b1e3a7a1e6eb3f9b875d82bd400ce93743e13ba161cf1a85078"
+    },
+    {
+      "label": "function m9e(",
+      "start": 185900042,
+      "end": 185900478,
+      "sha256": "d128307e762ab0c10e578e91d2ec44a38cce5a22a1c9dd8e27e8b9d9716baa82"
+    },
+    {
+      "label": "function hdt(",
+      "start": 189915276,
+      "end": 189915421,
+      "sha256": "bd782b6214184b946e95bf4259761f5b2a146e365cdd3dc910d53ac92e19464d"
+    },
+    {
+      "label": "function a1e(",
+      "start": 189066338,
+      "end": 189066434,
+      "sha256": "ddf8877937039eb89356f1d3873557b22d9c235e6cd4d520b3f04eebe85364ea"
+    },
+    {
+      "label": "function Trr(",
+      "start": 189134052,
+      "end": 189134129,
+      "sha256": "1651bd446b2f345d81b18cd1b90ca28037da651f84b10810a1f467eab2d1d42d"
+    },
+    {
+      "label": "async function m7t(",
+      "start": 189134129,
+      "end": 189135099,
+      "sha256": "b27514ac09ca2e0127a16e804714cf1e22bdbac0748f09c650ff1e4dc0ab73c4"
+    },
+    {
+      "label": "async function O7t(",
+      "start": 189135099,
+      "end": 189135448,
+      "sha256": "cd642f36c1aa5c5b45f403ca126b75e3f9622c0081bb4d5139b2ce955ff498fb"
+    },
+    {
+      "label": "async function tzn(",
+      "start": 186650879,
+      "end": 186651067,
+      "sha256": "9fb38341dfe9bf7b2bd2a77a6aa451594cf31cd1e290352d458f2609566e4ee9"
+    },
+    {
+      "label": "function Ww(",
+      "start": 181980903,
+      "end": 181981012,
+      "sha256": "7b76ff3a2e143625ab33e33e55e8cffec4b03cc9f60337f3a5599c85872adf60"
+    },
+    {
+      "label": "function Re(",
+      "start": 189798003,
+      "end": 189799519,
+      "sha256": "85a35f3b3c712d0af29fe73388237c8e15351ef73c5438a42a67cb453d861f3f"
+    },
+    {
+      "label": "function cl(",
+      "start": 189852870,
+      "end": 189852911,
+      "sha256": "3f88c9d774aa06af8267cd50568dddf07aa3d253b709edf45f34a81a0e19970a"
+    },
+    {
+      "label": "function ya(",
+      "start": 189855437,
+      "end": 189855768,
+      "sha256": "e65d0a0d2cc7c067840b3cd0492402f04703c9f83cc29e21d46cb0507d175e4c"
+    },
+    {
+      "label": "var pD=",
+      "start": 178148543,
+      "end": 178148594,
+      "sha256": "8a39529d1dc7e97d513f350a9802add5ef1d91a937f98b115ad56db767ed4faa"
+    },
+    {
+      "label": "nested_memory:(e)=>",
+      "start": 189874085,
+      "end": 189874188,
+      "sha256": "6be08fb839b803f91e3c301c7f39eeedf93f9145ac9ae5dab96c2a1a924bea5c"
+    }
+  ],
+  "acquisitionOracle": {
+    "path": "instruction_eager_2_1_287.json",
+    "sha256": "6700043c6bcb6537cb8f5b121a0730af97b6df00704ff3a153158259612ec6da"
+  },
+  "scope": "Actual native l1e/O7t/m7t/ai/csn/a1e, pure native schemas, Re/ya/cl/nested_memory rendering and Ww/jE/tzn. Filesystem stats, feature/hook sources, UUID/clock and compact-boundary predicate are controlled. Acquisition is controlled except the three named native-acquired cases chained from the separately hashed actual g7/marked/Bun helper oracle. This is a Node helper oracle, not native CLI or Bun acceptance. Literal paths; explicit worktree topology is absent. Filenames use the permitted LingXi branding difference.",
+  "cases": [
+    {
+      "name": "resume-unchanged-body",
+      "input": {
+        "trigger": "/repo/pkg/code.rs",
+        "readFor": false,
+        "name": "resume-unchanged-body",
+        "history": [
+          {
+            "type": "attachment",
+            "uuid": "fixture-prior",
+            "attachment": {
+              "type": "nested_memory",
+              "path": "/repo/pkg/LINGXI.md",
+              "content": {
+                "path": "/repo/pkg/LINGXI.md",
+                "type": "Project",
+                "content": "  Folder guide\n",
+                "contentDiffersFromDisk": false
+              },
+              "displayPath": "pkg/LINGXI.md"
+            }
+          }
+        ],
+        "files": [
+          {
+            "path": "/repo/pkg/LINGXI.md",
+            "type": "Project",
+            "content": "  Folder guide\n",
+            "contentDiffersFromDisk": false
+          }
+        ]
+      },
+      "expected": {
+        "attachments": [],
+        "rendered": [],
+        "readState": [
+          {
+            "path": "/repo/pkg/LINGXI.md",
+            "entry": {
+              "content": "  Folder guide\n",
+              "timestamp": 77,
+              "isPartialView": false,
+              "seededFromContext": true,
+              "keepContent": true
+            }
+          }
+        ],
+        "hooks": [],
+        "statCalls": [
+          "/repo/pkg/LINGXI.md"
+        ],
+        "errors": [],
+        "nested": [
+          [
+            "/repo/pkg/LINGXI.md",
+            "Folder guide"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "compaction-retained-body",
+      "input": {
+        "trigger": "/repo/pkg/code.rs",
+        "readFor": false,
+        "name": "compaction-retained-body",
+        "history": [
+          {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "uuid": "fixture-boundary"
+          },
+          {
+            "type": "attachment",
+            "uuid": "fixture-prior",
+            "attachment": {
+              "type": "nested_memory",
+              "path": "/repo/pkg/LINGXI.md",
+              "content": {
+                "path": "/repo/pkg/LINGXI.md",
+                "type": "Project",
+                "content": "  Folder guide\n",
+                "contentDiffersFromDisk": false
+              },
+              "displayPath": "pkg/LINGXI.md"
+            }
+          }
+        ],
+        "files": [
+          {
+            "path": "/repo/pkg/LINGXI.md",
+            "type": "Project",
+            "content": "  Folder guide\n",
+            "contentDiffersFromDisk": false
+          }
+        ]
+      },
+      "expected": {
+        "attachments": [],
+        "rendered": [],
+        "readState": [
+          {
+            "path": "/repo/pkg/LINGXI.md",
+            "entry": {
+              "content": "  Folder guide\n",
+              "timestamp": 77,
+              "isPartialView": false,
+              "seededFromContext": true,
+              "keepContent": true
+            }
+          }
+        ],
+        "hooks": [],
+        "statCalls": [
+          "/repo/pkg/LINGXI.md"
+        ],
+        "errors": [],
+        "nested": [
+          [
+            "/repo/pkg/LINGXI.md",
+            "Folder guide"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "compaction-discarded-body",
+      "input": {
+        "trigger": "/repo/pkg/code.rs",
+        "readFor": false,
+        "name": "compaction-discarded-body",
+        "history": [
+          {
+            "type": "attachment",
+            "uuid": "fixture-prior",
+            "attachment": {
+              "type": "nested_memory",
+              "path": "/repo/pkg/LINGXI.md",
+              "content": {
+                "path": "/repo/pkg/LINGXI.md",
+                "type": "Project",
+                "content": "  Folder guide\n",
+                "contentDiffersFromDisk": false
+              },
+              "displayPath": "pkg/LINGXI.md"
+            }
+          },
+          {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "uuid": "fixture-boundary"
+          }
+        ],
+        "files": [
+          {
+            "path": "/repo/pkg/LINGXI.md",
+            "type": "Project",
+            "content": "  Folder guide\n",
+            "contentDiffersFromDisk": false
+          }
+        ]
+      },
+      "expected": {
+        "attachments": [
+          {
+            "type": "nested_memory",
+            "path": "/repo/pkg/LINGXI.md",
+            "content": {
+              "path": "/repo/pkg/LINGXI.md",
+              "type": "Project",
+              "content": "  Folder guide\n",
+              "contentDiffersFromDisk": false
+            },
+            "displayPath": "pkg/LINGXI.md"
+          }
+        ],
+        "rendered": [
+          "<system-reminder>\nContents of /repo/pkg/LINGXI.md:\n\n  Folder guide\n\n</system-reminder>"
+        ],
+        "readState": [
+          {
+            "path": "/repo/pkg/LINGXI.md",
+            "entry": {
+              "content": "  Folder guide\n",
+              "timestamp": 77,
+              "isPartialView": false,
+              "seededFromContext": true,
+              "keepContent": true
+            }
+          }
+        ],
+        "hooks": [
+          {
+            "filename": "/repo/pkg/LINGXI.md",
+            "type": "Project",
+            "reason": "nested_traversal",
+            "extra": {
+              "triggerFilePath": "/repo/pkg/code.rs"
+            }
+          }
+        ],
+        "statCalls": [
+          "/repo/pkg/LINGXI.md"
+        ],
+        "errors": [],
+        "nested": []
+      }
+    },
+    {
+      "name": "resume-changed-body",
+      "input": {
+        "trigger": "/repo/pkg/code.rs",
+        "readFor": false,
+        "name": "resume-changed-body",
+        "history": [
+          {
+            "type": "attachment",
+            "uuid": "fixture-prior",
+            "attachment": {
+              "type": "nested_memory",
+              "path": "/repo/pkg/LINGXI.md",
+              "content": {
+                "path": "/repo/pkg/LINGXI.md",
+                "type": "Project",
+                "content": "  Folder guide\n",
+                "contentDiffersFromDisk": false
+              },
+              "displayPath": "pkg/LINGXI.md"
+            }
+          }
+        ],
+        "files": [
+          {
+            "path": "/repo/pkg/LINGXI.md",
+            "type": "Project",
+            "content": "New folder guide\n",
+            "contentDiffersFromDisk": true,
+            "globs": [
+              "pkg"
+            ],
+            "rawContent": "---\npaths: pkg/**\n---\nNew folder guide\n",
+            "parent": "/repo/LINGXI.md"
+          }
+        ]
+      },
+      "expected": {
+        "attachments": [
+          {
+            "type": "nested_memory",
+            "path": "/repo/pkg/LINGXI.md",
+            "content": {
+              "path": "/repo/pkg/LINGXI.md",
+              "type": "Project",
+              "content": "New folder guide\n",
+              "contentDiffersFromDisk": true,
+              "globs": [
+                "pkg"
+              ],
+              "rawContent": "---\npaths: pkg/**\n---\nNew folder guide\n",
+              "parent": "/repo/LINGXI.md"
+            },
+            "displayPath": "pkg/LINGXI.md"
+          }
+        ],
+        "rendered": [
+          "<system-reminder>\nContents of /repo/pkg/LINGXI.md:\n\nNew folder guide\n\n</system-reminder>"
+        ],
+        "readState": [
+          {
+            "path": "/repo/pkg/LINGXI.md",
+            "entry": {
+              "content": "---\npaths: pkg/**\n---\nNew folder guide\n",
+              "timestamp": 77,
+              "isPartialView": true,
+              "seededFromContext": true,
+              "keepContent": true
+            }
+          }
+        ],
+        "hooks": [
+          {
+            "filename": "/repo/pkg/LINGXI.md",
+            "type": "Project",
+            "reason": "path_glob_match",
+            "extra": {
+              "globs": [
+                "pkg"
+              ],
+              "triggerFilePath": "/repo/pkg/code.rs",
+              "parentFilePath": "/repo/LINGXI.md"
+            }
+          }
+        ],
+        "statCalls": [
+          "/repo/pkg/LINGXI.md"
+        ],
+        "errors": [],
+        "nested": [
+          [
+            "/repo/pkg/LINGXI.md",
+            "Folder guide"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "read-for-unchanged-body",
+      "input": {
+        "trigger": "/repo/pkg/code.rs",
+        "readFor": true,
+        "name": "read-for-unchanged-body",
+        "history": [
+          {
+            "type": "attachment",
+            "uuid": "fixture-prior",
+            "attachment": {
+              "type": "nested_memory",
+              "path": "/repo/pkg/LINGXI.md",
+              "content": {
+                "path": "/repo/pkg/LINGXI.md",
+                "type": "Project",
+                "content": "  Folder guide\n",
+                "contentDiffersFromDisk": false
+              },
+              "displayPath": "pkg/LINGXI.md"
+            }
+          }
+        ],
+        "files": [
+          {
+            "path": "/repo/pkg/LINGXI.md",
+            "type": "Project",
+            "content": "  Folder guide\n",
+            "contentDiffersFromDisk": false
+          }
+        ]
+      },
+      "expected": {
+        "attachments": [],
+        "rendered": [],
+        "readState": [],
+        "hooks": [],
+        "statCalls": [],
+        "errors": [],
+        "nested": [
+          [
+            "/repo/pkg/LINGXI.md",
+            "Folder guide"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "read-for-new-body-batch-dedup",
+      "input": {
+        "trigger": "/repo/pkg/code.rs",
+        "readFor": true,
+        "name": "read-for-new-body-batch-dedup",
+        "history": [],
+        "files": [
+          {
+            "path": "/repo/pkg/LINGXI.md",
+            "type": "Project",
+            "content": "  Folder guide\n",
+            "contentDiffersFromDisk": false
+          },
+          {
+            "path": "/repo/pkg/LINGXI.md",
+            "type": "Project",
+            "content": "  Folder guide\n",
+            "contentDiffersFromDisk": false
+          }
+        ]
+      },
+      "expected": {
+        "attachments": [
+          {
+            "type": "nested_memory",
+            "path": "/repo/pkg/LINGXI.md",
+            "content": {
+              "path": "/repo/pkg/LINGXI.md",
+              "type": "Project",
+              "content": "  Folder guide\n",
+              "contentDiffersFromDisk": false
+            },
+            "displayPath": "/repo/pkg/LINGXI.md"
+          }
+        ],
+        "rendered": [
+          "<system-reminder>\nContents of /repo/pkg/LINGXI.md:\n\n  Folder guide\n\n</system-reminder>"
+        ],
+        "readState": [],
+        "hooks": [
+          {
+            "filename": "/repo/pkg/LINGXI.md",
+            "type": "Project",
+            "reason": "nested_traversal",
+            "extra": {
+              "triggerFilePath": "/repo/pkg/code.rs"
+            }
+          }
+        ],
+        "statCalls": [],
+        "errors": [],
+        "nested": [
+          [
+            "/repo/pkg/LINGXI.md",
+            "Folder guide"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "native-acquired-import-crlf-body-keeps-native-disk-content",
+      "input": {
+        "trigger": "/repo/pkg/code.rs",
+        "readFor": false,
+        "name": "native-acquired-import-crlf-body-keeps-native-disk-content",
+        "history": [],
+        "files": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": " \nparent guidance\n@imported.md\n\t",
+            "contentDiffersFromDisk": false
+          },
+          {
+            "path": "/repo/imported.md",
+            "type": "Project",
+            "content": "\r\n imported guidance \t\n",
+            "contentDiffersFromDisk": false,
+            "parent": "/repo/LINGXI.md"
+          }
+        ],
+        "acquisitionCase": "import-crlf-body-keeps-native-disk-content"
+      },
+      "expected": {
+        "attachments": [
+          {
+            "type": "nested_memory",
+            "path": "/repo/LINGXI.md",
+            "content": {
+              "path": "/repo/LINGXI.md",
+              "type": "Project",
+              "content": " \nparent guidance\n@imported.md\n\t",
+              "contentDiffersFromDisk": false
+            },
+            "displayPath": "LINGXI.md"
+          },
+          {
+            "type": "nested_memory",
+            "path": "/repo/imported.md",
+            "content": {
+              "path": "/repo/imported.md",
+              "type": "Project",
+              "content": "\r\n imported guidance \t\n",
+              "contentDiffersFromDisk": false,
+              "parent": "/repo/LINGXI.md"
+            },
+            "displayPath": "imported.md"
+          }
+        ],
+        "rendered": [
+          "<system-reminder>\nContents of /repo/LINGXI.md:\n\n \nparent guidance\n@imported.md\n\t\n</system-reminder>",
+          "<system-reminder>\nContents of /repo/imported.md:\n\n\r\n imported guidance \t\n\n</system-reminder>"
+        ],
+        "readState": [
+          {
+            "path": "/repo/LINGXI.md",
+            "entry": {
+              "content": " \nparent guidance\n@imported.md\n\t",
+              "timestamp": 77,
+              "isPartialView": false,
+              "seededFromContext": true,
+              "keepContent": true
+            }
+          },
+          {
+            "path": "/repo/imported.md",
+            "entry": {
+              "content": "\n imported guidance \t\n",
+              "timestamp": 77,
+              "isPartialView": false,
+              "seededFromContext": true,
+              "keepContent": true
+            }
+          }
+        ],
+        "hooks": [
+          {
+            "filename": "/repo/LINGXI.md",
+            "type": "Project",
+            "reason": "nested_traversal",
+            "extra": {
+              "triggerFilePath": "/repo/pkg/code.rs"
+            }
+          },
+          {
+            "filename": "/repo/imported.md",
+            "type": "Project",
+            "reason": "include",
+            "extra": {
+              "triggerFilePath": "/repo/pkg/code.rs",
+              "parentFilePath": "/repo/LINGXI.md"
+            }
+          }
+        ],
+        "statCalls": [
+          "/repo/LINGXI.md",
+          "/repo/imported.md"
+        ],
+        "errors": [],
+        "nested": []
+      }
+    },
+    {
+      "name": "native-acquired-import-crlf-comment-body-uses-marked-sanitization",
+      "input": {
+        "trigger": "/repo/pkg/code.rs",
+        "readFor": false,
+        "name": "native-acquired-import-crlf-comment-body-uses-marked-sanitization",
+        "history": [],
+        "files": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": " \nparent guidance\n@imported.md\n\t",
+            "contentDiffersFromDisk": false
+          },
+          {
+            "path": "/repo/imported.md",
+            "type": "Project",
+            "content": "\n imported guidance \t\n",
+            "contentDiffersFromDisk": true,
+            "rawContent": "\r\n<!-- hidden -->\r\n imported guidance \t\n",
+            "parent": "/repo/LINGXI.md"
+          }
+        ],
+        "acquisitionCase": "import-crlf-comment-body-uses-marked-sanitization"
+      },
+      "expected": {
+        "attachments": [
+          {
+            "type": "nested_memory",
+            "path": "/repo/LINGXI.md",
+            "content": {
+              "path": "/repo/LINGXI.md",
+              "type": "Project",
+              "content": " \nparent guidance\n@imported.md\n\t",
+              "contentDiffersFromDisk": false
+            },
+            "displayPath": "LINGXI.md"
+          },
+          {
+            "type": "nested_memory",
+            "path": "/repo/imported.md",
+            "content": {
+              "path": "/repo/imported.md",
+              "type": "Project",
+              "content": "\n imported guidance \t\n",
+              "contentDiffersFromDisk": true,
+              "rawContent": "\r\n<!-- hidden -->\r\n imported guidance \t\n",
+              "parent": "/repo/LINGXI.md"
+            },
+            "displayPath": "imported.md"
+          }
+        ],
+        "rendered": [
+          "<system-reminder>\nContents of /repo/LINGXI.md:\n\n \nparent guidance\n@imported.md\n\t\n</system-reminder>",
+          "<system-reminder>\nContents of /repo/imported.md:\n\n\n imported guidance \t\n\n</system-reminder>"
+        ],
+        "readState": [
+          {
+            "path": "/repo/LINGXI.md",
+            "entry": {
+              "content": " \nparent guidance\n@imported.md\n\t",
+              "timestamp": 77,
+              "isPartialView": false,
+              "seededFromContext": true,
+              "keepContent": true
+            }
+          },
+          {
+            "path": "/repo/imported.md",
+            "entry": {
+              "content": "\r\n<!-- hidden -->\r\n imported guidance \t\n",
+              "timestamp": 77,
+              "isPartialView": true,
+              "seededFromContext": true,
+              "keepContent": true
+            }
+          }
+        ],
+        "hooks": [
+          {
+            "filename": "/repo/LINGXI.md",
+            "type": "Project",
+            "reason": "nested_traversal",
+            "extra": {
+              "triggerFilePath": "/repo/pkg/code.rs"
+            }
+          },
+          {
+            "filename": "/repo/imported.md",
+            "type": "Project",
+            "reason": "include",
+            "extra": {
+              "triggerFilePath": "/repo/pkg/code.rs",
+              "parentFilePath": "/repo/LINGXI.md"
+            }
+          }
+        ],
+        "statCalls": [
+          "/repo/LINGXI.md",
+          "/repo/imported.md"
+        ],
+        "errors": [],
+        "nested": []
+      }
+    },
+    {
+      "name": "native-acquired-path-gated-body-keeps-trailing-newline",
+      "input": {
+        "trigger": "/repo/pkg/code.rs",
+        "readFor": false,
+        "name": "native-acquired-path-gated-body-keeps-trailing-newline",
+        "history": [],
+        "files": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "new src body\n",
+            "globs": [
+              "src"
+            ],
+            "contentDiffersFromDisk": true,
+            "rawContent": "---\npaths: src/**\n---\nnew src body\n"
+          }
+        ],
+        "acquisitionCase": "path-gated-body-keeps-trailing-newline"
+      },
+      "expected": {
+        "attachments": [
+          {
+            "type": "nested_memory",
+            "path": "/repo/LINGXI.md",
+            "content": {
+              "path": "/repo/LINGXI.md",
+              "type": "Project",
+              "content": "new src body\n",
+              "globs": [
+                "src"
+              ],
+              "contentDiffersFromDisk": true,
+              "rawContent": "---\npaths: src/**\n---\nnew src body\n"
+            },
+            "displayPath": "LINGXI.md"
+          }
+        ],
+        "rendered": [
+          "<system-reminder>\nContents of /repo/LINGXI.md:\n\nnew src body\n\n</system-reminder>"
+        ],
+        "readState": [
+          {
+            "path": "/repo/LINGXI.md",
+            "entry": {
+              "content": "---\npaths: src/**\n---\nnew src body\n",
+              "timestamp": 77,
+              "isPartialView": true,
+              "seededFromContext": true,
+              "keepContent": true
+            }
+          }
+        ],
+        "hooks": [
+          {
+            "filename": "/repo/LINGXI.md",
+            "type": "Project",
+            "reason": "path_glob_match",
+            "extra": {
+              "globs": [
+                "src"
+              ],
+              "triggerFilePath": "/repo/pkg/code.rs"
+            }
+          }
+        ],
+        "statCalls": [
+          "/repo/LINGXI.md"
+        ],
+        "errors": [],
+        "nested": []
+      }
+    }
+  ]
+}

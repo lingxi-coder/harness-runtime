@@ -243,11 +243,11 @@ mod tests {
         let loader =
             MobileDiskSkillLoader::for_mode(Arc::new(RwLock::new(registry)), SessionMode::Chat);
         let loaded = loader
-            .resolve_and_load("mobile-personal-context", "general-purpose", None)
+            .resolve_and_load("mobile-personal-context", "general-purpose", None, None)
             .await
             .unwrap()
             .unwrap();
-        let [ContentBlock::Text { text }] = loaded.content.as_slice() else {
+        let [ContentBlock::Text { text, .. }] = loaded.content.as_slice() else {
             panic!("device skill should preload one instruction block");
         };
         assert!(text.contains("## calendar\n"));

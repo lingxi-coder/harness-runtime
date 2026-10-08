@@ -30,6 +30,27 @@ pub const QUERY_SOURCE_REPL_MAIN_THREAD: &str = "repl_main_thread";
 /// Main-query `querySource` for SDK / bridge / transport hosts.
 pub const QUERY_SOURCE_SDK: &str = "sdk";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModRenderSurface {
+    Terminal,
+    Desktop,
+    Mobile,
+    Vscode,
+}
+
+impl ModRenderSurface {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::Desktop => "desktop",
+            Self::Mobile => "mobile",
+            Self::Vscode => "vscode",
+        }
+    }
+}
+
 fn default_query_source() -> String {
     QUERY_SOURCE_REPL_MAIN_THREAD.to_string()
 }
@@ -87,6 +108,11 @@ pub struct OrchestratorConfig {
     /// sends NO system prompt — the model receives only `messages`).
     pub system_prompt_override: Option<String>,
 
+    /// Normal queries announce typed context attachments. Native bare/inline
+    /// callers retain the additional-context prefix by selecting `Inline`.
+    #[serde(default)]
+    pub context_rendering: lingxi_core::host::instructions::InstructionRendering,
+
     /// CLI `--exclude-dynamic-system-prompt-sections`. When `true`, the
     /// per-machine `env_block` (cwd / env info / git status / OS / shell) is
     /// OMITTED from the assembled system prompt and instead emitted in the
@@ -116,6 +142,15 @@ pub struct OrchestratorConfig {
     #[serde(default)]
     pub interactive_session: bool,
 
+    #[serde(default)]
+    pub mod_render_surface: Option<ModRenderSurface>,
+
+    /// Trusted Projects inputs supplied by the session owner. These facts
+    /// include source provenance and must never be accepted from config JSON.
+    /// Missing facts remain unknown until the composition root resolves them.
+    #[serde(skip)]
+    pub mod_projects_consent: hooks::mods::ProjectsConsentFacts,
+
     /// Claude Code 2.1.245 `querySource` for the main query generator.
     ///
     /// CLI TUI / stdio REPL / `--print` → [`QUERY_SOURCE_REPL_MAIN_THREAD`].
@@ -124,6 +159,11 @@ pub struct OrchestratorConfig {
     /// (`repl_main_thread*` + `sdk` + agent/compact/hook auxiliaries).
     #[serde(default = "default_query_source")]
     pub query_source: String,
+
+    /// Native query fork origin. `btw` can emit local fallback notices even
+    /// when its query source is not `side_question`.
+    #[serde(default)]
+    pub fork_origin: Option<String>,
 
     /// Claude Code 2.1.245 `print` (`-p` / `--print`). Distinct from
     /// [`Self::interactive_session`]: an SDK session is non-interactive but
@@ -153,7 +193,7 @@ pub struct OrchestratorConfig {
     /// [`crate::turn_loop::ESCALATED_MAX_TOKENS`] is skipped.
     ///
     /// The override is consumed by the next request through
-    /// `messages_create_with_opts`; a separate recovery latch guarantees a
+    /// `messages_create`; a separate recovery latch guarantees a
     /// single 64k retry per max-token episode before normal continuation
     /// nudges resume.
     #[serde(default)]
@@ -177,38 +217,15 @@ pub struct OrchestratorConfig {
     #[serde(default)]
     pub token_budget: Option<u64>,
 
-    /// Pre-computed `isClaudeAISubscriber()` (`auth.ts:1564-1571`): `true` when
-    /// the active session authenticates via a Claude.ai OAuth token carrying the
-    /// `user:inference` scope (and Anthropic auth is enabled — no overriding env
-    /// API key). Threaded into the fallback-aware api-client seam
-    /// ([`crate::OrchestratorApiClient::messages_create_with_fallback`]) so the
-    /// consecutive-529 Opus-fallback gate
-    /// (`allow_fallback = fallback_for_all || (!is_subscriber && is_non_custom_opus)`)
-    /// and the 429-retry gate (`retry_429_allowed = !is_subscriber || is_enterprise`)
-    /// resolve to the same branch claude-code takes.
-    ///
-    /// `false` (the parity default) is byte-identical to the pre-wiring stub: the
-    /// turn loop passed `is_subscriber = false` until OAuth subscription
-    /// resolution landed. Populated at the composition root
-    /// (`harness_runtime::desktop::build`) via `anthropic_oauth::subscription_from_scopes`.
+    /// Construction-time OAuth subscription snapshot used by the session's
+    /// model UI. Provider retry gates read the service's live subscription slot
+    /// independently of this value.
     #[serde(default)]
     pub is_subscriber: bool,
 
-    /// Pre-computed `isEnterpriseSubscriber()` (`auth.ts:1694`): `true` when the
-    /// resolved subscription tier is Enterprise. Only consulted when
-    /// [`Self::is_subscriber`] is `true`, where it re-enables the 429 retry that
-    /// `is_subscriber` would otherwise suppress (`!is_subscriber || is_enterprise`).
-    ///
-    /// `false` (the parity default) is conservative — and remains the
-    /// seed/fallback only. The former PARITY-GAP here is closed: the profile
-    /// fetch (`anthropic_oauth::fetch_profile_from_oauth_token` +
-    /// `fetch_user_roles`) now runs as a background task in
-    /// `harness_runtime::desktop::build` (llm-runtime future-work batch 4), filling the
-    /// shared `lingxi_core::host::subscription::SharedSubscription` slot, and the
-    /// provider adapter reads that live slot at drive time via
-    /// `effective_subscriber()` (batch 5) — so the 429/enterprise retry gate
-    /// sees the resolved tier even though this static field stays `false` at
-    /// construction.
+    /// Construction-time enterprise-tier snapshot retained in session config.
+    /// Provider execution resolves the live tier from its shared subscription
+    /// slot, rather than accepting subscription flags on a model request.
     #[serde(default)]
     pub is_enterprise: bool,
     /// Whether this route may carry claude-code's FIRST-PARTY beta headers.
@@ -305,22 +322,34 @@ pub struct OrchestratorConfig {
     #[serde(default)]
     pub transcript_classifier_enabled: bool,
 
-    /// Finding #80: user-configured `refusalFallbackModel` (claude-code
-    /// `bin/claude.exe` offset ~205871579). When `Some(id)` and a turn's response
-    /// arrives with `stop_reason == "refusal"`, BOTH drivers swap the session
-    /// model to `id` (ONCE per session — the `refusalFallbackModelLatch` analog,
-    /// tracked by the session's `refusal_cascade` latch),
-    /// warn the user, and retry the turn against the fallback model. This is the
-    /// `s.refusalFallbackModel` half of the binary's
-    /// `rc = s.refusalFallbackModel ?? (s.serverRefusalFallback?.model)` —
-    /// the `serverRefusalFallback` (server-driven sticky fallback) channel has no
-    /// LingXi config seam and is a documented residual.
-    ///
-    /// `None` (the parity default) is a STRICT no-op: a `refusal` response keeps
-    /// today's terminal behavior (streaming: `emit_end_turn("refusal")` + break;
-    /// batched: `Continue`), so the locked fixtures are byte-unaffected.
+    /// Local refusal retry target. The configured cascade owns local hops;
+    /// `server_refusal_fallback` supplies the separate native server-lane facts.
     #[serde(default)]
     pub refusal_fallback_model: Option<String>,
+    /// Native model/feature facts resolved by the host. Server lane admission
+    /// runs for each query; provider input cannot grant this authority.
+    #[serde(default)]
+    pub server_refusal_fallback: Option<lingxi_core::host::refusal_server::Policy>,
+
+    /// Trusted policy snapshot used to validate a model returned by an
+    /// admitted first-party server-fallback lane. This is resolved by the host
+    /// from managed `policySettings`; it is deliberately absent from the
+    /// serialized orchestrator config and must never be populated from the
+    /// provider model catalog.
+    #[serde(skip)]
+    pub server_fallback_model_enforcement: Option<llm_runtime::model::allowlist::ModelEnforcement>,
+    /// Regular settings `availableModels`, used only when managed enforcement
+    /// is inactive. `None` means the host has no regular allowlist restriction.
+    #[serde(skip)]
+    pub server_fallback_regular_available_models: Option<Vec<String>>,
+    /// Regular settings `modelOverrides`, for reverse-matching provider model
+    /// IDs against their canonical allowlist IDs.
+    #[serde(skip)]
+    pub server_fallback_regular_model_overrides: std::collections::BTreeMap<String, String>,
+    /// Concrete, credential-resolved default model used by the native exact
+    /// default-model exception when a regular allowlist is active.
+    #[serde(skip)]
+    pub server_fallback_default_model: Option<String>,
 
     /// The refusal-fallback CASCADE: an ordered chain of models to try, in
     /// order, as each one refuses.
@@ -345,7 +374,7 @@ pub struct OrchestratorConfig {
     /// mirroring the `...email&&{userEmail:…}` spread.
     ///
     /// `None` (the parity default) omits the `# userEmail` entry entirely, so
-    /// the additional-context message carries only `# claudeMd` (when present)
+    /// the additional-context message carries only `# instructions` (when present)
     /// and `# currentDate`. Populated at the composition root from the resolved
     /// OAuth/account profile.
     #[serde(default)]
@@ -392,6 +421,9 @@ pub struct OrchestratorConfig {
     /// effort keep byte-identical transcripts.
     #[serde(default)]
     pub effort: Option<String>,
+    /// Explicit initial Ultracode switch, independent of the effort level.
+    #[serde(default)]
+    pub ultracode: bool,
 
     /// Remote feature-flag cadence for Ultracode maintenance reminders.
     /// The environment override is resolved inside `tool-workflow` and wins.
@@ -434,10 +466,14 @@ impl Default for OrchestratorConfig {
             model: DEFAULT_MODEL.to_string(),
             fallback_model: None,
             system_prompt_override: None,
+            context_rendering: lingxi_core::host::instructions::InstructionRendering::Announced,
             exclude_dynamic_system_prompt_sections: false,
             interactive_permissions: false,
             interactive_session: false,
+            mod_render_surface: None,
+            mod_projects_consent: hooks::mods::ProjectsConsentFacts::default(),
             query_source: default_query_source(),
+            fork_origin: None,
             print: false,
             is_tty: false,
             resume_session_id: None,
@@ -455,12 +491,18 @@ impl Default for OrchestratorConfig {
             max_budget_nano_usd: None,
             transcript_classifier_enabled: false,
             refusal_fallback_model: None,
+            server_refusal_fallback: None,
+            server_fallback_model_enforcement: None,
+            server_fallback_regular_available_models: None,
+            server_fallback_regular_model_overrides: std::collections::BTreeMap::new(),
+            server_fallback_default_model: None,
             refusal_fallback_chain: Vec::new(),
             user_email: None,
             plan_mode_instructions: None,
             plans_directory: None,
             plan_files: None,
             effort: None,
+            ultracode: false,
             ultracode_feature_flag_cadence: None,
             ultracode_product_default_cadence: None,
             workflow_keyword_trigger_enabled: false,
@@ -512,16 +554,43 @@ mod tests {
     }
 
     #[test]
+    fn projects_facts_are_host_owned_and_cannot_be_injected_through_config_json() {
+        let mut cfg = OrchestratorConfig::default();
+        cfg.mod_projects_consent.default_host_sticky_latch = Some(true);
+        cfg.mod_projects_consent.projects_env = Some(true);
+        let mut encoded = serde_json::to_value(&cfg).unwrap();
+        assert!(encoded.get("mod_projects_consent").is_none());
+        encoded["mod_projects_consent"] = serde_json::json!({
+            "default_host_sticky_latch": true,
+            "projects_env": true,
+            "session_mcp_signal": true,
+            "feature_result": {"value": true, "source": "Payload"},
+            "growthbook_used_non_default_host": false
+        });
+        let decoded: OrchestratorConfig = serde_json::from_value(encoded).unwrap();
+        let facts = decoded.mod_projects_consent;
+        assert!(facts.default_host_sticky_latch.is_none());
+        assert!(facts.projects_env.is_none());
+        assert!(facts.session_mcp_signal.is_none());
+        assert!(facts.feature_result.is_none());
+        assert!(facts.growthbook_used_non_default_host.is_none());
+    }
+
+    #[test]
     fn config_round_trips_through_json() {
         let cfg = OrchestratorConfig {
             max_turns: 5,
             model: "x".into(),
             fallback_model: Some("claude-sonnet-4-6".into()),
             system_prompt_override: Some("custom".into()),
+            context_rendering: lingxi_core::host::instructions::InstructionRendering::Announced,
             exclude_dynamic_system_prompt_sections: false,
             interactive_permissions: true,
             interactive_session: true,
+            mod_render_surface: Some(ModRenderSurface::Desktop),
+            mod_projects_consent: hooks::mods::ProjectsConsentFacts::default(),
             query_source: QUERY_SOURCE_SDK.to_string(),
+            fork_origin: None,
             print: true,
             is_tty: true,
             resume_session_id: None,
@@ -539,12 +608,18 @@ mod tests {
             max_budget_nano_usd: Some(5_000_000_000),
             transcript_classifier_enabled: true,
             refusal_fallback_model: Some("claude-sonnet-4-6".into()),
+            server_refusal_fallback: None,
+            server_fallback_model_enforcement: None,
+            server_fallback_regular_available_models: None,
+            server_fallback_regular_model_overrides: std::collections::BTreeMap::new(),
+            server_fallback_default_model: None,
             refusal_fallback_chain: Vec::new(),
             user_email: Some("u@example.com".into()),
             plan_mode_instructions: Some("MY BODY".into()),
             plans_directory: Some("docs/plans".into()),
             plan_files: None,
             effort: Some("high".into()),
+            ultracode: true,
             ultracode_feature_flag_cadence: Some(12),
             ultracode_product_default_cadence: Some(10),
             workflow_keyword_trigger_enabled: true,
@@ -581,6 +656,7 @@ mod tests {
         assert_eq!(back.user_email.as_deref(), Some("u@example.com"));
         assert_eq!(back.plan_mode_instructions.as_deref(), Some("MY BODY"));
         assert_eq!(back.plans_directory.as_deref(), Some("docs/plans"));
+        assert!(back.ultracode);
         assert_eq!(back.ultracode_feature_flag_cadence, Some(12));
         assert_eq!(back.ultracode_product_default_cadence, Some(10));
         assert!(back.workflow_keyword_trigger_enabled);

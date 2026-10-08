@@ -77,7 +77,7 @@ pub fn truncate_head_for_ptl_retry(
             is_meta: true,
             content,
             ..
-        }) if matches!(content.as_slice(), [lingxi_core::types::ContentBlock::Text { text }] if text == PTL_RETRY_MARKER) => {
+        }) if matches!(content.as_slice(), [lingxi_core::types::ContentBlock::Text { text, .. }] if text == PTL_RETRY_MARKER) => {
             &messages[1..]
         }
         _ => &messages[..],
@@ -162,7 +162,7 @@ mod tests {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
                 content: "ok".into(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],

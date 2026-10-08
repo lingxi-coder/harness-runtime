@@ -38,6 +38,7 @@ dependencies = [
  "base64 0.22.1",
  "boon",
  "branding",
+ "chrono",
  "core",
  "futures",
  "hooks",
@@ -59,6 +60,7 @@ dependencies = [
  "tool-api",
  "tracing",
  "unicode-normalization",
+ "uuid",
 ]
 
 [[package]]
@@ -160,7 +162,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -171,7 +173,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -217,7 +219,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
  "x11rb",
 ]
 
@@ -1093,6 +1095,7 @@ dependencies = [
  "orchestrator",
  "permission",
  "regex",
+ "ryu-js",
  "schemars",
  "serde",
  "serde_json",
@@ -1249,6 +1252,7 @@ dependencies = [
  "tokio",
  "tool-api",
  "tracing",
+ "unicode-normalization",
  "uuid",
 ]
 
@@ -1258,6 +1262,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "branding",
+ "fancy-regex 0.18.0",
  "figment",
  "fs2",
  "futures-core",
@@ -1267,6 +1272,7 @@ dependencies = [
  "libc",
  "mobile-linux-api",
  "rustix 0.38.44",
+ "ryu-js",
  "schemars",
  "secrecy",
  "serde",
@@ -1277,8 +1283,10 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "unicode-general-category",
  "unicode-segmentation",
  "unicode-width",
+ "url",
  "uuid",
  "zeroize",
 ]
@@ -1788,7 +1796,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2560,17 +2568,25 @@ name = "hooks"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "core",
+ "fs2",
+ "futures-util",
  "mobile-linux-api",
+ "nix 0.27.1",
  "permission",
  "regex",
  "rquickjs",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "telemetry",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tree-sitter",
+ "tree-sitter-javascript",
  "url",
 ]
 
@@ -2773,7 +2789,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
@@ -3224,9 +3240,11 @@ dependencies = [
  "futures",
  "hmac",
  "jsonschema",
+ "regex",
  "reqwest",
  "ring",
  "rustls",
+ "ryu-js",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3261,6 +3279,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "branding",
  "bytes",
  "chrono",
  "core",
@@ -3282,6 +3301,7 @@ dependencies = [
  "tracing",
  "url",
  "urlencoding",
+ "uuid",
 ]
 
 [[package]]
@@ -4338,6 +4358,7 @@ dependencies = [
  "hooks",
  "iana-time-zone",
  "ignore",
+ "lingxi-llm-client",
  "llm-runtime",
  "mcp",
  "memory",
@@ -4367,6 +4388,7 @@ dependencies = [
  "tool-workflow",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
  "unicode-segmentation",
  "unicode-width",
  "url",
@@ -4488,6 +4510,7 @@ dependencies = [
  "branding",
  "core",
  "ignore",
+ "indexmap",
  "libc",
  "regex",
  "serde",
@@ -5109,6 +5132,7 @@ dependencies = [
  "async-trait",
  "core",
  "cost",
+ "lingxi-llm-client",
  "llm-runtime",
  "secret",
  "serde",
@@ -5205,7 +5229,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5619,7 +5643,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5693,6 +5717,12 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "ryu-js"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04d056b875a9d2e6cb9a61d127afee9ac5999b9f87bcb32079d1318e505be714"
 
 [[package]]
 name = "salsa20"
@@ -6212,7 +6242,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6399,6 +6429,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "tool-api",
  "tracing",
  "workflow",
 ]
@@ -6867,6 +6898,8 @@ name = "tool-agent"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "boon",
+ "branding",
  "core",
  "once_cell",
  "permission",
@@ -6902,6 +6935,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "base64 0.22.1",
+ "boon",
  "branding",
  "core",
  "flate2",
@@ -7166,6 +7200,7 @@ name = "tool-skill"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "branding",
  "command-api",
  "compaction",
  "core",
@@ -7510,7 +7545,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

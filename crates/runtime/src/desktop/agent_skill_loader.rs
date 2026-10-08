@@ -100,6 +100,7 @@ impl AgentSkillLoader {
         cmd: &SlashCommand,
         display_name: &str,
         cwd_override: Option<&std::path::Path>,
+        model: Option<&str>,
     ) -> Result<Option<SkillLoad>, String> {
         let (frontmatter, prompt_template, dynamic) = match &cmd.kind {
             SlashCommandKind::Markdown {
@@ -133,7 +134,15 @@ impl AgentSkillLoader {
                     .as_ref()
                     .map_or_else(|| cwd.clone(), |state| state.project_root());
                 let body = builder
-                    .try_build_at("", &root, &cwd, true)
+                    .try_build_at(
+                        "",
+                        command_api::BundledPromptContext {
+                            project_root: &root,
+                            cwd: &cwd,
+                            is_preload: true,
+                            main_loop_model: model,
+                        },
+                    )
                     .map_err(|error| error.to_string())?;
                 (frontmatter, body, true)
             }
@@ -201,7 +210,10 @@ impl AgentSkillLoader {
             // the command model carries no progressMessage in the Rust port, so
             // claude's default ("loading") applies — represented as `None`.
             progress_message: None,
-            content: vec![ContentBlock::Text { text: body }],
+            content: vec![ContentBlock::Text {
+                text: body,
+                citations: None,
+            }],
         }))
     }
 }
@@ -213,6 +225,7 @@ impl SkillLoader for AgentSkillLoader {
         skill_name: &str,
         agent_type: &str,
         cwd: Option<&std::path::Path>,
+        model: Option<&str>,
     ) -> Result<Option<SkillLoad>, String> {
         let reg = self.registry.read().await;
         let Some(resolved) = Self::resolve_name(&reg, skill_name, agent_type) else {
@@ -225,7 +238,7 @@ impl SkillLoader for AgentSkillLoader {
         // claude passes the ORIGINAL `skillName` (the frontmatter entry) to
         // `formatSkillLoadingMetadata` (runAgent.ts:634), so the loading-metadata
         // block shows the name as authored, not the resolved/qualified name.
-        self.to_skill_load(&cmd, skill_name, cwd).await
+        self.to_skill_load(&cmd, skill_name, cwd, model).await
     }
 }
 
@@ -255,7 +268,7 @@ mod tests {
         reg.register_command(md("review", "REVIEW BODY"));
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
         let load = loader
-            .resolve_and_load("review", "general-purpose", None)
+            .resolve_and_load("review", "general-purpose", None, None)
             .await
             .expect("checked skill preload")
             .expect("resolved");
@@ -263,7 +276,7 @@ mod tests {
         assert_eq!(load.content.len(), 1);
         assert!(matches!(
             &load.content[0],
-            ContentBlock::Text { text } if text == "REVIEW BODY"
+            ContentBlock::Text { text, .. } if text == "REVIEW BODY"
         ));
     }
 
@@ -274,7 +287,7 @@ mod tests {
         reg.register_command(md("pm:feat", "FEATURE"));
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
         let load = loader
-            .resolve_and_load("feat", "pm:planner", None)
+            .resolve_and_load("feat", "pm:planner", None, None)
             .await
             .expect("checked skill preload")
             .expect("resolved via plugin prefix");
@@ -288,7 +301,7 @@ mod tests {
         reg.register_command(md("some-plugin:deep", "DEEP"));
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
         let load = loader
-            .resolve_and_load("deep", "other-agent", None)
+            .resolve_and_load("deep", "other-agent", None, None)
             .await
             .expect("checked skill preload")
             .expect("resolved via suffix");
@@ -299,11 +312,13 @@ mod tests {
     async fn unknown_skill_is_none() {
         let reg = CommandRegistry::new();
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
-        assert!(loader
-            .resolve_and_load("nope", "a", None)
-            .await
-            .expect("checked skill preload")
-            .is_none());
+        assert!(
+            loader
+                .resolve_and_load("nope", "a", None, None)
+                .await
+                .expect("checked skill preload")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -319,11 +334,13 @@ mod tests {
             ..SlashCommand::default()
         });
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
-        assert!(loader
-            .resolve_and_load("help", "a", None)
-            .await
-            .expect("checked skill preload")
-            .is_none());
+        assert!(
+            loader
+                .resolve_and_load("help", "a", None, None)
+                .await
+                .expect("checked skill preload")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -332,13 +349,13 @@ mod tests {
         reg.register_command(md("s", "id=${LINGXI_SESSION_ID}"));
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), Some("sess:42".to_string()));
         let load = loader
-            .resolve_and_load("s", "a", None)
+            .resolve_and_load("s", "a", None, None)
             .await
             .expect("checked skill preload")
             .expect("resolved");
         assert!(matches!(
             &load.content[0],
-            ContentBlock::Text { text } if text == "id=sess:42"
+            ContentBlock::Text { text, .. } if text == "id=sess:42"
         ));
     }
     #[tokio::test]
@@ -364,12 +381,12 @@ mod tests {
         });
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
         let load = loader
-            .resolve_and_load("loop", "a", None)
+            .resolve_and_load("loop", "a", None, None)
             .await
             .expect("checked skill preload")
             .expect("resolved");
         assert!(
-            matches!(&load.content[0], ContentBlock::Text { text } if text == "preloaded instructions")
+            matches!(&load.content[0], ContentBlock::Text { text, .. } if text == "preloaded instructions")
         );
     }
     #[tokio::test]
@@ -382,10 +399,12 @@ mod tests {
             fn try_build_at(
                 &self,
                 args: &str,
-                root: &std::path::Path,
-                cwd: &std::path::Path,
-                preload: bool,
+                context: command_api::BundledPromptContext<'_>,
             ) -> std::io::Result<String> {
+                let root = context.project_root;
+                let cwd = context.cwd;
+                let preload = context.is_preload;
+                assert_eq!(context.main_loop_model, Some("claude-fable-5"));
                 assert!(args.is_empty() && preload);
                 assert_eq!(root, std::path::Path::new("/project"));
                 assert_eq!(cwd, std::path::Path::new("/project/subdir"));
@@ -412,7 +431,8 @@ mod tests {
                 .resolve_and_load(
                     "loop",
                     "agent",
-                    Some(std::path::Path::new("/project/subdir"))
+                    Some(std::path::Path::new("/project/subdir")),
+                    Some("claude-fable-5")
                 )
                 .await
                 .unwrap_err(),

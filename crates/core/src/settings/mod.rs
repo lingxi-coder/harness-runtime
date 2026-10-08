@@ -150,6 +150,8 @@ pub struct EffectiveSettings {
     pub settings: SettingsJson,
     /// Per-field provenance trace for `/doctor` (M6).
     pub trace: tracer::ProvenanceTrace,
+    /// Admitted effort sources before ordinary field merging.
+    pub effort_layers: Vec<crate::host::effort::EffortSettingsLayer>,
 }
 
 impl EffectiveSettings {
@@ -235,9 +237,14 @@ impl Settings {
         } = inputs;
 
         let mut trace = tracer::ProvenanceTrace::default();
+        let mut effort_layers = Vec::new();
 
         // Layer 1 (lowest): defaults
         trace.record_layer(tracer::Source::Defaults, &defaults);
+        effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
+            tracer::Source::Defaults,
+            &defaults,
+        ));
         let mut acc = defaults;
 
         // Layer 2: user. (review #2) A single unreadable/oversized/invalid file
@@ -249,6 +256,12 @@ impl Settings {
             if let Some(user_path) = user_settings_path {
                 if let Some(usr) = read_layer_or_skip(user_path) {
                     trace.record_layer(tracer::Source::User, &usr);
+                    effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
+                        tracer::Source::User,
+                        &usr,
+                    ));
+                    effort_layers.last_mut().expect("just recorded source").path =
+                        Some(user_path.to_path_buf());
                     acc = merger::merge(acc, usr);
                 }
             }
@@ -259,6 +272,12 @@ impl Settings {
             let project_path = loader::project_settings_path(project_dir);
             if let Some(proj) = read_layer_or_skip(&project_path) {
                 trace.record_layer(tracer::Source::Project, &proj);
+                effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
+                    tracer::Source::Project,
+                    &proj,
+                ));
+                effort_layers.last_mut().expect("just recorded source").path =
+                    Some(project_path.to_path_buf());
                 acc = merger::merge(acc, proj);
             }
         }
@@ -268,6 +287,12 @@ impl Settings {
             let local_path = loader::local_settings_path(project_dir);
             if let Some(local) = read_layer_or_skip(&local_path) {
                 trace.record_layer(tracer::Source::Local, &local);
+                effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
+                    tracer::Source::Local,
+                    &local,
+                ));
+                effort_layers.last_mut().expect("just recorded source").path =
+                    Some(local_path.to_path_buf());
                 acc = merger::merge(acc, local);
             }
         }
@@ -276,6 +301,10 @@ impl Settings {
         if let Some(cli) = supplemental.cli_layer {
             if *cli != SettingsJson::default() {
                 trace.record_layer(tracer::Source::Cli, cli);
+                effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
+                    tracer::Source::Cli,
+                    cli,
+                ));
                 acc = merger::merge(acc, cli.clone());
             }
         }
@@ -284,6 +313,10 @@ impl Settings {
         for managed in supplemental.managed_layers {
             if *managed != SettingsJson::default() {
                 trace.record_layer(tracer::Source::Managed, managed);
+                effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
+                    tracer::Source::Managed,
+                    managed,
+                ));
                 acc = merger::merge(acc, managed.clone());
             }
         }
@@ -291,11 +324,16 @@ impl Settings {
         // Layer 7 (highest): env
         let (env_layer, _invalid_env) = env_parser::parse_env(env)?;
         trace.record_layer(tracer::Source::Env, &env_layer);
+        effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
+            tracer::Source::Env,
+            &env_layer,
+        ));
         acc = merger::merge(acc, env_layer);
 
         Ok(EffectiveSettings {
             settings: acc,
             trace,
+            effort_layers,
         })
     }
 
@@ -367,12 +405,17 @@ impl Settings {
             defaults,
         } = inputs;
         let mut trace = tracer::ProvenanceTrace::default();
+        let mut effort_layers = Vec::new();
         let mut layers_present: i64 = 0;
         let user_path = loader::user_settings_path();
         let mut had_env_override = false;
 
         // Layer 1 (lowest): defaults
         trace.record_layer(tracer::Source::Defaults, &defaults);
+        effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
+            tracer::Source::Defaults,
+            &defaults,
+        ));
         let mut acc = defaults;
         layers_present += 1;
 
@@ -382,6 +425,12 @@ impl Settings {
                 match loader::read_settings_file(up) {
                     Ok(Some(usr)) => {
                         trace.record_layer(tracer::Source::User, &usr);
+                        effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
+                            tracer::Source::User,
+                            &usr,
+                        ));
+                        effort_layers.last_mut().expect("just recorded source").path =
+                            Some(up.to_path_buf());
                         acc = merger::merge(acc, usr);
                         layers_present += 1;
                     }
@@ -403,6 +452,12 @@ impl Settings {
             match loader::read_settings_file(&project_path) {
                 Ok(Some(proj)) => {
                     trace.record_layer(tracer::Source::Project, &proj);
+                    effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
+                        tracer::Source::Project,
+                        &proj,
+                    ));
+                    effort_layers.last_mut().expect("just recorded source").path =
+                        Some(project_path.to_path_buf());
                     acc = merger::merge(acc, proj);
                     layers_present += 1;
                 }
@@ -419,6 +474,12 @@ impl Settings {
             match loader::read_settings_file(&local_path) {
                 Ok(Some(local)) => {
                     trace.record_layer(tracer::Source::Local, &local);
+                    effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
+                        tracer::Source::Local,
+                        &local,
+                    ));
+                    effort_layers.last_mut().expect("just recorded source").path =
+                        Some(local_path.to_path_buf());
                     acc = merger::merge(acc, local);
                     layers_present += 1;
                 }
@@ -433,6 +494,10 @@ impl Settings {
         if let Some(cli) = supplemental.cli_layer {
             if *cli != SettingsJson::default() {
                 trace.record_layer(tracer::Source::Cli, cli);
+                effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
+                    tracer::Source::Cli,
+                    cli,
+                ));
                 acc = merger::merge(acc, cli.clone());
                 layers_present += 1;
             }
@@ -442,6 +507,10 @@ impl Settings {
         for managed in supplemental.managed_layers {
             if *managed != SettingsJson::default() {
                 trace.record_layer(tracer::Source::Managed, managed);
+                effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
+                    tracer::Source::Managed,
+                    managed,
+                ));
                 acc = merger::merge(acc, managed.clone());
                 layers_present += 1;
             }
@@ -455,6 +524,10 @@ impl Settings {
             layers_present += 1;
         }
         trace.record_layer(tracer::Source::Env, &env_layer);
+        effort_layers.push(crate::host::effort::EffortSettingsLayer::new(
+            tracer::Source::Env,
+            &env_layer,
+        ));
         acc = merger::merge(acc, env_layer);
 
         // Emit per-invalid-env event before the loaded event.
@@ -474,6 +547,7 @@ impl Settings {
         Ok(EffectiveSettings {
             settings: acc,
             trace,
+            effort_layers,
         })
     }
 }
@@ -642,6 +716,92 @@ mod load_tests {
                 ][..]
             ),
             "all file layers plus env contribute in low-to-high priority order"
+        );
+    }
+
+    #[test]
+    fn effort_sources_survive_merge_and_obey_explicit_scope() {
+        use crate::host::effort::settings_cap;
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join(branding::DOT_DIR);
+        std::fs::create_dir_all(&project).unwrap();
+        let user = temp.path().join("user-settings.json");
+        std::fs::write(&user, r#"{"maxEffortLevel":"low"}"#).unwrap();
+        std::fs::write(project.join("settings.json"), r#"{"maxEffortLevel":"max"}"#).unwrap();
+        std::fs::write(
+            project.join("settings.local.json"),
+            r#"{"maxEffortLevel":"high"}"#,
+        )
+        .unwrap();
+        let cli: SettingsJson = serde_json::from_str(r#"{"maxEffortLevel":"medium"}"#).unwrap();
+        let managed: SettingsJson = serde_json::from_str(r#"{"maxEffortLevel":"xhigh"}"#).unwrap();
+        let env = BTreeMap::new();
+        let load = |scope, cli_layer, managed_layers| {
+            Settings::load_with_layers_from_user_path(
+                LoadInputs {
+                    env: &env,
+                    project_dir: temp.path(),
+                    defaults: SettingsJson::default(),
+                },
+                scope,
+                SupplementalLayers {
+                    cli_layer,
+                    managed_layers,
+                },
+                Some(&user),
+            )
+            .unwrap()
+        };
+        let all = load(
+            FileLayerScope::ALL,
+            Some(&cli),
+            std::slice::from_ref(&managed),
+        );
+        assert_eq!(all.settings.max_effort_level.as_deref(), Some("xhigh"));
+        assert_eq!(
+            settings_cap(&all.effort_layers, "model", str::to_string).as_deref(),
+            Some("low")
+        );
+        let gated = load(
+            FileLayerScope {
+                include_user: false,
+                include_project: false,
+                include_local: true,
+            },
+            Some(&cli),
+            std::slice::from_ref(&managed),
+        );
+        assert_eq!(
+            settings_cap(&gated.effort_layers, "model", str::to_string).as_deref(),
+            Some("medium")
+        );
+        let empty = load(
+            FileLayerScope {
+                include_user: false,
+                include_project: false,
+                include_local: false,
+            },
+            None,
+            &[],
+        );
+        assert_eq!(
+            settings_cap(&empty.effort_layers, "model", str::to_string),
+            None
+        );
+        std::fs::write(&user, r#"{"maxEffortLevel":"MED","modelSettings":{"model":{"maxEffortLevel":17}},"model":"valid"}"#).unwrap();
+        let invalid = load(
+            FileLayerScope {
+                include_user: true,
+                include_project: false,
+                include_local: false,
+            },
+            None,
+            &[],
+        );
+        assert_eq!(invalid.settings.model.as_deref(), Some("valid"));
+        assert_eq!(
+            settings_cap(&invalid.effort_layers, "model", str::to_string),
+            None
         );
     }
 

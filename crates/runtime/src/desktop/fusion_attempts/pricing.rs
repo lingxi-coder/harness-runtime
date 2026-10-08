@@ -29,7 +29,9 @@ pub(super) fn captured_prices(
             || name == &route.pricing_model.billing_model
     });
     let explicit = declared.is_some();
-    if configured.billing_mode == lingxi_core::host::ModelBillingMode::Subscription && !explicit {
+    if configured.billing_mode == Some(lingxi_core::host::ModelBillingMode::Subscription)
+        && !explicit
+    {
         return Err("subscription requires explicit attempt pricing".into());
     }
     let (mut price, resolution) = catalog
@@ -199,11 +201,7 @@ pub(super) fn quote(
     ),
     String,
 > {
-    quote_body(
-        route,
-        prepared.route.protocol.clone(),
-        &prepared.provider_request,
-    )
+    quote_body(route, prepared.route.protocol, &prepared.provider_request)
 }
 
 pub(super) fn quote_body(

@@ -10,7 +10,8 @@ use crate::definition::{
 };
 use crate::display::{AgentColor, AgentDisplay};
 use lingxi_core::host::subagent_spawn::{
-    SubagentInheritance, SubagentListingEntry, SubagentSpawnError, SubagentSpawnRequest,
+    AgentOfferCandidate, SubagentInheritance, SubagentListingEntry, SubagentSpawnError,
+    SubagentSpawnRequest,
 };
 use lingxi_core::types::{AgentId, ConversationMessage, MessageId};
 use permission::PermissionMode;
@@ -148,7 +149,7 @@ pub fn tools_description(def: &AgentDefinition) -> String {
 /// load order is nondeterministic — plugin load races, MCP async connect —
 /// matching TS `getAgentListingDeltaAttachment`'s sort, attachments.ts:1543).
 #[must_use]
-pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEntry> {
+pub fn agent_listing_candidates(defs: &[AgentDefinition]) -> Vec<AgentOfferCandidate> {
     let mut by_type: HashMap<String, &AgentDefinition> = HashMap::new();
     for def in defs {
         if def.agent_type == lingxi_core::host::FUSION_PANEL_TYPE {
@@ -193,20 +194,65 @@ pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEnt
         // Later-wins: a same-typed definition later in the slice overrides.
         by_type.insert(def.agent_type.clone(), def);
     }
-    let mut entries: Vec<SubagentListingEntry> = by_type
+    let mut entries: Vec<AgentOfferCandidate> = by_type
         .into_values()
-        .map(|def| SubagentListingEntry {
-            tools_description: tools_description(def),
-            agent_type: def.agent_type.clone(),
-            when_to_use: def.when_to_use.clone(),
-            // `whenToUseLean` rides along unresolved: which of the two texts a
-            // line renders is `U2n`'s decision, taken per RENDER against the
-            // model being rendered for, not per catalog build.
-            when_to_use_lean: crate::builtins::when_to_use_lean(def).map(str::to_string),
+        .map(|def| {
+            let source = crate::handle::agent_source_to_claude_str(def.source);
+            let provider = match def.source {
+                AgentSource::BuiltIn => Some(serde_json::json!({
+                    "plugin": "engine",
+                    "tier": "core",
+                })),
+                AgentSource::Settings(lingxi_core::types::SettingsScope::Managed) => {
+                    Some(serde_json::json!({"plugin":"policy","tier":"prepend"}))
+                }
+                AgentSource::Settings(_) | AgentSource::Flag | AgentSource::AdditionalDirectory => {
+                    let plugin = source.strip_suffix("Settings").unwrap_or(source);
+                    Some(serde_json::json!({"plugin":plugin,"tier":"user"}))
+                }
+                // Installed identity and seat tier are stamped by
+                // PluginManager from the same facts used by
+                // `command.describe.provider`. `agent_type` contains only
+                // the display namespace, so never infer the provider from it.
+                // Native `mRo` falls back to `cQ(source)` when the definition
+                // has no `plugin` property. For `source === "plugin"`, that
+                // exact fallback is `{ plugin: "plugin", tier: "user" }`.
+                AgentSource::Plugin => Some(
+                    def.offer_provider
+                        .clone()
+                        .unwrap_or_else(|| serde_json::json!({"plugin":"plugin","tier":"user"})),
+                ),
+            };
+            AgentOfferCandidate {
+                source: source.to_string(),
+                provider,
+                listing: SubagentListingEntry {
+                    tools_description: tools_description(def),
+                    agent_type: def.agent_type.clone(),
+                    when_to_use: def.when_to_use.clone(),
+                    // `whenToUseLean` rides along unresolved: which of the two
+                    // texts a line renders is `U2n`'s decision, taken per
+                    // RENDER against the model being rendered for, not per
+                    // catalog build.
+                    when_to_use_lean: crate::builtins::when_to_use_lean(def).map(str::to_string),
+                },
+            }
         })
         .collect();
-    entries.sort_by(|a, b| a.agent_type.cmp(&b.agent_type));
+    entries.sort_by(|a, b| a.listing.agent_type.cmp(&b.listing.agent_type));
     entries
+}
+
+/// The raw model-facing listing before any `agent.offer` decision. Kept as the
+/// compatibility view for callers that only need rendered rows; filtering is
+/// a separate host operation so dispatch continues to resolve against the raw
+/// execution catalog.
+#[must_use]
+pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEntry> {
+    agent_listing_candidates(defs)
+        .into_iter()
+        .map(|candidate| candidate.listing)
+        .collect()
 }
 
 /// claude 2.1.238 `NJa` (@290291941) — filter a definition slice down to the
@@ -301,7 +347,7 @@ pub(super) fn rule_tool_name(rule: &str) -> &str {
 /// Apply an `agent.spawn` hook's `modified_input` to a spawn request.
 ///
 /// Pure so the rewrite rules are testable without standing up a spawner. Only
-/// the four fields upstream allows are honoured; anything else in the object is
+/// the declared child model/route, agent type, and cwd fields are honoured; anything else is
 /// ignored rather than reflected, so a hook cannot reach fields it was never
 /// given authority over by guessing their names.
 #[must_use]
@@ -321,10 +367,25 @@ pub(crate) fn apply_spawn_rewrite(
         }
     }
     if let Some(value) = updated.get("model") {
-        let next = value.as_str().map(ToString::to_string);
+        let next = match value {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(model) => Some(model.clone()),
+            _ => return Err("agent.spawn model must be a string or null".into()),
+        };
         if next != rewritten.model {
             rewritten.model = next;
             changed.push("model");
+        }
+    }
+    if let Some(value) = updated.get("model_profile") {
+        let next = match value {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(profile) => Some(profile.clone()),
+            _ => return Err("agent.spawn model_profile must be a string or null".into()),
+        };
+        if next != rewritten.model_profile {
+            rewritten.model_profile = next;
+            changed.push("model_profile");
         }
     }
     if let Some(value) = updated.get("cwd") {
@@ -352,6 +413,7 @@ pub(crate) fn apply_spawn_rewrite(
                 .to_string(),
         );
     }
+    validate_child_model_profile(&rewritten)?;
     if changed.is_empty() {
         return Ok(None);
     }
@@ -365,34 +427,53 @@ pub(crate) fn apply_spawn_rewrite(
     Ok(Some(rewritten))
 }
 
+fn validate_child_model_profile(request: &SubagentSpawnRequest) -> Result<(), String> {
+    let Some(profile) = request.model_profile.as_deref() else {
+        return Ok(());
+    };
+    if lingxi_core::host::effort::trim_js_whitespace(profile).is_empty() {
+        return Err("subagent model_profile must be a nonempty string".into());
+    }
+    if !request
+        .model
+        .as_deref()
+        .is_some_and(|model| !lingxi_core::host::effort::trim_js_whitespace(model).is_empty())
+    {
+        return Err("subagent model_profile requires an explicit model; clear both model and model_profile to inherit".into());
+    }
+    Ok(())
+}
+
 impl PoolSubagentSpawner {
     /// Resolve a spawn's [`AgentDefinition`] from `subagent_type`, including its
     /// model preference.
     ///
     /// First looks the definition up by precedence (see [`Self::lookup_definition`]),
     /// then resolves its [`AgentModel`] to a concrete wire model id via
-    /// [`crate::model_resolution::resolve_agent_model`] (when a `parent_model`
+    /// [`crate::model_resolution::resolve_agent_model_with_context`] (when a `parent_model`
     /// is supplied): `Inherit`→parent model; a bare family alias→the parent's exact
     /// id when same-tier, else the family's concrete default id. Without a
     /// `parent_model` the model string is left RAW (legacy behavior). The caller
     /// computes `parent_model` via [`Self::effective_parent_model`] (the request's
     /// `parent_model_override` — the LIVE / immediate-parent model — else the
     /// spawner's boot/live default).
+    #[cfg(test)]
     pub(super) async fn resolve_definition(
         &self,
         subagent_type: &str,
         parent_model: Option<&str>,
-    ) -> AgentDefinition {
+    ) -> Result<AgentDefinition, crate::model_resolution::ModelResolutionError> {
         self.resolve_definition_with_profile(subagent_type, parent_model, None, None)
             .await
     }
+    #[cfg(test)]
     pub(super) async fn resolve_definition_with_profile(
         &self,
         subagent_type: &str,
         parent_model: Option<&str>,
-        _parent_model_profile: Option<&str>,
-        parent_provider_first_party: Option<bool>,
-    ) -> AgentDefinition {
+        parent_model_profile: Option<&str>,
+        parent_context: Option<&crate::model_resolution::ModelResolutionContext>,
+    ) -> Result<AgentDefinition, crate::model_resolution::ModelResolutionError> {
         let mut def = self.lookup_definition(subagent_type).await;
         // An explicit `parent_model` (the request override) wins; otherwise fall
         // back to the spawner's own live/boot default. `None` on BOTH ⇒ the model
@@ -401,6 +482,10 @@ impl PoolSubagentSpawner {
             .map(str::to_string)
             .or_else(|| self.resolved_default_model());
         if let Some(parent_model) = parent.as_deref() {
+            let context = match parent_context {
+                Some(context) => context.clone(),
+                None => self.context_for_route(parent_model, parent_model_profile)?,
+            };
             // 2.1.198 `GAe`: the built-in Explore definition's model is derived
             // from the SESSION model (inherit, capped at "opus" for
             // fable/mythos-class firstParty sessions) BEFORE the normal
@@ -409,11 +494,16 @@ impl PoolSubagentSpawner {
             def.model = crate::model_resolution::resolve_builtin_explore_model(
                 &def,
                 parent_model,
-                parent_provider_first_party.unwrap_or(self.session_provider_first_party),
+                context.route.provider
+                    == Some(crate::model_resolution::ModelProviderKind::FirstParty),
             );
-            def.model = AgentModel::Explicit(self.resolve_model_pref(&def.model, parent_model));
+            def.model = AgentModel::Explicit(self.resolve_model_pref(
+                &def.model,
+                parent_model,
+                &context,
+            )?);
         }
-        def
+        Ok(def)
     }
     /// Look up the [`AgentDefinition`] for `subagent_type` by precedence.
     ///
@@ -508,6 +598,7 @@ impl PoolSubagentSpawner {
     /// `max_turns: 1`, so a fallback agent can still run a tool-using loop.
     pub(super) fn fallback_definition(subagent_type: &str) -> AgentDefinition {
         AgentDefinition {
+            omit_instructions: false,
             cache_ttl: None,
             agent_type: subagent_type.into(),
             when_to_use: String::new(),
@@ -536,12 +627,14 @@ impl PoolSubagentSpawner {
             initial_prompt: None,
             color: None,
             observer: None,
+            offer_provider: None,
         }
     }
     /// Resolve a spawn's advertised tool schemas + dispatch allow-list from the
     /// live registry per `agent_def`'s [`AgentToolPolicy`]. Returns
     /// `(tool_schemas, allowed_tool_names)`. Unset registry → `(empty, empty)`
     /// (no tools advertised, allow-list guard skipped).
+    #[cfg(test)]
     pub(super) async fn resolve_tools(
         &self,
         agent_def: &AgentDefinition,
@@ -556,33 +649,67 @@ impl PoolSubagentSpawner {
         // definition declared no `mcpServers` or no builder is wired.
         agent_mcp_tools: &[Arc<dyn tool_api::Tool>],
     ) -> Result<(Vec<serde_json::Value>, Vec<String>), SubagentSpawnError> {
-        let Some(registry) = self.tool_registry.get() else {
+        if self.tool_registry.get().is_none() {
             return Ok((Vec::new(), Vec::new()));
+        }
+        let parent_selection = self
+            .resolved_default_selection()
+            .map_err(|error| SubagentSpawnError::Runtime(error.to_string()))?;
+        let child_selection = self
+            .resolve_child_model_selection(&agent_def.model, parent_selection.as_ref(), None)
+            .map_err(|error| SubagentSpawnError::Runtime(error.to_string()))?;
+        self.resolve_tools_with_handback(
+            agent_def,
+            child_selection.as_ref(),
+            depth,
+            agent_mcp_tools,
+            None,
+            crate::tool_resolver::HandbackToolGates::default(),
+        )
+        .await
+        .map(|(schemas, allowed, _)| (schemas, allowed))
+    }
+    pub(super) async fn resolve_tools_with_handback(
+        &self,
+        agent_def: &AgentDefinition,
+        child_selection: Option<&crate::model_resolution::ResolvedModelSelection>,
+        // The resolved subagent's own recursion depth — gates its `Agent` tool
+        // against Claude's configured maximum spawn depth. Threaded from
+        // `request.depth`.
+        depth: u32,
+        // §24b — this spawn's per-agent MCP tools (claude `Agr`'s `Fe`),
+        // already connected + built by [`Self::mcp_tool_builder`]. Appended by
+        // [`crate::tool_resolver::AgentToolResolver::resolve`] step (4) AFTER
+        // every drop/filter, exactly like every other MCP tool. Empty when the
+        // definition declared no `mcpServers` or no builder is wired.
+        agent_mcp_tools: &[Arc<dyn tool_api::Tool>],
+        supplied: Option<&Arc<dyn tool_api::Tool>>,
+        gates: crate::tool_resolver::HandbackToolGates,
+    ) -> Result<(Vec<serde_json::Value>, Vec<String>, bool), SubagentSpawnError> {
+        let Some(registry) = self.tool_registry.get() else {
+            return Ok((Vec::new(), Vec::new(), false));
         };
         // Delegate to the shared resolver (single source of truth, also used by
         // the in-process teammate handler). The tool-wide deny names come from the
-        // boot policy via the set-once cell (UNFILLED / EMPTY ⇒ no tools dropped,
-        // regression-safe). The `default_model` only anchors the model-gated tool
-        // prompt for an `AgentModel::Inherit` def; on the production spawn path the
-        // def's model is already resolved to `Explicit` (so the param is inert
-        // there), hence the LIVE default (provider else boot snapshot) is a
-        // faithful anchor for the direct-call / Inherit case without needing the
-        // per-request override threaded here.
+        // boot policy via the set-once cell. Tool prompts use the child's
+        // admitted route directly; a same-named model on another profile must
+        // retain that profile's tool capability facts.
         let empty: Vec<String> = Vec::new();
         let denied = self.tool_wide_deny_names.get().unwrap_or(&empty);
-        let default_model = self.resolved_default_model();
         let coordinator_mode = self
             .coordinator_mode
             .get()
             .is_some_and(|mode| mode.is_enabled());
-        crate::tool_resolver::resolve_subagent_tools(
+        crate::tool_resolver::resolve_subagent_tools_with_handback(
             registry.as_ref(),
             agent_def,
             denied,
-            default_model.as_deref(),
+            child_selection,
             depth,
             coordinator_mode,
             agent_mcp_tools,
+            supplied,
+            gates,
         )
         .await
         .map_err(|e| SubagentSpawnError::Internal(e.to_string()))
@@ -658,6 +785,7 @@ impl PoolSubagentSpawner {
             refusal_fallback_chain: Vec::new(),
             agent_id,
             parent_agent_id: None,
+            agent_spawn_provenance: Default::default(),
             agent_name: None,
             team_name: None,
             agent_definition: def,
@@ -679,6 +807,9 @@ impl PoolSubagentSpawner {
             resumed_history: None,
             rendered_system_prompt,
             mobile_runtime_environment_reminder: None,
+            instruction_context: Default::default(),
+            instruction_context_is_override: false,
+            instruction_provider: None,
             mobile_runtime_workspace_reminder: None,
             content_replacement_state: None,
             agent_memory: None,
@@ -688,6 +819,8 @@ impl PoolSubagentSpawner {
             },
             // Set by `build_subagent_context` from `request.model_profile`.
             model_profile: None,
+            model_resolution_context_provider: None,
+            server_fallback_model_enforcement: None,
             // Set by `spawn` from `self.api_client` / `inherit.tool_invoker` /
             // `inherit.budget` just before pool allocation. `tool_schemas` +
             // `allowed_tools` are overwritten by `spawn` from `resolve_tools`
@@ -706,6 +839,8 @@ impl PoolSubagentSpawner {
             // cells (None when unfilled — tests / minimal builds). `hook_session_id`
             // / `hook_cwd` carry the boot-set values.
             hook_executor: None,
+            stop_hook_scope: Default::default(),
+            subagent_stop_firer: None,
             strict_plugin_only_hooks: false,
             skill_loader: None,
             hook_session_id: lingxi_core::types::SessionId::nil(),
@@ -723,14 +858,14 @@ impl PoolSubagentSpawner {
             query_source_label: None,
             correlation_id: None,
             model_attempt: None,
+            handback: None,
+            handback_restore_start: None,
         }
     }
     /// Resolve the full subagent catalog (built-ins overlaid by the file
-    /// catalog, claude-code later-wins precedence) into listing entries for
-    /// the dynamic Agent tool prompt. Delegates to the crate-level
-    /// [`crate::agent_listing_entries`] free fn (shared with the
-    /// `agent_listing_delta` attachment path) after snapshotting the catalog.
-    pub(super) async fn listing_entries(&self) -> Vec<SubagentListingEntry> {
+    /// catalog, claude-code later-wins precedence) with the origin metadata
+    /// needed by the model-facing `agent.offer` pass.
+    pub(super) async fn listing_candidates(&self) -> Vec<AgentOfferCandidate> {
         // Snapshot built-ins + any wired catalog into one slice, then run the
         // shared merge. Built-ins are listed first; the shared fn applies
         // later-wins precedence so a same-named catalog entry overrides them.
@@ -738,7 +873,16 @@ impl PoolSubagentSpawner {
         if let Some(catalog) = self.agent_catalog.get() {
             defs.extend(catalog.read().await.iter().cloned());
         }
-        crate::agent_listing_entries(&defs)
+        crate::agent_listing_candidates(&defs)
+    }
+
+    /// Render-only view retained for callers that do not own Mod filtering.
+    pub(super) async fn listing_entries(&self) -> Vec<SubagentListingEntry> {
+        self.listing_candidates()
+            .await
+            .into_iter()
+            .map(|candidate| candidate.listing)
+            .collect()
     }
     /// Build the child [`SubagentContext`] for a spawn: definition resolution +
     /// caller model override + inheritance (tool invoker / budget / api seam) +
@@ -813,6 +957,7 @@ impl PoolSubagentSpawner {
         let event = hooks::events::HookEvent::AgentSpawn {
             agent_type: request.subagent_type.clone(),
             model: request.model.clone(),
+            model_profile: request.model_profile.clone(),
             cwd: request.cwd.clone(),
             background: request.run_in_background,
             parent_agent_id: request.creator_agent_id,
@@ -898,6 +1043,7 @@ impl PoolSubagentSpawner {
             .apply_agent_spawn_hook(request, origin_session_id)
             .await?;
         let request = rewritten.as_ref().unwrap_or(request);
+        validate_child_model_profile(request).map_err(SubagentSpawnError::Runtime)?;
 
         // The parent / main-loop model this spawn resolves against: the request's
         // `parent_model_override` (the LIVE session model at top level / the
@@ -905,15 +1051,26 @@ impl PoolSubagentSpawner {
         // `AgentTool`, claude `AgentTool.tsx:418`) else the spawner's boot/live
         // default. Computed ONCE and threaded into definition + model-override +
         // tool resolution so all three agree on the same anchor.
-        let parent_selection = self.effective_parent_selection(request);
+        let explicit_child_route = request.model.as_deref().is_some_and(|model| {
+            !lingxi_core::host::effort::trim_js_whitespace(model).is_empty()
+                && (request.model_profile.is_some() || model.contains('/'))
+        });
+        let has_parent_override = request
+            .parent_model_override
+            .as_deref()
+            .is_some_and(|model| !lingxi_core::host::effort::trim_js_whitespace(model).is_empty());
+        let parent_selection = match self.effective_parent_selection(request) {
+            Ok(selection) => selection,
+            // A complete child route can stand on its own when an unrelated
+            // root route was removed. Inheritance and explicit parent hints
+            // still require their own route to resolve successfully.
+            Err(_) if explicit_child_route && !has_parent_override => None,
+            Err(error) => return Err(SubagentSpawnError::Runtime(error.to_string())),
+        };
         let has_explicit_provider_model = request
             .model
             .as_deref()
-            .is_some_and(|model| !model.trim().is_empty())
-            && request
-                .model_profile
-                .as_deref()
-                .is_some_and(|profile| !profile.trim().is_empty());
+            .is_some_and(|model| !model.trim().is_empty());
         if parent_selection.is_none()
             && self.default_model_selection_provider.get().is_some()
             && !has_explicit_provider_model
@@ -922,21 +1079,37 @@ impl PoolSubagentSpawner {
                 "live session model/provider selection is unavailable".to_string(),
             ));
         }
-        let parent_model = parent_selection
-            .as_ref()
-            .map(|selection| selection.model.clone());
-        let mut def = self
-            .resolve_definition_with_profile(
-                &request.subagent_type,
-                parent_model.as_deref(),
-                parent_selection
-                    .as_ref()
-                    .and_then(|selection| selection.model_profile.as_deref()),
-                parent_selection
-                    .as_ref()
-                    .map(|selection| selection.provider_first_party),
+        let mut def = self.lookup_definition(&request.subagent_type).await;
+        // Select the caller's preference before resolving the definition's
+        // default: a profile without that default can still run an explicit
+        // provider-local model supplied by the caller.
+        let explicit_model = request
+            .model
+            .as_deref()
+            .map(lingxi_core::host::effort::trim_js_whitespace)
+            .filter(|model| !model.is_empty());
+        let preference = if let Some(model) = explicit_model {
+            AgentModel::Explicit(model.to_string())
+        } else if let Some(parent) = parent_selection.as_ref() {
+            crate::model_resolution::resolve_builtin_explore_model(
+                &def,
+                &parent.model,
+                parent.model_resolution_context.route.provider
+                    == Some(crate::model_resolution::ModelProviderKind::FirstParty),
             )
-            .await;
+        } else {
+            def.model.clone()
+        };
+        let child_selection = self
+            .resolve_child_model_selection(
+                &preference,
+                parent_selection.as_ref(),
+                explicit_model.and(request.model_profile.as_deref()),
+            )
+            .map_err(|error| SubagentSpawnError::Runtime(error.to_string()))?;
+        if let Some(selection) = &child_selection {
+            def.model = AgentModel::Explicit(selection.model.clone());
+        }
         // Per-spawn system-prompt override (workflow xBp / DBp): replace the
         // resolved definition's body with the caller's override BEFORE the Notes
         // trailer is appended by `make_subagent_context`.
@@ -953,75 +1126,55 @@ impl PoolSubagentSpawner {
                 }
             }
         }
-        // AgentTool spawn-surface parity: an explicit `model` from the caller
-        // (TS schema `model: 'sonnet' | 'opus' | 'haiku'`) takes precedence over
-        // the definition's model frontmatter (AgentTool.tsx:86).
-        // `model_profile` pins the CHILD only when accompanied by an explicit
-        // child model. Without `request.model` it is a parent hint and must not
-        // leak onto a definition that resolves to a different model.
-        let mut accepted_request_model_profile = request
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-            .and(request.model_profile.clone());
-        if let Some(model_pref) = request.model.as_deref() {
-            // Dual-LLM dual-PROVIDER routing: when the caller pinned a provider
-            // profile (`model_profile`), `request.model` is ALREADY the concrete
-            // provider-local wire model (the candidate's resolved `request_model`,
-            // e.g. `gpt-4o` / `gemini-1.5-pro`). The family-alias logic in
-            // `resolve_agent_model` (alias→parent-tier matching, parent region
-            // prefix) is Claude-shaped and would mangle a foreign concrete id, so
-            // it is BYPASSED here: the model is used verbatim as `Explicit`. The
-            // `profile` (set just below from `request.model_profile`) selects the
-            // provider in `messages_create_*_in`.
-            if request.model_profile.is_some() {
-                let (resolved, accepted) =
-                    self.resolve_provider_model_pref(model_pref, parent_model.as_deref())?;
-                def.model = AgentModel::Explicit(resolved);
-                if !accepted {
-                    accepted_request_model_profile = None;
-                }
-            } else {
-                let requested = AgentModel::Alias(model_pref.to_string());
-                def.model = match parent_model.as_deref() {
-                    Some(parent) => {
-                        AgentModel::Explicit(self.resolve_model_pref(&requested, parent))
-                    }
-                    None => requested,
-                };
-            }
-        }
-        // Per-spawn effort override (claude-code workflow `agent({effort})` →
-        // `me={...ie,effort:ae}`): a level/integer opt overrides the resolved
-        // definition's effort frontmatter. Ignored when unparseable.
-        if let Some(effort) = &request.effort {
-            if let Some(parsed) = crate::definition::AgentEffort::from_json(effort) {
-                def.effort = Some(parsed);
-            }
+        if let Some(effort) = request.effort.as_ref().filter(|effort| {
+            !effort.is_null()
+                && !effort.as_str().is_some_and(|value| {
+                    lingxi_core::host::effort::trim_js_whitespace(value).is_empty()
+                })
+        }) {
+            let parsed = crate::definition::AgentEffort::from_json(effort).ok_or_else(|| {
+                SubagentSpawnError::Runtime(format!("invalid subagent effort: {effort}"))
+            })?;
+            def.effort = Some(parsed);
         }
         let is_fork_spawn =
             request.fork_parent_system_prompt.is_some() || request.fork_context_messages.is_some();
+        let trusted_parent_override = request
+            .parent_permission_mode
+            .as_deref()
+            .and_then(crate::permission_mode::parse_wire_mode);
+        let parent_permission_mode = request
+            .parent_permission_mode
+            .clone()
+            .or_else(|| inherit.tool_invoker.permission_mode());
+        let parent_mode = parent_permission_mode
+            .as_deref()
+            .and_then(crate::permission_mode::parse_wire_mode)
+            .unwrap_or(self.permission_mode);
         let effective_permission_mode = if is_fork_spawn {
-            None
+            trusted_parent_override
         } else {
-            // (parity 2.1.212) The Agent/Task `mode` call param is DEPRECATED and
-            // ignored: claude reads the PARENT's live mode (`_=yn(l),y=_.mode`)
-            // and never consults the spawn param. The child therefore inherits the
-            // parent's live permission mode (`self.permission_mode`), with the
-            // agent-definition frontmatter as the ONLY override source. Pass `None`
-            // for the requested spawn mode so `request.mode` — carried for
-            // back-compat — is never applied.
+            // The model-authored `mode` parameter is ignored. The definition
+            // policy resolves against the actual immediate parent's mode;
+            // retaining a trusted parent override prevents the shared root
+            // invoker's gate from replacing it when the definition inherits.
             crate::permission_mode::effective_child_mode(
                 None,
-                self.permission_mode,
+                parent_mode,
                 def.permission_mode,
                 self.spawn_bypass_gates.get().copied().unwrap_or_default(),
                 &mut |m| tracing::warn!("{m}"),
             )
+            .or(trusted_parent_override)
         };
         if effective_permission_mode == Some(PermissionMode::Plan) {
             def.permission_mode = AgentPermissionMode::Plan;
+        } else if effective_permission_mode.is_some()
+            && def.permission_mode == AgentPermissionMode::Plan
+        {
+            // A permissive parent can suppress the definition's Plan fallback.
+            // Tool schema narrowing must follow the chosen enforcing mode.
+            def.permission_mode = AgentPermissionMode::Bubble;
         }
         // Fork carriers (codex #5): on the fork path `fork_context_messages`
         // carries the byte-exact forked prefix and `fork_parent_system_prompt`
@@ -1033,6 +1186,11 @@ impl PoolSubagentSpawner {
             request.fork_parent_system_prompt.clone(),
             restored_agent_id.unwrap_or_default(),
         );
+        ctx.agent_spawn_provenance = request.agent_spawn_provenance.clone();
+        ctx.instruction_context = request.instruction_context.clone().unwrap_or_default();
+        ctx.instruction_context_is_override =
+            ctx.agent_definition.is_fork() && request.instruction_context.is_some();
+        ctx.instruction_provider = self.instruction_provider.clone();
         ctx.session_interactive = self.session_interactive;
         ctx.origin_session_id = origin_session_id;
         // Hand the child the refusal-fallback chain. Upstream's subagents share
@@ -1087,16 +1245,17 @@ impl PoolSubagentSpawner {
             .unwrap_or_else(|| Arc::clone(&inherit.budget));
         ctx.budget = Some(child_budget);
         ctx.api_client.clone_from(&self.api_client);
-        // Per-spawn provider routing (dual-LLM dual-PROVIDER): the runner passes
-        // this as the `profile` arg of the api client's `messages_create_*_in`
-        // methods so the round-trip targets the candidate's resolved provider.
-        let resolved_model = crate::runner::resolve_model(&ctx);
-        ctx.model_profile = accepted_request_model_profile.or_else(|| {
-            parent_selection
-                .as_ref()
-                .filter(|selection| selection.model == resolved_model)
-                .and_then(|selection| selection.model_profile.clone())
-        });
+        // The same resolution chooses the wire model and profile, even when
+        // the model changed within the selected provider's catalog.
+        ctx.model_profile = child_selection
+            .as_ref()
+            .and_then(|selection| selection.model_profile.clone());
+        ctx.model_resolution_context_provider =
+            self.model_resolution_context_provider.get().cloned();
+        ctx.server_fallback_model_enforcement = self
+            .model_restriction
+            .as_ref()
+            .map(|(enforcement, _)| (*enforcement).clone());
         // G4/G5: thread the runner's hook executor + skill loader + hook context
         // seed from the set-once cells (None ⇒ runner skips those steps).
         ctx.hook_executor = self.hook_executor.get();
@@ -1107,6 +1266,11 @@ impl PoolSubagentSpawner {
             .unwrap_or(false);
         ctx.skill_loader = self.skill_loader.get();
         ctx.hook_session_id = ctx.origin_session_id.unwrap_or(self.hook_session_id);
+        ctx.stop_hook_scope = request.stop_hook_scope;
+        ctx.subagent_stop_firer = ctx
+            .hook_executor
+            .as_ref()
+            .and_then(|executor| executor.subagent_stop_firer(ctx.hook_session_id));
         ctx.hook_cwd = self.hook_cwd.clone();
         // A RESTORE seeds the child from its recovered conversation, replacing
         // prompt + fork-context + preload (see `SubagentContext::resumed_history`).
@@ -1180,9 +1344,108 @@ impl PoolSubagentSpawner {
             std::mem::take(&mut agent_mcp.cleanups),
             ctx.agent_definition.agent_type.clone(),
         );
-        let (tool_schemas, allowed_tools) = self
-            .resolve_tools(&ctx.agent_definition, request.depth, &agent_mcp.tools)
+        let handback_gates = crate::tool_resolver::HandbackToolGates {
+            opt_in: request.handback_opt_in,
+            feature_enabled: request.handback_enabled,
+            parent_auto: parent_permission_mode.as_deref() == Some("auto"),
+            child_auto: effective_permission_mode.unwrap_or(parent_mode) == PermissionMode::Auto,
+            exact_tools: matches!(
+                ctx.agent_definition.tools,
+                AgentToolPolicy::All {
+                    use_exact_tools: true
+                }
+            ),
+            structured_output: request.schema.is_some(),
+            fork: is_fork_spawn,
+            observer: request.query_source_label.as_deref()
+                == Some(lingxi_core::host::subagent_spawn::OBSERVER_QUERY_SOURCE),
+        };
+        let mut handback_runtime = ctx
+            .task_registry
+            .clone()
+            .filter(|_| {
+                request.handback_opt_in
+                    || request.restored_handback_state.is_some()
+                    || !request.restored_handback_history.is_empty()
+            })
+            .map(|registry| {
+                crate::handback::HandbackRuntime::new(
+                    registry,
+                    ctx.agent_id,
+                    ctx.parent_agent_id,
+                    request
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| ctx.agent_definition.agent_type.clone()),
+                    ctx.agent_definition.agent_type.clone(),
+                    request.restored_handback_state.clone(),
+                )
+            });
+        let handback_supplied = handback_runtime.take().map(|runtime| Arc::new(runtime));
+        let handback_tool = handback_supplied.as_ref().map(|runtime| {
+            Arc::new(crate::handback::SubagentHandbackTool(runtime.clone()))
+                as Arc<dyn tool_api::Tool>
+        });
+        let (tool_schemas, allowed_tools, handback_active) = self
+            .resolve_tools_with_handback(
+                &ctx.agent_definition,
+                child_selection.as_ref(),
+                request.depth,
+                &agent_mcp.tools,
+                handback_tool.as_ref(),
+                handback_gates,
+            )
             .await?;
+        // Preserve potential eligibility across a live mode switch. Aliases and
+        // forbidden launch kinds remain excluded when the child later resumes.
+        drop(handback_tool);
+        if let Some(mut runtime) = handback_supplied {
+            let collision = !handback_active
+                && allowed_tools
+                    .iter()
+                    .any(|name| name == lingxi_core::host::handback::HANDBACK_TOOL_NAME);
+            Arc::get_mut(&mut runtime)
+                .expect("tool resolver released private tool instance")
+                .eligible = handback_gates.opt_in
+                && handback_gates.feature_enabled.unwrap_or(true)
+                && !handback_gates.exact_tools
+                && !handback_gates.structured_output
+                && !handback_gates.fork
+                && !handback_gates.observer
+                && !collision;
+            Arc::get_mut(&mut runtime)
+                .expect("private report runtime")
+                .spawn_bypass_gates = self.spawn_bypass_gates.get().copied().unwrap_or_default();
+            Arc::get_mut(&mut runtime)
+                .expect("private report runtime")
+                .trusted_parent_permission_mode = trusted_parent_override;
+            Arc::get_mut(&mut runtime)
+                .expect("private report runtime")
+                .ends_turn_enabled = request.handback_ends_turn_enabled;
+            Arc::get_mut(&mut runtime)
+                .expect("private report runtime")
+                .sender_id = request
+                .name
+                .clone()
+                .unwrap_or_else(|| ctx.agent_id.to_string());
+            Arc::get_mut(&mut runtime)
+                .expect("private report runtime")
+                .restored_history =
+                tokio::sync::Mutex::new(request.restored_handback_history.clone());
+            Arc::get_mut(&mut runtime)
+                .expect("private report runtime")
+                .report_output = ctx
+                .transcript_fs
+                .clone()
+                .zip(ctx.transcript_subdir.parent())
+                .map(
+                    |(fs, session_dir)| crate::handback_output::HandbackReportOutput {
+                        fs,
+                        session_dir: session_dir.to_path_buf(),
+                    },
+                );
+            ctx.handback = Some(runtime);
+        }
         ctx.tool_schemas = tool_schemas;
         ctx.allowed_tools = allowed_tools;
         // Per-agent working directory (claude-code `me = cwd ?? worktreePath`):
@@ -1228,15 +1491,12 @@ impl PoolSubagentSpawner {
         // worktree path (or honours an explicit `cwd`) and threads it via
         // `request.cwd`. Set it on the context so the runner threads it into every
         // dispatched tool's `cwd`. `None` ⇒ the shared session workspace (legacy).
-        // Per-spawn permission mode (claude-code 2.1.212): the Agent `mode` call
-        // param is DEPRECATED and ignored — the child inherits the parent's live
-        // permission-mode anchor (claude `_=yn(l),y=_.mode`), and ONLY the agent
-        // definition's own permission mode may override it. The resulting override
-        // (or `None`, meaning "inherit the live mode unchanged") is threaded into
-        // the child's tool-dispatch permission checks (via
+        // Thread the selected definition mode or trusted immediate-parent mode
+        // into the child's dispatch checks. An absent override inherits the
+        // bound invoker's live gate. The fork preserves a supplied trusted
+        // parent mode while keeping its exact inherited tool pool (via
         // `SubagentContext::permission_mode_override` → `SubagentInvocationContext`
-        // → the gate's `PermissionCheckContext`). The fork path replays the parent's
-        // rendered context verbatim, so it never applies a mode override.
+        // → the gate's `PermissionCheckContext`).
         ctx.permission_mode_override =
             effective_permission_mode.map(|m| crate::permission_mode::wire_mode_str(m).to_string());
         // Carry the fork-time command-deny snapshot through to the runner, which
@@ -1253,6 +1513,7 @@ impl PoolSubagentSpawner {
         ctx.max_input_bytes_per_turn = request.max_input_bytes_per_turn;
         ctx.query_source_label = request.query_source_label.clone();
         ctx.model_attempt = request.model_attempt.clone();
+        ctx.handback_restore_start = request.restore_handback_start.clone();
         // G011: thread the caller's correlation id (Fusion's `{run_id}:p{index}`)
         // onto the child so its transcript can be matched back to a run.
         ctx.correlation_id = request.correlation_id.clone();

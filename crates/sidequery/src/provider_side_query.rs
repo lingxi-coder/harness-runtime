@@ -52,6 +52,14 @@ use std::sync::Arc;
 /// Default Anthropic API base URL used when the caller passes `None`.
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
+fn custom_side_query_prompt(text: Option<&str>) -> Option<llm_runtime::SystemPromptInput> {
+    text.map(|text| {
+        llm_runtime::service::native_custom_system_prompt(llm_runtime::PromptText::from_string(
+            text,
+        ))
+    })
+}
+
 /// Static credential id used inside the internal config for a static API key.
 const SIDEQUERY_CRED_ID: &str = "sidequery_key";
 
@@ -333,10 +341,12 @@ impl SideQueryClient for ProviderSideQueryClient {
                 CanonicalSideQueryRequest::Plain(request),
             ) => {
                 let query_source = request.query_source.as_str();
+                let system_prompt = custom_side_query_prompt(request.system_prompt.as_deref());
                 let canonical = service.build_side_query_request_with_thinking(
                     &request.model,
                     request.profile.as_deref(),
-                    request.system_prompt.as_deref(),
+                    system_prompt.as_ref(),
+                    false,
                     request.messages,
                     request.tools,
                     Some(request.max_tokens),
@@ -402,10 +412,12 @@ impl SideQueryClient for ProviderSideQueryClient {
         if let ProviderSideQueryBackend::Session(service) = &self.backend {
             let wants_structured = request.output_format.is_some();
             let query_source = request.query_source.as_str();
+            let system_prompt = custom_side_query_prompt(request.system_prompt.as_deref());
             let mut canonical = service.build_side_query_request_with_thinking(
                 &request.model,
                 request.profile.as_deref(),
-                request.system_prompt.as_deref(),
+                system_prompt.as_ref(),
+                false,
                 request.messages,
                 request.tools,
                 // Fork compaction resolves the parent's ordinary output
@@ -784,16 +796,21 @@ fn convert_content_block(
         lingxi_core::types::ContentBlock::ProviderContent { protocol, value } => {
             Ok(llm_runtime::ContentBlock::ProviderContent { protocol, value })
         }
-        lingxi_core::types::ContentBlock::Text { text } => Ok(llm_runtime::ContentBlock::Text {
-            text,
-            cache_control: None,
-        }),
+        lingxi_core::types::ContentBlock::Text { text, citations } => {
+            Ok(llm_runtime::ContentBlock::Text {
+                text,
+                citations,
+                cache_control: None,
+            })
+        }
         lingxi_core::types::ContentBlock::TextJsUtf16 {
             text,
             utf16_code_units,
+            citations,
         } => Ok(llm_runtime::ContentBlock::TextJsUtf16 {
             text,
             utf16_code_units,
+            citations,
             cache_control: None,
         }),
         lingxi_core::types::ContentBlock::ToolUse {
@@ -839,6 +856,7 @@ fn convert_content_block(
             Ok(llm_runtime::ContentBlock::Text {
                 text: render_media_analysis(&analysis),
                 cache_control: None,
+                citations: None,
             })
         }
         // Low-frequency server-side blocks: replayed verbatim into the request
@@ -969,6 +987,10 @@ fn convert_one_tool(
         ..Default::default()
     })
 }
+
+#[cfg(test)]
+#[path = "computer_scope_tests.rs"]
+mod computer_scope_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1149,6 +1171,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hook_prompt_normalizes_utf16_text_in_the_recorded_sdk_request() {
+        let response_body = serde_json::json!({
+            "id":"msg_hook_prompt_utf16",
+            "model":"claude-haiku-4-5",
+            "content":[{"type":"text","text":"feature"}],
+            "stop_reason":"end_turn",
+            "usage":{"input_tokens":1,"output_tokens":1}
+        })
+        .to_string();
+        let transport = Arc::new(StubTransport::new(response_body));
+        let client = ProviderSideQueryClient::new("sk-test", None, transport.clone());
+        let high = 0xd800;
+        let mut prompt_units = "<text>\n> ".encode_utf16().collect::<Vec<_>>();
+        prompt_units.push(high);
+        prompt_units.extend("\n</text>\nWhich label fits best?".encode_utf16());
+        let prompt_display = String::from_utf16_lossy(&prompt_units);
+        let mut request = req(None);
+        request.query_source = QuerySource::Custom("hook_prompt".into());
+        request.system_prompt = Some(r#"Answer with exactly one label: "\ud800"."#.into());
+        request.messages = vec![ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
+                text: prompt_display.clone(),
+                utf16_code_units: prompt_units,
+                citations: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        }];
+
+        let response = client.query(request).await.expect("hook prompt query");
+        assert_eq!(response.text.as_deref(), Some("feature"));
+        let received = transport.received.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        let raw_body_text = received[0].body.as_deref().expect("SDK request body");
+        assert!(raw_body_text.contains('\u{fffd}'));
+        let body: serde_json::Value =
+            serde_json::from_str(raw_body_text).expect("recorded SDK request JSON");
+        assert_eq!(body["messages"][0]["content"][0]["text"], prompt_display);
+        assert_eq!(
+            body["system"][0]["text"],
+            r#"Answer with exactly one label: "\ud800"."#
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_sidequery_keeps_exact_utf16_in_the_recorded_sdk_request() {
+        let response_body = serde_json::json!({
+            "id":"msg_ordinary_utf16",
+            "model":"claude-haiku-4-5",
+            "content":[{"type":"text","text":"feature"}],
+            "stop_reason":"end_turn",
+            "usage":{"input_tokens":1,"output_tokens":1}
+        })
+        .to_string();
+        let transport = Arc::new(StubTransport::new(response_body));
+        let client = ProviderSideQueryClient::new("sk-test", None, transport.clone());
+        let units = vec![b'a' as u16, 0xd800, b'z' as u16];
+        let display = String::from_utf16_lossy(&units);
+        let mut request = req(None);
+        request.messages = vec![ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
+                text: display,
+                utf16_code_units: units,
+                citations: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        }];
+
+        client.query(request).await.expect("ordinary side query");
+
+        let received = transport.received.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        let wire = received[0]
+            .body
+            .as_deref()
+            .expect("recorded SDK request body");
+        assert!(wire.contains(r#"a\ud800z"#), "{wire}");
+        assert!(!wire.contains('\u{fffd}'), "{wire}");
+    }
+
+    #[tokio::test]
     async fn side_question_text_blocks_use_claude_separator() {
         let body = serde_json::json!({
             "id": "msg_side_question",
@@ -1300,6 +1408,7 @@ mod tests {
                 content: "Conversation compacted".to_string(),
                 subtype: None,
                 compact_metadata: None,
+                model_fallback: None,
                 refusal_fallback: None,
             },
             ConversationMessage::user(MessageId::new(), "existing context".into()),
@@ -1761,13 +1870,19 @@ mod tests {
         transport: Arc<StreamStubTransport>,
         analytics: Option<Arc<telemetry::AnalyticsBus>>,
     ) -> ProviderSideQueryClient {
-        structured_session_client_with_parent_forced_tool_choice(transport, analytics, false)
+        structured_session_client_with_parent_forced_tool_choice(
+            transport,
+            analytics,
+            false,
+            "claude-sonnet-4-20250514",
+        )
     }
 
     fn structured_session_client_with_parent_forced_tool_choice(
         transport: Arc<StreamStubTransport>,
         analytics: Option<Arc<telemetry::AnalyticsBus>>,
         parent_forced_tool_choice: bool,
+        request_model: &str,
     ) -> ProviderSideQueryClient {
         let config = ClientConfig {
             providers: vec![ProviderProfile {
@@ -1782,8 +1897,8 @@ mod tests {
                     id: "session-key".to_string(),
                 },
                 models: vec![ModelProfile {
-                    display_model: "claude-sonnet-4-20250514".to_string(),
-                    request_model: "claude-sonnet-4-20250514".to_string(),
+                    display_model: request_model.to_string(),
+                    request_model: request_model.to_string(),
                     billing_model: "claude-sonnet-4".to_string(),
                     aliases: vec![],
                     description: None,
@@ -1836,9 +1951,14 @@ mod tests {
     #[tokio::test]
     async fn session_json_schema_does_not_inherit_parent_forced_tool_choice() {
         let transport = Arc::new(StreamStubTransport::text_response("{\"ok\":true}"));
-        let client =
-            structured_session_client_with_parent_forced_tool_choice(transport.clone(), None, true);
-        let request = strict_req();
+        let client = structured_session_client_with_parent_forced_tool_choice(
+            transport.clone(),
+            None,
+            true,
+            "claude-sonnet-4-6",
+        );
+        let mut request = strict_req();
+        request.model = "claude-sonnet-4-6".into();
         let expected_schema = request.schema.clone();
 
         let response = client
@@ -2154,7 +2274,3 @@ mod tests {
         );
     }
 }
-
-#[cfg(test)]
-#[path = "computer_scope_tests.rs"]
-mod computer_scope_tests;

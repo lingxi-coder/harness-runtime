@@ -22,7 +22,9 @@
 
 use crate::conversation::ConversationOrchestrator;
 use async_trait::async_trait;
-use serde_json::Value;
+use hooks::attachment::PersistedHookOutput;
+use hooks::ExactHookText;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::{Arc, OnceLock, Weak};
 
 /// Persists hook-run attachments to the session transcript.
@@ -52,17 +54,39 @@ impl JsonlHookAttachmentSink {
 
 #[async_trait]
 impl hooks::HookAttachmentSink for JsonlHookAttachmentSink {
-    async fn record(&self, attachment: Value) {
+    async fn record(&self, attachment: Utf16JsonProjection) {
         // Unattached, or the orchestrator has been dropped (engine shutdown):
         // nothing to persist to.
         let Some(orch) = self.orch.get().and_then(Weak::upgrade) else {
             return;
         };
-        orch.persist_hook_attachment_to_jsonl(attachment).await;
+        if !attachment.keys.is_empty() || attachment.validate().is_err() {
+            tracing::warn!("discarding invalid exact hook attachment projection");
+            return;
+        }
+        let utf16_overrides = attachment
+            .strings
+            .iter()
+            .map(|sidecar| {
+                (
+                    format!("/attachment{}", sidecar.pointer),
+                    sidecar.code_units.clone(),
+                )
+            })
+            .collect();
+        orch.persist_hook_attachment_to_jsonl(attachment.value, utf16_overrides)
+            .await;
     }
 
-    async fn persist_large_output(&self, text: &str) -> Option<String> {
-        let orch = self.orch.get().and_then(Weak::upgrade)?;
+    async fn persist_large_output(
+        &self,
+        text: &ExactHookText,
+    ) -> Result<PersistedHookOutput, String> {
+        let orch = self
+            .orch
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| "tool result was not saved".to_string())?;
         orch.persist_large_hook_output(text).await
     }
 }

@@ -25,10 +25,33 @@
 //! invented.
 
 use super::MemoryFile;
+use memory::lingxi_md::agents::InstructionFilesMode;
 use memory::lingxi_md::hierarchy::{self, HierarchyEntry};
 use memory::lingxi_md::LingxiMdExcluder;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+/// Native path.relative(cwd, file), including files outside the current cwd.
+pub(crate) fn relative_display_path(file: &Path, cwd: &Path) -> String {
+    let file_parts = file.components().collect::<Vec<_>>();
+    let cwd_parts = cwd.components().collect::<Vec<_>>();
+    let common = file_parts
+        .iter()
+        .zip(&cwd_parts)
+        .take_while(|(file, cwd)| file == cwd)
+        .count();
+    if common == 0 && file.is_absolute() {
+        return file.display().to_string();
+    }
+    let mut relative = PathBuf::new();
+    for _ in &cwd_parts[common..] {
+        relative.push("..");
+    }
+    for part in &file_parts[common..] {
+        relative.push(part.as_os_str());
+    }
+    relative.display().to_string()
+}
 
 /// Expand probed hierarchy entries into [`MemoryFile`]s.
 ///
@@ -77,12 +100,14 @@ fn expand(
             excluder,
         );
         for (idx, entry) in expanded.into_iter().enumerate() {
-            let body = entry.body.trim().to_string();
-            if body.is_empty() {
+            let body = entry.body;
+            if lingxi_core::host::instruction_announcements::js_trim(&body).is_empty() {
                 continue;
             }
             out.push(MemoryFile {
                 path: entry.path,
+                parent: entry.parent,
+                source_content: Some(body.clone()),
                 body,
                 is_local_override: idx == 0 && e.is_local_override,
                 tier: e.tier,
@@ -106,6 +131,57 @@ fn matching_conditional(files: Vec<MemoryFile>, trigger: &Path, cwd: &Path) -> V
         .collect()
 }
 
+/// Fresh C7 rule selection, independent of the eager Gv/qb snapshot.
+/// Only Managed, User and cwd-level rule directories are traversed. Nested
+/// directory memory files belong to the separate successful-Read producer.
+#[must_use]
+pub fn discover_conditional_rules(
+    trigger: &Path,
+    cwd: &Path,
+    home: &Path,
+    managed_dir: Option<&Path>,
+    excluder: Option<&LingxiMdExcluder>,
+    mode: InstructionFilesMode,
+) -> Vec<MemoryFile> {
+    let mut seen = HashSet::new();
+    let mut out =
+        managed_user_conditional_rules(trigger, cwd, home, managed_dir, excluder, mode, &mut seen);
+    if mode == InstructionFilesMode::ManagedOnly {
+        return out;
+    }
+    for dir in &hierarchy::split_ancestors(trigger, cwd).cwd_level {
+        let mut entries = Vec::new();
+        hierarchy::probe_dir_cwd_level(dir, &mut entries, &mut seen);
+        let files = expand(entries, cwd, home, false, &mut seen, excluder);
+        out.extend(matching_conditional(files, trigger, cwd));
+    }
+    out
+}
+
+fn managed_user_conditional_rules(
+    trigger: &Path,
+    cwd: &Path,
+    home: &Path,
+    managed_dir: Option<&Path>,
+    excluder: Option<&LingxiMdExcluder>,
+    mode: InstructionFilesMode,
+    seen: &mut HashSet<PathBuf>,
+) -> Vec<MemoryFile> {
+    let mut managed_entries = Vec::new();
+    if let Some(managed) = managed_dir {
+        hierarchy::probe_managed_rules(managed, &mut managed_entries, seen);
+    }
+    let managed_files = expand(managed_entries, cwd, home, false, seen, excluder);
+    let mut out = matching_conditional(managed_files, trigger, cwd);
+    if mode != InstructionFilesMode::ManagedOnly {
+        let mut user_entries = Vec::new();
+        hierarchy::probe_user_rules(home, &mut user_entries, seen);
+        let user_files = expand(user_entries, cwd, home, true, seen, excluder);
+        out.extend(matching_conditional(user_files, trigger, cwd));
+    }
+    out
+}
+
 /// Discover every memory file that governs `trigger`'s location.
 ///
 /// Returns them in the oracle's emission order. PURE and STATELESS across
@@ -113,7 +189,7 @@ fn matching_conditional(files: Vec<MemoryFile>, trigger: &Path, cwd: &Path) -> V
 /// so re-running re-finds the same files and a memory file created mid-session
 /// is picked up. The session-level "already sent to the model" set is the
 /// oracle's `loadedNestedMemoryPaths`, which lives at the CALLER
-/// (`ConversationOrchestrator::nested_memory_reminder_message`) — conflating
+/// (`ConversationOrchestrator::nested_memory_reminder_messages`) — conflating
 /// the two here would freeze discovery at whatever existed on turn one.
 ///
 /// Callers likewise own the "has the model already read this" question; this
@@ -137,28 +213,43 @@ pub fn discover_with_excludes(
     managed_dir: Option<&Path>,
     excluder: Option<&LingxiMdExcluder>,
 ) -> Vec<MemoryFile> {
+    discover_with_mode(
+        trigger,
+        cwd,
+        home,
+        managed_dir,
+        excluder,
+        InstructionFilesMode::LingxiMd,
+    )
+}
+
+/// Existing instruction/rules discovery with the managed-only read boundary.
+#[must_use]
+pub fn discover_with_mode(
+    trigger: &Path,
+    cwd: &Path,
+    home: &Path,
+    managed_dir: Option<&Path>,
+    excluder: Option<&LingxiMdExcluder>,
+    mode: InstructionFilesMode,
+) -> Vec<MemoryFile> {
     let mut out: Vec<MemoryFile> = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
 
     // Pass 1 — `NLu`: Managed + User rules, CONDITIONAL only, matched against
     // the trigger. Unconditional Managed/User memory is already in the eager
     // block, so only the glob-gated half can be news here.
-    {
-        // `NLu` calls `lfo` TWICE with different `includeExternal`:
-        // `lfo(e,n,"Managed",t,!1)` then `lfo(e,o,"User",t,!0)`. The User tier's
-        // external `@import`s always resolve; Managed's never do. Two expands,
-        // not one, or the split is lost.
-        let mut managed_entries = Vec::new();
-        if let Some(managed) = managed_dir {
-            hierarchy::probe_managed_rules(managed, &mut managed_entries, &mut seen);
-        }
-        let managed_files = expand(managed_entries, cwd, home, false, &mut seen, excluder);
-        out.extend(matching_conditional(managed_files, trigger, cwd));
-
-        let mut user_entries = Vec::new();
-        hierarchy::probe_user_rules(home, &mut user_entries, &mut seen);
-        let user_files = expand(user_entries, cwd, home, true, &mut seen, excluder);
-        out.extend(matching_conditional(user_files, trigger, cwd));
+    out.extend(managed_user_conditional_rules(
+        trigger,
+        cwd,
+        home,
+        managed_dir,
+        excluder,
+        mode,
+        &mut seen,
+    ));
+    if mode == InstructionFilesMode::ManagedOnly {
+        return out;
     }
 
     let ancestors = hierarchy::split_ancestors(trigger, cwd);
@@ -188,15 +279,153 @@ pub fn discover_with_excludes(
     out
 }
 
+/// AGENTS.md is a successful-Read attachment, independent of the older
+/// touched-file rules path. It uses the frozen eager contents for body dedup.
+#[must_use]
+pub fn discover_agents(
+    trigger: &Path,
+    root: &Path,
+    home: &Path,
+    mode: InstructionFilesMode,
+    excluder: Option<&LingxiMdExcluder>,
+    eager_paths: &HashSet<PathBuf>,
+    eager_project_bodies: &HashSet<String>,
+) -> Vec<MemoryFile> {
+    use memory::lingxi_md::agents::{ancestors, identity};
+    if !matches!(
+        mode,
+        InstructionFilesMode::LingxiMdOrAgentsMd | InstructionFilesMode::LingxiMdAndAgentsMd
+    ) || !memory::lingxi_md::agents::attachments_enabled()
+    {
+        return Vec::new();
+    }
+    let root = identity(root);
+    let trigger = identity(trigger);
+    if trigger == root || !trigger.starts_with(&root) {
+        return Vec::new();
+    }
+    let approved = migrations::global_config::global_config_path().is_some_and(|path| {
+        migrations::global_config::check_has_lingxi_md_external_includes_approved(&path, &root)
+    });
+    if mode == InstructionFilesMode::LingxiMdOrAgentsMd
+        && !ancestors(&root, None, home, false, approved, excluder).is_empty()
+    {
+        return Vec::new();
+    }
+    let Some(parent) = trigger.parent() else {
+        return Vec::new();
+    };
+    let branded = ancestors(parent, Some(&root), home, false, approved, excluder);
+    let branded_dirs: HashSet<_> = branded.iter().map(|group| group.dir.clone()).collect();
+    let mut paths: HashSet<_> = eager_paths.iter().map(|path| identity(path)).collect();
+    let mut bodies = eager_project_bodies.clone();
+    for group in &branded {
+        for file in &group.files {
+            paths.insert(identity(&file.path));
+            bodies.insert(file.body.trim().to_string());
+        }
+    }
+    ancestors(parent, Some(&root), home, true, approved, excluder)
+        .into_iter()
+        .filter(|group| {
+            mode == InstructionFilesMode::LingxiMdAndAgentsMd || !branded_dirs.contains(&group.dir)
+        })
+        .flat_map(|group| group.files)
+        .filter(|file| !bodies.contains(file.body.trim()) && paths.insert(identity(&file.path)))
+        .map(super::memory_block::agent_memory_file)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{discover_with_excludes, MemoryFile};
+    use super::{discover_conditional_rules, discover_with_excludes, MemoryFile};
+    use memory::lingxi_md::agents::InstructionFilesMode;
     use memory::lingxi_md::LingxiMdExcluder;
     use std::fs;
     use std::path::PathBuf;
 
     fn names(files: &[MemoryFile]) -> Vec<PathBuf> {
         files.iter().map(|f| f.path.clone()).collect()
+    }
+
+    #[test]
+    fn conditional_walk_reads_rule_scopes_without_eager_or_nested_memory_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("repo");
+        let home = tmp.path().join("home");
+        let managed = tmp.path().join("managed");
+        let trigger = cwd.join("pkg/file.rs");
+        fs::create_dir_all(trigger.parent().unwrap()).unwrap();
+        let managed_rule = managed.join(".lingxi/rules/managed.md");
+        let user_rule = home.join(".lingxi/rules/user.md");
+        let project_rule = cwd.join(".lingxi/rules/project.md");
+        for path in [&managed_rule, &user_rule, &project_rule] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "---\npaths: pkg/**\n---\ncurrent rule").unwrap();
+        }
+        // A full hierarchy reload would expose these conditional bodies. C7
+        // only reads rules directories at the current cwd's ancestor levels.
+        fs::write(
+            cwd.join(branding::MEMORY_FILE),
+            "---\npaths: pkg/**\n---\neager file must remain outside C7",
+        )
+        .unwrap();
+        fs::write(
+            cwd.join("pkg").join(branding::MEMORY_FILE),
+            "---\npaths: pkg/**\n---\nnested file has a separate Read producer",
+        )
+        .unwrap();
+        assert_eq!(
+            names(&discover_conditional_rules(
+                &trigger,
+                &cwd,
+                &home,
+                Some(&managed),
+                None,
+                InstructionFilesMode::LingxiMd,
+            )),
+            vec![managed_rule.clone(), user_rule, project_rule],
+        );
+        assert_eq!(
+            names(&discover_conditional_rules(
+                &trigger,
+                &cwd,
+                &home,
+                Some(&managed),
+                None,
+                InstructionFilesMode::ManagedOnly,
+            )),
+            vec![managed_rule],
+        );
+    }
+
+    #[test]
+    fn conditional_walk_rechecks_current_file_and_globs_for_each_trigger() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("repo");
+        let home = tmp.path().join("home");
+        let rule = cwd.join(".lingxi/rules/current.md");
+        fs::create_dir_all(rule.parent().unwrap()).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        let trigger = cwd.join("docs/file.md");
+        let load = || {
+            discover_conditional_rules(
+                &trigger,
+                &cwd,
+                &home,
+                None,
+                None,
+                InstructionFilesMode::LingxiMd,
+            )
+        };
+        fs::write(&rule, "---\npaths: docs/**\n---\nold body").unwrap();
+        assert_eq!(load()[0].body, "old body");
+        fs::write(&rule, "---\npaths: docs/**\n---\nnew body").unwrap();
+        assert_eq!(load()[0].body, "new body");
+        fs::write(&rule, "---\npaths: src/**\n---\nchanged globs").unwrap();
+        assert!(load().is_empty());
+        fs::remove_file(rule).unwrap();
+        assert!(load().is_empty());
     }
 
     #[test]

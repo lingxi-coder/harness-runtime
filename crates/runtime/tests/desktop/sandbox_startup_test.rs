@@ -73,15 +73,20 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
     std::fs::write(lingxi_home.join("settings.json"), settings_json).expect("write settings.json");
 
     let cfg = DesktopConfig {
+        composition: None,
+        defer_session_start: false,
+        verified_computer_profiles: Vec::new(),
         build_info: harness_runtime::desktop::BuildInfo::default(),
         enable_automation_scheduler: true,
         host_workspace_trusted: None,
+        mod_render_surface: None,
         // Sandboxed boot: inherit no machine credentials, so the
         // assertions do not depend on the developer's env/keychain.
         isolated_credential_storage: true,
         credential_storage_policy: lingxi_core::host::CredentialStoragePolicy::PlainTextFixture,
         api_base: "https://api.anthropic.com".to_string(),
         api_key: String::new(),
+        api_key_source: llm_runtime::CredentialSource::Configured,
         api_key_helper: None,
         // (M13) Inert auth-resolver inputs: no managed OAuth forcing, no
         // FD-inherited key.
@@ -126,6 +131,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         append_system_prompt: None,
         session_id_override: None,
         session_writer_lease: None,
+        session_skill_allowlist: None,
         disable_slash_commands: false,
         add_dir: Vec::new(),
         cli_mcp_servers: Vec::new(),

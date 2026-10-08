@@ -10,6 +10,7 @@
 pub mod capabilities;
 pub mod effect_result;
 pub mod effects;
+pub mod exact_json;
 pub mod ids;
 pub mod iso8601;
 pub mod js_utf16;
@@ -19,6 +20,7 @@ pub mod messages;
 pub mod scope;
 pub mod secret;
 pub mod transport;
+pub mod utf16_json;
 
 // Re-exports for ergonomics.
 pub use capabilities::{FileSystemCapabilities, PlatformCapabilities};
@@ -33,8 +35,8 @@ pub use message_size::text_byte_size;
 pub use messages::{
     is_nested_media_value, CompactActiveGoalState, CompactBoundaryMetadata, CompactGoalOrigin,
     CompactTrigger, ContentBlock, ConversationMessage, DocumentSource, ImageSource, MediaAnalysis,
-    MediaObservation, MemoryEntry, MessageRole, PreservedMessages, PreservedSegment,
-    RefusalFallbackMetadata,
+    MediaObservation, MemoryEntry, MessageRole, ModelFallbackMetadata, PreservedMessages,
+    PreservedSegment, RefusalFallbackMetadata,
 };
 pub use scope::{MemoryEntryTier, Scope, SettingsScope, WritableScope};
 pub use secret::{

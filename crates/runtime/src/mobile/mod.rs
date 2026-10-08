@@ -58,6 +58,8 @@ mod device_skills;
 // v3 Phase 1: workflow-on-mobile composition pieces (launcher + deferred
 // invoker), consumed by the `host` build path.
 #[cfg(feature = "mobile")]
+mod transcript;
+#[cfg(feature = "mobile")]
 mod turn_durability;
 #[cfg(feature = "mobile")]
 mod workflow_support;
@@ -1066,11 +1068,28 @@ pub fn mobile_command_registry(
 /// `/loop`). Local App skills are file-backed Plugin commands and are added by
 /// `PluginManager` after this base catalog is installed.
 pub(crate) fn register_mobile_bundled_prompt_commands(reg: &mut CommandRegistry) {
+    // Canonical custom precommit skills must keep their origin/body across the
+    // boot/reload bundled reseed; Bash only suggests the custom implementations.
+    let custom_precommit: Vec<_> = reg
+        .list_all()
+        .into_iter()
+        .filter(|command| {
+            matches!(command.name.as_str(), "verify" | "simplify")
+                && matches!(
+                    command.loaded_from.as_deref(),
+                    Some("skills" | "commands_DEPRECATED")
+                )
+        })
+        .cloned()
+        .collect();
     // Bundled programmatic skills (`/loop`), mirroring desktop. Gated on the cron
     // kill-switch (loop.ts:83); mobile starts no cron scheduler so a scheduled
     // job is inert, but the skill's listing/usage path is harmless and faithful.
     let cron_enabled = tool_cron::cron_tools_enabled();
     command_api::builtins::register_bundled_skills(reg, cron_enabled);
+    for command in custom_precommit {
+        reg.register_command(command);
+    }
 }
 
 #[cfg(test)]

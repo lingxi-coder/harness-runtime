@@ -201,7 +201,8 @@ async fn snapshot_wait_states(registry: &mcp::McpRegistry) -> Vec<(String, WaitS
                 mcp::McpConnectionState::Cached { .. } => WaitState::Cached,
                 mcp::McpConnectionState::Connecting { .. }
                 | mcp::McpConnectionState::Reconnecting { .. } => WaitState::Pending,
-                mcp::McpConnectionState::AwaitingOAuth { .. } => WaitState::NeedsAuth,
+                mcp::McpConnectionState::AwaitingOAuth { .. }
+                | mcp::McpConnectionState::NeedsAuth { .. } => WaitState::NeedsAuth,
                 mcp::McpConnectionState::Failed { config, .. }
                 | mcp::McpConnectionState::Disconnected { config, .. }
                 | mcp::McpConnectionState::Stopped { config } => {

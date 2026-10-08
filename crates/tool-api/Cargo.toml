@@ -42,6 +42,7 @@ tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
 image = { version = "=0.24.9", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 base64 = "=0.22.1"
+boon = "0.6"
 # Only used by the feature-gated test_support module (mock FileSystem stream).
 futures = { version = "0.3", optional = true }
 

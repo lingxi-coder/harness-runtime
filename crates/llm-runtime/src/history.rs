@@ -5,6 +5,46 @@ use crate::{CostEstimate, ExecutionUsage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+fn deserialize_present_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bool::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_present_nullable_value<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<Value>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<Value>::deserialize(deserializer).map(Some)
+}
+
+/// Reserved metadata key for a host-projected Anthropic fallback iteration quote.
+pub const SERVER_FALLBACK_COST_QUOTE_KEY: &str = "server_fallback_cost_quote";
+
+/// Read the host-owned fallback quote envelope from response or stream usage
+/// metadata. Stream usage nests provider metadata under `stream`.
+pub fn server_fallback_cost_quote(metadata: &Value) -> Option<&Value> {
+    metadata
+        .get("stream")
+        .and_then(|stream| stream.get("llm_client"))
+        .and_then(|namespace| namespace.get(SERVER_FALLBACK_COST_QUOTE_KEY))
+        .or_else(|| {
+            metadata
+                .get("llm_client")?
+                .get(SERVER_FALLBACK_COST_QUOTE_KEY)
+        })
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryServerFallback {
+    pub event: lingxi_llm_client::providers::anthropic::fallback_response::ServerFallbackEvent,
+    pub profile: String,
+    pub lane: lingxi_llm_client::providers::anthropic::fallback_request::ServerLane,
+}
+
 /// Host history response with accounting and presentation metadata.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HistoryResponse {
@@ -30,11 +70,55 @@ pub struct HistoryResponse {
     #[serde(default)]
     pub provider_metadata: Value,
 }
+impl HistoryResponse {
+    /// Host-authored observations only. Wire projection clears this reserved
+    /// key before installing events admitted by the execution context.
+    pub fn server_fallback_events(&self) -> Vec<HistoryServerFallback> {
+        self.provider_metadata["llm_client"]["server_fallback_events"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|value| serde_json::from_value(value.clone()).ok())
+            .collect()
+    }
+
+    /// Native per-iteration quote fact when server fallback billing was active.
+    /// Presence distinguishes an incomplete native quote from an ordinary call
+    /// with no server-fallback iteration branch.
+    pub fn server_fallback_cost_quote(&self) -> Option<&Value> {
+        server_fallback_cost_quote(&self.provider_metadata)
+    }
+}
 
 /// Host history and presentation event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HistoryEvent {
+    /// SDK-decoded server routing event, admitted outside provider input.
+    ServerFallback {
+        event: Box<lingxi_llm_client::providers::anthropic::fallback_response::ServerFallbackEvent>,
+        profile: String,
+        lane: lingxi_llm_client::providers::anthropic::fallback_request::ServerLane,
+    },
+    /// Host-owned fact about the model serving the current provider response.
+    /// This is emitted for every admitted native fallback start, including
+    /// starts that do not produce a controller-facing `ServerFallback` event.
+    ResponseObserved {
+        model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response_id: Option<String>,
+    },
+    /// Host-owned quote for a physical provider response. Native server
+    /// fallback quotes are independent of aggregate token usage: `estimate`
+    /// stays `None` when the SDK iteration quote is incomplete, while the
+    /// explicit marker prevents callers from substituting the request-model
+    /// aggregate tariff.
+    CostQuoteObserved {
+        estimate: Option<CostEstimate>,
+        native_server_fallback: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary_model: Option<String>,
+    },
     /// SDK-normalized hosted search attribution and progress metadata.
     WebSearch {
         /// Search observation; never executable model content.
@@ -89,6 +173,15 @@ pub enum HistoryContentDelta {
         /// Partial text.
         text: String,
     },
+    /// Text delta with a runtime-only exact JavaScript UTF-16 representation.
+    /// The serialized host event keeps the ordinary display text; exact units
+    /// flow directly to the stream accumulator and are persisted on the final
+    /// `TextJsUtf16` block rather than as a Native JSONL field.
+    TextJsUtf16Delta {
+        text: String,
+        #[serde(skip)]
+        utf16_code_units: Vec<u16>,
+    },
     /// Partial JSON payload.
     InputJsonDelta {
         /// Partial JSON text.
@@ -111,6 +204,25 @@ pub enum HistoryContentDelta {
     CitationsDelta {
         /// Provider-specific citation payload (URL, title, range, etc.).
         citation: Value,
+    },
+    /// Replace an in-progress opaque native text block with its complete raw
+    /// provider snapshot, without creating a second transcript block or
+    /// emitting a second client-facing content-block start.
+    ProviderContentSnapshot {
+        /// Exact final provider-owned block value.
+        value: Value,
+    },
+    /// Final citation-field presence for a completed Text block. Unlike
+    /// `CitationsDelta`, this is a block snapshot and can represent an
+    /// explicitly null or empty field as well as citations that arrived late.
+    TextCitations {
+        /// Exact Text citation field presence; the inner option preserves null.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_nullable_value",
+            skip_serializing_if = "Option::is_none"
+        )]
+        citations: Option<Option<Value>>,
     },
     /// Append text to a `connector_text` block.
     ///
@@ -234,6 +346,13 @@ pub enum ContentBlock {
     Text {
         /// Text payload.
         text: String,
+        /// Exact provider field presence; the inner option preserves JSON null.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_nullable_value",
+            skip_serializing_if = "Option::is_none"
+        )]
+        citations: Option<Option<Value>>,
         /// Optional prompt-cache breakpoint.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
@@ -249,6 +368,13 @@ pub enum ContentBlock {
         text: String,
         /// Exact provider-visible UTF-16 code units.
         utf16_code_units: Vec<u16>,
+        /// Exact provider field presence; the inner option preserves JSON null.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_nullable_value",
+            skip_serializing_if = "Option::is_none"
+        )]
+        citations: Option<Option<Value>>,
         /// Optional prompt-cache breakpoint.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
@@ -287,9 +413,13 @@ pub enum ContentBlock {
         tool_call_id: String,
         /// Tool result JSON.
         output: Value,
-        /// Whether the result reports a tool failure.
-        #[serde(default)]
-        is_error: bool,
+        /// Whether the result reports a tool failure; `None` preserves omission.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_present_bool",
+            skip_serializing_if = "Option::is_none"
+        )]
+        is_error: Option<bool>,
         /// Optional prompt-cache breakpoint.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
@@ -369,6 +499,25 @@ pub enum ContentBlock {
         /// Ordered cache-editing operations (currently `delete` only).
         edits: Vec<CacheEdit>,
     },
+}
+
+impl ContentBlock {
+    /// Text a user-facing renderer may display from this block.
+    ///
+    /// Opaque Anthropic text remains one raw source block for replay, while its
+    /// provider-owned `text` field remains available to output surfaces.
+    #[must_use]
+    pub fn visible_text(&self) -> Option<&str> {
+        match self {
+            Self::Text { text, .. } | Self::TextJsUtf16 { text, .. } => Some(text),
+            Self::ProviderContent { protocol, value }
+                if protocol == "anthropic_messages" && value["type"] == "text" =>
+            {
+                value.get("text").and_then(Value::as_str)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// A single cache-editing operation inside a [`ContentBlock::CacheEdits`] block.
@@ -463,5 +612,76 @@ impl HistoryResponse {
         protocol: lingxi_llm_client::protocol::ProtocolFamily,
     ) -> Result<Self, crate::LlmError> {
         crate::history_projection::project_model_response(response, protocol, Value::Null, None)
+    }
+}
+
+#[cfg(test)]
+mod wire_presence_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn persisted_history_preserves_citations_and_optional_error_presence() {
+        for (citations, expected) in [
+            (None, None),
+            (Some(None), Some(Value::Null)),
+            (Some(Some(json!([]))), Some(json!([]))),
+        ] {
+            let text = ContentBlock::Text {
+                text: "answer".into(),
+                citations,
+                cache_control: None,
+            };
+            let serialized = serde_json::to_value(&text).unwrap();
+            assert_eq!(serialized.get("citations"), expected.as_ref());
+            let decoded: ContentBlock = serde_json::from_value(serialized).unwrap();
+            assert_eq!(decoded, text);
+        }
+
+        for is_error in [None, Some(false), Some(true)] {
+            let result = ContentBlock::ToolResult {
+                tool_call_id: "toolu_1".into(),
+                output: json!("ok"),
+                is_error,
+                cache_control: None,
+                cache_reference: None,
+            };
+            let serialized = serde_json::to_value(&result).unwrap();
+            assert_eq!(
+                serialized.get("is_error"),
+                is_error.map(Value::Bool).as_ref()
+            );
+            let decoded: ContentBlock = serde_json::from_value(serialized).unwrap();
+            assert_eq!(decoded, result);
+        }
+
+        let invalid_null = json!({
+            "type":"tool_result",
+            "tool_call_id":"toolu_1",
+            "output":"ok",
+            "is_error":null
+        });
+        assert!(serde_json::from_value::<ContentBlock>(invalid_null).is_err());
+    }
+
+    #[test]
+    fn text_citation_snapshot_events_preserve_absent_null_and_array() {
+        for (citations, expected) in [
+            (None, None),
+            (Some(None), Some(Value::Null)),
+            (Some(Some(json!([]))), Some(json!([]))),
+            (
+                Some(Some(json!([{"type":"location"}]))),
+                Some(json!([{"type":"location"}])),
+            ),
+        ] {
+            let event = HistoryContentDelta::TextCitations { citations };
+            let serialized = serde_json::to_value(&event).unwrap();
+            assert_eq!(serialized.get("citations"), expected.as_ref());
+            assert_eq!(
+                serde_json::from_value::<HistoryContentDelta>(serialized).unwrap(),
+                event
+            );
+        }
     }
 }

@@ -3,8 +3,9 @@
 //! In a coordinator session `build()` gives the `InProcessTeammate` handler its
 //! OWN `StateMachinePool` (`harness_runtime::desktop::TEAMMATE_POOL_CAP`), distinct from
 //! the `AgentTool` `subagent_pool` (`PoolSubagentSpawner`, cap 4). Teammates are
-//! PERSISTENT: each parks on `wait_for_message` and NEVER frees its slot until
-//! killed. If the two shared one pool, `TEAMMATE_POOL_CAP` parked teammates
+//! PERSISTENT: an occupied teammate retains its slot until it is killed. This
+//! fixture keeps actual model calls pending. If the two shared one pool,
+//! `TEAMMATE_POOL_CAP` occupied teammates
 //! would saturate it and every one-shot `AgentTool` subagent spawn would be
 //! rejected with `TooManyAgents` — a deadlock for the parent agent.
 //!
@@ -23,6 +24,7 @@
 
 #![allow(clippy::unwrap_used)]
 
+use futures::StreamExt;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -44,7 +46,7 @@ use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, To
 use lingxi_core::types::AgentId;
 use test_harness::mocks::MockRuntimeSpawner;
 
-/// Scripted `SubagentApiClient`: one non-streaming round-trip per call, returning
+/// Scripted `SubagentApiClient`: one scripted stream per call, returning
 /// a single `end_turn` text turn so the non-persistent subagent loop terminates
 /// cleanly in one turn-set and the spawn surfaces `Completed`.
 struct ScriptedApiClient {
@@ -61,27 +63,34 @@ impl ScriptedApiClient {
 
 #[async_trait]
 impl SubagentApiClient for ScriptedApiClient {
-    async fn messages_create(
+    async fn stream(
         &self,
-        _model: &str,
-        _system: Option<&str>,
-        _messages: Vec<lingxi_core::types::ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        *self.calls.lock().unwrap() += 1;
-        Ok(llm_runtime::HistoryResponse {
-            id: "scripted".into(),
-            model: "scripted".into(),
-            content: vec![llm_runtime::ContentBlock::Text {
-                text: "done".into(),
-                cache_control: None,
-            }],
-            stop_reason: Some("end_turn".into()),
-            stop_details: None,
-            usage: llm_runtime::ExecutionUsage::default(),
-            cost: None,
-            provider_metadata: serde_json::Value::Null,
-        })
+        _request: agent::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = {
+            *self.calls.lock().unwrap() += 1;
+            Ok(llm_runtime::HistoryResponse {
+                id: "scripted".into(),
+                model: "scripted".into(),
+                content: vec![llm_runtime::ContentBlock::Text {
+                    text: "done".into(),
+                    cache_control: None, citations: None,
+                }],
+                stop_reason: Some("end_turn".into()),
+                stop_details: None,
+                usage: llm_runtime::ExecutionUsage::default(),
+                cost: None,
+                provider_metadata: serde_json::Value::Null,
+            })
+        };
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+        Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
     }
 }
 
@@ -117,19 +126,63 @@ impl BudgetEnforcerHandle for OpenBudget {
     }
 }
 
-/// A minimal persistent-teammate `SubagentContext` with `api_client = None`, so
-/// the slot runs the legacy stub runner. With no inbound `lingxi_core::Event` ever
-/// delivered, the stub parks forever on `event_rx.recv()` — exactly a persistent
-/// teammate idling between turn-sets. The slot is never deallocated, so it holds
-/// its pool slot for the life of the test.
-fn parked_teammate_ctx() -> SubagentContext {
+/// A model whose opened-call future stays pending until the real runner is
+/// cancelled. Entry and drop receipts prove each occupied slot has a live
+/// model-driven state machine rather than an already-failed allocation.
+struct PendingModel {
+    entered: tokio::sync::Semaphore,
+    cancelled: Arc<tokio::sync::Semaphore>,
+}
+
+impl PendingModel {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            entered: tokio::sync::Semaphore::new(0),
+            cancelled: Arc::new(tokio::sync::Semaphore::new(0)),
+        })
+    }
+}
+
+struct PendingCall(Arc<tokio::sync::Semaphore>);
+
+impl Drop for PendingCall {
+    fn drop(&mut self) {
+        self.0.add_permits(1);
+    }
+}
+
+#[async_trait]
+impl SubagentApiClient for PendingModel {
+    async fn stream(
+        &self,
+        _request: agent::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let _call = PendingCall(self.cancelled.clone());
+        self.entered.add_permits(1);
+        std::future::pending().await
+    }
+}
+
+/// A persistent teammate configured with the required model seam.
+fn pending_teammate_ctx(model: Arc<PendingModel>) -> SubagentContext {
     SubagentContext {
+        server_fallback_model_enforcement: None,
+        handback: None,
+        handback_restore_start: None,
         task_registry: None,
+        agent_spawn_provenance: Default::default(),
         agent_id: AgentId::new(),
         parent_agent_id: None,
         agent_name: None,
         team_name: None,
         agent_definition: AgentDefinition {
+            omit_instructions: false,
             cache_ttl: None,
             agent_type: "teammate".into(),
             when_to_use: String::new(),
@@ -157,14 +210,17 @@ fn parked_teammate_ctx() -> SubagentContext {
             initial_prompt: None,
             color: None,
             observer: None,
+            offer_provider: None,
         },
-        prompt_messages: vec![],
+        prompt_messages: vec![lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            "hold this teammate's model request open".into(),
+        )],
         fork_context_messages: None,
         allowed_tools: vec![],
         worktree_handle: None,
         cwd: None,
         is_async: false,
-        // Marked persistent for fidelity; the stub runner parks regardless.
         persistent: true,
         can_show_permission_prompts: false,
         session_interactive: None,
@@ -175,6 +231,9 @@ fn parked_teammate_ctx() -> SubagentContext {
         resumed_history: None,
         rendered_system_prompt: None,
         mobile_runtime_environment_reminder: None,
+        instruction_context: Default::default(),
+        instruction_context_is_override: false,
+        instruction_provider: None,
         mobile_runtime_workspace_reminder: None,
         content_replacement_state: None,
         agent_memory: None,
@@ -183,7 +242,8 @@ fn parked_teammate_ctx() -> SubagentContext {
             icon: None,
         },
         model_profile: None,
-        api_client: None,
+        model_resolution_context_provider: None,
+        api_client: Some(model),
         tool_invoker: None,
         new_diagnostics_source: None,
         tool_schemas: vec![],
@@ -192,6 +252,8 @@ fn parked_teammate_ctx() -> SubagentContext {
         structured_output_parse_retries: 0,
         budget: None,
         hook_executor: None,
+        stop_hook_scope: Default::default(),
+        subagent_stop_firer: None,
         strict_plugin_only_hooks: false,
         skill_loader: None,
         hook_session_id: lingxi_core::types::SessionId::nil(),
@@ -209,24 +271,99 @@ fn parked_teammate_ctx() -> SubagentContext {
     }
 }
 
-/// Saturate `pool` with `TEAMMATE_POOL_CAP` parked teammate slots. Returns once
-/// every slot is occupied; the slots are never deallocated, mirroring teammates
-/// parked between turn-sets.
-async fn fill_with_parked_teammates(pool: &StateMachinePool) {
-    for _ in 0..TEAMMATE_POOL_CAP {
-        pool.allocate(parked_teammate_ctx())
-            .await
-            .expect("parked teammate slot fits under TEAMMATE_POOL_CAP");
+struct FilledTeammates {
+    model: Arc<PendingModel>,
+    slots: Vec<(
+        AgentId,
+        tokio::sync::mpsc::Receiver<agent::runner::SubagentEvent>,
+    )>,
+}
+
+impl FilledTeammates {
+    async fn assert_running(&mut self, pool: &StateMachinePool) {
+        assert_eq!(self.model.cancelled.available_permits(), 0);
+        for (id, events) in &mut self.slots {
+            assert!(
+                !pool.agent_runner_finished(id).await,
+                "occupied teammate {id} must still be running its pending model call"
+            );
+            loop {
+                match events.try_recv() {
+                    Ok(event) => assert!(
+                        !matches!(
+                            &event,
+                            agent::runner::SubagentEvent::Completed { .. }
+                                | agent::runner::SubagentEvent::Failed { .. }
+                                | agent::runner::SubagentEvent::Killed { .. }
+                        ),
+                        "occupied teammate {id} emitted a terminal event: {event:?}"
+                    ),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        panic!("occupied teammate {id} closed its output channel")
+                    }
+                }
+            }
+        }
     }
+
+    async fn cancel(self, pool: &StateMachinePool) {
+        for (id, _) in &self.slots {
+            pool.deallocate(id)
+                .await
+                .expect("cancel the actual pending teammate runner");
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            self.model
+                .cancelled
+                .acquire_many(u32::try_from(TEAMMATE_POOL_CAP).unwrap())
+                .await
+                .unwrap()
+                .forget();
+        })
+        .await
+        .expect("every cancelled runner must drop its pending model call");
+        assert_eq!(pool.slot_count().await, 0);
+    }
+}
+
+/// Saturate the pool and wait until every real runner has reached its model
+/// seam. Hold output receivers until cancellation so terminal-state assertions
+/// observe the actual runners throughout the admission checks.
+async fn fill_with_pending_teammates(pool: &StateMachinePool) -> FilledTeammates {
+    let model = PendingModel::new();
+    let mut slots = Vec::new();
+    for _ in 0..TEAMMATE_POOL_CAP {
+        slots.push(
+            pool.allocate(pending_teammate_ctx(model.clone()))
+                .await
+                .expect("pending teammate slot fits under TEAMMATE_POOL_CAP"),
+        );
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        model
+            .entered
+            .acquire_many(u32::try_from(TEAMMATE_POOL_CAP).unwrap())
+            .await
+            .unwrap()
+            .forget();
+    })
+    .await
+    .expect("every occupied slot must actually enter the model seam");
     assert_eq!(
         pool.slot_count().await,
         TEAMMATE_POOL_CAP,
-        "every teammate slot is occupied and parked"
+        "every teammate slot is occupied by a live model-driven runner"
     );
+    let mut filled = FilledTeammates { model, slots };
+    filled.assert_running(pool).await;
+    filled
 }
 
 fn agent_tool_request() -> SubagentSpawnRequest {
     SubagentSpawnRequest {
+        stop_hook_scope: Default::default(),
+        agent_spawn_provenance: Default::default(),
         teammate_color: None,
         subagent_type: "general-purpose".into(),
         prompt: "do one thing".into(),
@@ -246,6 +383,7 @@ fn agent_tool_request() -> SubagentSpawnRequest {
         cwd: None,
         worktree: None,
         fork_context_messages: None,
+        instruction_context: None,
         fork_parent_system_prompt: None,
         schema: None,
         structured_output_mode: Default::default(),
@@ -259,6 +397,7 @@ fn agent_tool_request() -> SubagentSpawnRequest {
         depth: 0,
         origin_session_id: None,
         parent_model_override: None,
+        parent_model_profile_override: None,
         forked_skill_name: None,
         forked_skill_attribution: None,
         forked_skill_effort: None,
@@ -270,6 +409,13 @@ fn agent_tool_request() -> SubagentSpawnRequest {
         query_source_label: None,
         correlation_id: None,
         model_attempt: None,
+        handback_opt_in: false,
+        parent_permission_mode: None,
+        handback_enabled: None,
+        handback_ends_turn_enabled: None,
+        restored_handback_state: None,
+        restored_handback_history: Vec::new(),
+        restore_handback_start: None,
     }
 }
 
@@ -289,7 +435,7 @@ async fn pool_starvation_parked_teammates_do_not_starve_agent_tool() {
 
     // The teammate handler's OWN pool, saturated by parked persistent teammates.
     let teammate_pool = StateMachinePool::new(runtime.clone(), TEAMMATE_POOL_CAP);
-    fill_with_parked_teammates(&teammate_pool).await;
+    let mut teammates = fill_with_pending_teammates(&teammate_pool).await;
 
     // The SEPARATE `AgentTool` subagent pool (mirrors `build()`'s `subagent_pool`,
     // cap 4). It is empty — the parked teammates live on a different pool.
@@ -297,10 +443,13 @@ async fn pool_starvation_parked_teammates_do_not_starve_agent_tool() {
     let api = ScriptedApiClient::new();
     let spawner = PoolSubagentSpawner::new(subagent_pool.clone()).with_api_client(api.clone());
 
-    let result = spawner
-        .spawn(agent_tool_request(), inheritance())
-        .await
-        .expect("AgentTool subagent spawns through the separate pool");
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        spawner.spawn(agent_tool_request(), inheritance()),
+    )
+    .await
+    .expect("occupied teammates must not block the separate ordinary pool")
+    .expect("AgentTool subagent spawns through the separate pool");
 
     assert!(
         matches!(result, SubagentResult::Completed { .. }),
@@ -322,6 +471,8 @@ async fn pool_starvation_parked_teammates_do_not_starve_agent_tool() {
         0,
         "the completed subagent deallocated its slot"
     );
+    teammates.assert_running(&teammate_pool).await;
+    teammates.cancel(&teammate_pool).await;
 }
 
 /// INVERTED CONTROL: one SHARED pool. Routing the `AgentTool` subagent spawn
@@ -334,16 +485,19 @@ async fn pool_starvation_shared_pool_would_starve_agent_tool() {
 
     // ONE pool, sized like the teammate pool, fully occupied by parked teammates.
     let shared_pool = Arc::new(StateMachinePool::new(runtime, TEAMMATE_POOL_CAP));
-    fill_with_parked_teammates(&shared_pool).await;
+    let mut teammates = fill_with_pending_teammates(&shared_pool).await;
 
     // The AgentTool spawner backed by that SAME saturated pool.
     let api = ScriptedApiClient::new();
     let spawner = PoolSubagentSpawner::new(shared_pool.clone()).with_api_client(api.clone());
 
-    let err = spawner
-        .spawn(agent_tool_request(), inheritance())
-        .await
-        .expect_err("a shared, teammate-saturated pool rejects the subagent spawn");
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        spawner.spawn(agent_tool_request(), inheritance()),
+    )
+    .await
+    .expect("a full shared pool must reject the ordinary spawn promptly")
+    .expect_err("a shared, teammate-saturated pool rejects the subagent spawn");
 
     // `PoolSubagentSpawner` preserves the pool-capacity condition as PoolFull.
     assert!(
@@ -359,6 +513,8 @@ async fn pool_starvation_shared_pool_would_starve_agent_tool() {
         0,
         "the rejected spawn never invoked the model"
     );
+    teammates.assert_running(&shared_pool).await;
+    teammates.cancel(&shared_pool).await;
 }
 
 /// P0-2 regression: a queued Fusion panel group must never refuse an ordinary
@@ -371,45 +527,91 @@ async fn pool_starvation_shared_pool_would_starve_agent_tool() {
 #[tokio::test]
 async fn fusion_group_never_refuses_an_agent_tool_spawn() {
     let runtime = Arc::new(MockRuntimeSpawner::default());
-    // Three free slots, and a Fusion group that wants four: unsatisfiable, so
-    // it waits. Nothing about that may reach ordinary admission.
+    // Three ordinary slots remain free. Occupy the separate panel pool so a
+    // further Fusion group truly queues, independent of ordinary admission.
     let pool = Arc::new(StateMachinePool::new(
         runtime.clone(),
         TEAMMATE_POOL_CAP + 3,
     ));
-    fill_with_parked_teammates(&pool).await;
+    let mut teammates = fill_with_pending_teammates(&pool).await;
 
     let api = ScriptedApiClient::new();
     let spawner = Arc::new(PoolSubagentSpawner::new(pool.clone()).with_api_client(api.clone()));
 
+    let panel_occupancy = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        spawner.reserve_fusion_panel_group(
+            lingxi_core::host::FUSION_PANEL_POOL_CAP,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            lingxi_core::host::panel_pool::PanelAdmissionCancellation::new(),
+        ),
+    )
+    .await
+    .expect("the empty panel pool must admit its full capacity")
+    .expect("hold every panel slot before queuing the second group");
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let waiting = {
         let spawner = spawner.clone();
         tokio::spawn(async move {
-            spawner
-                .reserve_fusion_panel_group(
-                    4,
-                    tokio::time::Instant::now() + std::time::Duration::from_secs(30),
-                    lingxi_core::host::panel_pool::PanelAdmissionCancellation::new(),
-                )
-                .await
+            let reservation = spawner.reserve_fusion_panel_group(
+                4,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+                lingxi_core::host::panel_pool::PanelAdmissionCancellation::new(),
+            );
+            tokio::pin!(reservation);
+            let mut entered_tx = Some(entered_tx);
+            std::future::poll_fn(|cx| {
+                let polled = std::future::Future::poll(reservation.as_mut(), cx);
+                if polled.is_pending() {
+                    if let Some(entered_tx) = entered_tx.take() {
+                        let _ = entered_tx.send(());
+                    }
+                }
+                polled
+            })
+            .await
         })
     };
-    // Let the group reach the point where it is queued and blocked.
-    tokio::task::yield_now().await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the group must reach the blocked admission future")
+        .expect("the saturated panel admission must first return Pending");
+    assert!(!waiting.is_finished(), "the panel group is actually queued");
 
-    let result = spawner.spawn(agent_tool_request(), inheritance()).await;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        spawner.spawn(agent_tool_request(), inheritance()),
+    )
+    .await
+    .expect("the blocked panel group must not hold the ordinary spawn");
     assert!(
-        result.is_ok(),
+        matches!(result, Ok(SubagentResult::Completed { .. })),
         "an ordinary spawn was refused while {} slots were free: {result:?}",
         pool_free_slots(&pool).await
+    );
+    assert_eq!(
+        pool.slot_count().await,
+        TEAMMATE_POOL_CAP,
+        "the completed ordinary runner must release its slot"
     );
     assert_eq!(
         *api.calls.lock().unwrap(),
         1,
         "the admitted spawn really reached the model"
     );
+    teammates.assert_running(&pool).await;
+    assert!(
+        !waiting.is_finished(),
+        "ordinary spawn did not release the panel queue"
+    );
     waiting.abort();
+    let cancelled = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+        .await
+        .expect("cancel the queued panel admission future")
+        .expect_err("the blocked panel task must acknowledge cancellation");
+    assert!(cancelled.is_cancelled());
+    drop(panel_occupancy);
+    teammates.cancel(&pool).await;
 }
 
 /// Free ordinary slots, derived from the pool's own occupancy so the message

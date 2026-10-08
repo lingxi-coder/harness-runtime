@@ -608,7 +608,11 @@ mod tests {
         );
         let (tx, _) = tool_api::progress::progress_channel();
         let error = tool
-            .call(json!({}), ToolUseContext::model_seed("test".into()), tx)
+            .call(
+                json!({}),
+                ToolUseContext::model_seed("test".into(), None),
+                tx,
+            )
             .await
             .unwrap_err();
         assert_eq!(
@@ -710,7 +714,7 @@ mod tests {
         let result = tool
             .call(
                 json!({"answer": 42}),
-                ToolUseContext::model_seed("test".into()),
+                ToolUseContext::model_seed("test".into(), None),
                 tx,
             )
             .await

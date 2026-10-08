@@ -1,0 +1,61 @@
+{
+  "version": "2.1.287",
+  "native_sha256": "6eab8333fe2121553100d8f40bfada384a3e989b94f947e18ba6677a6fcb41ea",
+  "sourceByteRanges": [
+    {
+      "label": "native refusal serving/options/session swap",
+      "start": 193935678,
+      "end": 193936241,
+      "sha256": "b18c6fdb72d53ece7ffe01c98789bb5fe11ba7ce0f7f3124316b425c14ab13d9"
+    }
+  ],
+  "scope": "Actual refusal model swap branch. Main-thread and silent-attempt inputs supplied. Child local refusal changes serving model without changing tool options; availability/consent/live model switches and full query loop excluded.",
+  "cases": [
+    {
+      "main": false,
+      "silent": false,
+      "expected": {
+        "requestModel": "fallback",
+        "toolModel": "initial",
+        "sessionModel": "initial",
+        "availabilityFallback": {
+          "primaryModel": "initial"
+        }
+      }
+    },
+    {
+      "main": false,
+      "silent": true,
+      "expected": {
+        "requestModel": "fallback",
+        "toolModel": "initial",
+        "sessionModel": "initial",
+        "availabilityFallback": {
+          "primaryModel": "initial"
+        }
+      }
+    },
+    {
+      "main": true,
+      "silent": false,
+      "expected": {
+        "requestModel": "fallback",
+        "toolModel": "fallback",
+        "sessionModel": "fallback",
+        "availabilityFallback": null
+      }
+    },
+    {
+      "main": true,
+      "silent": true,
+      "expected": {
+        "requestModel": "fallback",
+        "toolModel": "initial",
+        "sessionModel": "initial",
+        "availabilityFallback": {
+          "primaryModel": "initial"
+        }
+      }
+    }
+  ]
+}

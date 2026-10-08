@@ -7,34 +7,140 @@ use super::*;
 /// consume-once sources drain. So a step prepares once and REUSES this value for
 /// each rebuild of the same request (PTL retry, the non-streaming fallback, a
 /// re-snapshot after compaction); `reattach_outgoing_context` is what puts the
-/// transient pieces back on a snapshot rebuilt from raw history.
+/// ordered reminder suffix back on a snapshot rebuilt from raw history.
 ///
 /// The durable task notifications are deliberately NOT a field. They were
 /// appended to `session.history` and the JSONL during preparation, so a rebuild
-/// picks them up from history on its own; carrying them here too would re-append
-/// them on top of that copy and send each completion twice.
+/// picks them up from history on its own. Newly created model reminders also
+/// live in history, but remain in the ordered suffix so rebuilding can remove
+/// their history copies and restore their positions among transient reminders.
+#[derive(Clone)]
 pub(crate) struct PreparedTurnStep {
     pub(crate) snapshot: Vec<ConversationMessage>,
     pub(crate) model: String,
     pub(crate) model_profile: Option<String>,
     pub(crate) outgoing_history_rewriter: Option<Arc<dyn OutgoingHistoryRewriter>>,
+    /// This step's full reminder suffix in request order, including the newly
+    /// persisted MCP/total-token messages with their original identities.
     pub(crate) turn_reminders: Vec<ConversationMessage>,
+    /// Keep async-hook producer generations through PTL/fallback snapshot
+    /// rebuilds so reset can remove an old completion at model admission.
+    pub(crate) guarded_async_hook_reminders:
+        Vec<(MessageId, Arc<dyn hooks::attachment::HookPublicationGuard>)>,
+    pub(crate) context_announcements: PreparedContextAnnouncements,
     pub(crate) wire_tools: Vec<serde_json::Value>,
+    pub(crate) skip_global_cache_for_system_prompt: bool,
     pub(crate) deferred_reminder: Option<ConversationMessage>,
     pub(crate) date_change_reminder: Option<ConversationMessage>,
 }
 
 impl ConversationOrchestrator {
+    /// Model-chain advancement keeps consume-once context from the same step,
+    /// while model-aware preparation receives the new serving route.
+    pub(crate) async fn reprepare_model_fallback(
+        &self,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        cancel: Option<&CancellationToken>,
+        previous: &PreparedTurnStep,
+    ) -> Result<PreparedTurnStep, OrchestratorError> {
+        let display_system = system.map(
+            lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::display_text,
+        );
+        let call = self
+            .prepare_model_call_snapshot(
+                ModelCallPath::Streaming,
+                display_system.as_deref(),
+                cancel,
+            )
+            .await?;
+        let mut snapshot = call.history_snapshot;
+        let mut turn_reminders = previous.turn_reminders.clone();
+        let mut guarded_async_hook_reminders = previous.guarded_async_hook_reminders.clone();
+        crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+            &mut snapshot,
+            &mut turn_reminders,
+            &mut guarded_async_hook_reminders,
+        );
+        self.reattach_outgoing_context(
+            &mut snapshot,
+            previous.deferred_reminder.as_ref(),
+            previous.date_change_reminder.as_ref(),
+            &mut turn_reminders,
+            &mut guarded_async_hook_reminders,
+            &previous.context_announcements,
+            false,
+        )
+        .await;
+        crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+            &mut snapshot,
+            &mut turn_reminders,
+            &mut guarded_async_hook_reminders,
+        );
+        Ok(PreparedTurnStep {
+            snapshot,
+            model: call.model,
+            model_profile: call.model_profile,
+            outgoing_history_rewriter: call.outgoing_history_rewriter,
+            turn_reminders,
+            guarded_async_hook_reminders,
+            context_announcements: previous.context_announcements.clone(),
+            wire_tools: previous.wire_tools.clone(),
+            skip_global_cache_for_system_prompt: previous.skip_global_cache_for_system_prompt,
+            deferred_reminder: previous.deferred_reminder.clone(),
+            date_change_reminder: previous.date_change_reminder.clone(),
+        })
+    }
+
+    /// Capture the step's prompt origin before preparation can compact history
+    /// or append durable attachments. Meta messages and tool-injected prompts
+    /// do not turn a continuation into a regular user submission.
+    pub(crate) async fn regular_user_prompt_for_model_step(&self) -> bool {
+        let session = self.session.lock().await;
+        session
+            .history
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                ConversationMessage::User {
+                    id,
+                    content,
+                    is_meta,
+                    is_compact_summary,
+                    ..
+                } => {
+                    if *is_meta || session.injected_message_sources.contains_key(id) {
+                        return None;
+                    }
+                    Some(
+                        !*is_compact_summary
+                            && !content
+                                .iter()
+                                .any(|block| matches!(block, ContentBlock::ToolResult { .. })),
+                    )
+                }
+                ConversationMessage::Assistant { .. } => Some(false),
+                ConversationMessage::System { subtype, .. }
+                    if subtype.as_deref() == Some("compact_boundary") =>
+                {
+                    Some(false)
+                }
+                ConversationMessage::System { .. } => None,
+            })
+            .unwrap_or(false)
+    }
+
     /// The per-step preparation both turn drivers share.
     ///
-    /// The three parameters are the whole of the difference between them, and
-    /// each is load-bearing:
+    /// The path, prompt origin and cancellation parameters preserve the
+    /// differences between the drivers:
     ///
     /// * `path` — `Batched` or `Streaming`, threaded into
     ///   `prepare_model_call_snapshot`.
     /// * `in_human_turn` — batched turns pass `true` unconditionally for
     ///   task-notification provenance; streaming passes its real origin, so a
     ///   rewake or queued batch is not rendered as a human turn.
+    /// * `is_regular_user_prompt` — captured at step ingress, before compaction
+    ///   or notification persistence can change the history tail.
     /// * `user_cancel` — streaming passes its token INTO preparation so a cancel
     ///   lands inside the snapshot step. Batched passes `None` and is covered
     ///   instead by the outer `select!` in `try_run_turn_cancelable`, which races
@@ -44,10 +150,15 @@ impl ConversationOrchestrator {
     pub(crate) async fn prepare_turn_step(
         &self,
         path: ModelCallPath,
-        system: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         in_human_turn: bool,
+        is_regular_user_prompt: bool,
         user_cancel: Option<&CancellationToken>,
     ) -> Result<PreparedTurnStep, OrchestratorError> {
+        // Peer reports are model output, with no human prompt processing or
+        // authority. Keep their queue claims retryable until durable history
+        // admission has succeeded, before any request snapshot is captured.
+        self.consume_main_reports().await?;
         // Arm both prefetches CONCURRENTLY with this turn (claude-code `wAo` /
         // `startSkillDiscoveryPrefetch`), so their handles are ready when
         // `relevant_memory_reminder_messages` and
@@ -57,32 +168,78 @@ impl ConversationOrchestrator {
         self.start_skill_discovery_prefetch().await;
         self.maybe_extract_session_memory().await;
 
-        self.seed_compact_cache_safe_params(system).await;
+        // Native Or freezes the host context before the query's automatic
+        // compaction; Gr and the later Br projection reuse that same snapshot.
+        let (instruction_key, instruction_load) = self.main_instruction_load().await;
+        let scalar_context = self
+            .additional_context_message_from_load(instruction_key, &instruction_load)
+            .await
+            .map_err(OrchestratorError::Internal)?;
+        let inline_context = if self.uses_announced_context().await {
+            None
+        } else {
+            scalar_context
+        };
+        let instruction_reason = self.frozen_instruction_refresh_reason();
+
+        let display_system = system.map(
+            lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::display_text,
+        );
+        self.seed_compact_cache_safe_params(display_system.as_deref())
+            .await;
         self.maybe_compact_before_call().await;
         // 2.1.232: accepted peer inbox → user-role `<cross-session-message>`
         // before the outgoing snapshot is cloned from history.
         let _ = self.drain_peer_inbox(false).await;
 
         let prepared_call = self
-            .prepare_model_call_snapshot(path, system, user_cancel)
+            .prepare_model_call_snapshot(path, display_system.as_deref(), user_cancel)
             .await?;
         let mut snapshot = prepared_call.history_snapshot;
 
-        // R-P1c/R-P1d: PREPEND the leading `additionalContext` meta message
-        // (`# claudeMd` / `# userEmail` / `# currentDate`) to THIS call's
-        // OUTGOING snapshot only. 1:1 with `A6n(re, userContext)`, recomputed
-        // each turn so it never accumulates.
-        self.prepend_leading_context(&mut snapshot).await;
+        let mut context_announcements = PreparedContextAnnouncements {
+            messages: self.context_announcements_from_frozen_snapshot().await,
+            before_task_notification: None,
+            refresh_reason: instruction_reason.as_str(),
+            inline_context,
+        };
+        snapshot.extend(context_announcements.messages.iter().cloned());
 
-        let reminders = self.collect_turn_reminders(in_human_turn).await;
-        let turn_reminders = reminders.transient;
+        // Inline routing uses the native outgoing userContext prefix. Normal
+        // routing has already appended durable typed announcements above.
+        self.prepend_leading_context(&mut snapshot, &context_announcements)
+            .await;
+
+        let reminders = self
+            .collect_turn_reminders(in_human_turn, is_regular_user_prompt, user_cancel)
+            .await;
+        let mut guarded_async_hook_reminders = reminders.guarded_async_hook_reminders;
+        let transient_reminders = reminders.transient;
+        context_announcements.before_task_notification = reminders
+            .task_notifications
+            .first()
+            .map(ConversationMessage::id);
         // Durable completions first: they now live in history, so they belong
         // after the last real entry and before the transient reminders. The
         // snapshot was taken before they were appended.
         snapshot.extend(reminders.task_notifications);
+        let mut turn_reminders =
+            Vec::with_capacity(transient_reminders.len() + reminders.model_reminders.len());
+        let mut model_reminders = reminders.model_reminders.into_iter().peekable();
+        for index in 0..=transient_reminders.len() {
+            while model_reminders
+                .peek()
+                .is_some_and(|(position, _)| *position == index)
+            {
+                turn_reminders.push(model_reminders.next().expect("peeked reminder").1);
+            }
+            if let Some(reminder) = transient_reminders.get(index) {
+                turn_reminders.push(reminder.clone());
+            }
+        }
         snapshot.extend(turn_reminders.iter().cloned());
 
-        let wire_tools = self.build_wire_tools().await;
+        let (wire_tools, skip_global_cache_for_system_prompt) = self.build_wire_tools().await;
         // Carved-slate records the first eligible static prompt before the
         // request. A resumed session with no valid attachment stays live and
         // does not create a replacement snapshot.
@@ -93,20 +250,48 @@ impl ConversationOrchestrator {
         // discovered, so the immediately following request must include them
         // with `defer_loading:true`. Computing it ADVANCES the announced-set
         // tracking, so it is computed ONCE here and reattached on re-snapshot.
-        let deferred_reminder = self.deferred_tools_reminder_message();
+        let deferred_reminder = if let Some(reminder) = self.deferred_tools_reminder_message() {
+            self.mod_prompt_attachment(
+                "deferred_tools_delta",
+                reminder,
+                serde_json::json!({"kind":"engine"}),
+            )
+            .await
+        } else {
+            None
+        };
         if let Some(reminder) = deferred_reminder.clone() {
             self.prepend_transient_leading_context(&mut snapshot, reminder);
         }
-        // `date_change`: prepended AFTER the deferred insert so the final order
+        // Inline `date_change`: prepended AFTER the deferred insert so the final order
         // is [date_change, deferred_tools_delta, …], matching the oracle batch
         // order (`Ky("date_change")` before `Ky("deferred_tools_delta")`). The
         // dedupe is committed downstream, once the request is actually sent —
         // not here, where it has only been computed.
-        let date_change_reminder =
-            self.date_change_reminder_message(self.session.lock().await.session_id);
+        let date_change_reminder = if self.uses_announced_context().await {
+            None
+        } else {
+            let session_id = self.session.lock().await.session_id;
+            if let Some(reminder) = self.date_change_reminder_message(session_id) {
+                self.mod_prompt_attachment(
+                    "date_change",
+                    reminder,
+                    serde_json::json!({"kind":"engine"}),
+                )
+                .await
+            } else {
+                None
+            }
+        };
         if let Some(reminder) = date_change_reminder.clone() {
             self.prepend_transient_leading_context(&mut snapshot, reminder);
         }
+        self.screen_mod_persisted_attachments(&mut snapshot).await;
+        crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+            &mut snapshot,
+            &mut turn_reminders,
+            &mut guarded_async_hook_reminders,
+        );
 
         Ok(PreparedTurnStep {
             snapshot,
@@ -114,7 +299,10 @@ impl ConversationOrchestrator {
             model_profile: prepared_call.model_profile,
             outgoing_history_rewriter: prepared_call.outgoing_history_rewriter,
             turn_reminders,
+            guarded_async_hook_reminders,
+            context_announcements,
             wire_tools,
+            skip_global_cache_for_system_prompt,
             deferred_reminder,
             date_change_reminder,
         })
@@ -127,12 +315,33 @@ impl ConversationOrchestrator {
 /// Task notifications are durable conversation events: they are persisted here
 /// and returned separately so the caller can add them to a snapshot that was
 /// captured before persistence without duplicating them on retry.
+/// Model reminders retain their insertion positions among transient reminders;
+/// preparation merges them into the reusable ordered request suffix.
 pub(crate) struct TurnReminders {
     pub(crate) transient: Vec<ConversationMessage>,
     pub(crate) task_notifications: Vec<ConversationMessage>,
+    pub(crate) model_reminders: Vec<(usize, ConversationMessage)>,
+    pub(crate) guarded_async_hook_reminders:
+        Vec<(MessageId, Arc<dyn hooks::attachment::HookPublicationGuard>)>,
 }
 
 impl ConversationOrchestrator {
+    fn push_engine_attachment<'a>(
+        &'a self,
+        output: &'a mut Vec<ConversationMessage>,
+        kind: &'a str,
+        message: ConversationMessage,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            if let Some(message) = self
+                .mod_prompt_attachment(kind, message, serde_json::json!({"kind":"engine"}))
+                .await
+            {
+                output.push(message);
+            }
+        })
+    }
+
     /// Collect reminder producers in their model-facing order exactly once.
     pub(crate) fn collect_turn_reminders<'a>(
         &'a self,
@@ -341,21 +550,6 @@ impl ConversationOrchestrator {
                 task_notifications,
                 model_reminders,
                 guarded_async_hook_reminders,
-            }
-        })
-    }
-    fn push_engine_attachment<'a>(
-        &'a self,
-        output: &'a mut Vec<ConversationMessage>,
-        kind: &'a str,
-        message: ConversationMessage,
-    ) -> futures::future::BoxFuture<'a, ()> {
-        Box::pin(async move {
-            if let Some(message) = self
-                .mod_prompt_attachment(kind, message, serde_json::json!({"kind":"engine"}))
-                .await
-            {
-                output.push(message);
             }
         })
     }

@@ -12,6 +12,7 @@ base64 = "0.22"
 branding.workspace = true
 core = { path = "../core" }
 llm-runtime = { path = "../llm-runtime" }
+lingxi-llm-client.workspace = true
 tool-api = { path = "../tool-api" }
 # Finding #73: the byte-locked todo/task reminder text consts + renderers live
 # in `tool_task::reminder` (alongside the TodoWrite/Task tools they describe).
@@ -65,6 +66,7 @@ tokio = { workspace = true, features = ["sync", "process", "fs"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 unicode-segmentation = "=1.12.0"
+unicode-normalization = "=0.1.25"
 unicode-width = "=0.1.14"
 sha2 = "0.10"
 uuid = { version = "1.10", features = ["v4", "serde"] }
@@ -93,6 +95,8 @@ test-support = []
 # - `transcript_classifier` ≙ TS `feature('TRANSCRIPT_CLASSIFIER')` → AFK_MODE
 connector_text = []
 transcript_classifier = []
+# Explicit test/build opt-in to the permission crate's Bash AST rules.
+bash-ast = ["permission/bash-ast"]
 
 [lints]
 workspace = true

@@ -150,10 +150,21 @@ pub fn managed_path() -> PathBuf {
 }
 
 /// One discovered LINGXI.md (or local override) location, post-walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HierarchyEntryOrigin {
+    /// A named instruction file loaded directly by the hierarchy.
+    InstructionFile,
+    /// A file discovered while traversing an instruction rules directory.
+    RuleDirectory,
+}
+
+/// The origin selects native eager versus conditional rule filtering.
 #[derive(Debug, Clone)]
 pub struct HierarchyEntry {
     /// Absolute path to the file on disk.
     pub path: PathBuf,
+    /// Acquisition origin, independent of parsed `paths:` glob metadata.
+    pub origin: HierarchyEntryOrigin,
     /// Whether this is a `LINGXI.local.md` (true) or `LINGXI.md` (false).
     pub is_local_override: bool,
     /// Whether the actual filename's bytes matched `FILE_NAME` exactly
@@ -208,6 +219,23 @@ const RULES_DIR: &str = "rules";
 /// them all and say which question each answers.
 #[must_use]
 pub fn walk(cwd: &Path, home: &Path, managed_dir: Option<&Path>) -> Hierarchy {
+    let user_config_dir = user_config_dir(home);
+    walk_with_user_config_dir(cwd, home, &user_config_dir, managed_dir)
+}
+
+/// Discover the memory hierarchy using an already-resolved user config root.
+///
+/// This is the same walk as [`walk`], but does not read `LINGXI_CONFIG_DIR`.
+/// Production callers normally use [`walk`]; hosts that already own an
+/// authoritative config-root snapshot can pass it directly, and hermetic
+/// fixtures do not have to mutate process-global environment state.
+#[must_use]
+pub fn walk_with_user_config_dir(
+    cwd: &Path,
+    home: &Path,
+    user_config_dir: &Path,
+    managed_dir: Option<&Path>,
+) -> Hierarchy {
     use super::LingxiMdTier;
     let mut out = Vec::new();
     let mut processed = std::collections::HashSet::new();
@@ -235,9 +263,8 @@ pub fn walk(cwd: &Path, home: &Path, managed_dir: Option<&Path>) -> Hierarchy {
     // (2) User tier — `<config-home>/LINGXI.md` + `<config-home>/rules/**`, where
     //     config-home honors `$LINGXI_CONFIG_DIR` (else `<home>/.claude`). This
     //     keeps the loaded user-tier file in sync with `/memory`'s edit target.
-    let user_dir = user_config_dir(home);
     emit_probe(
-        &user_dir,
+        user_config_dir,
         FILE_NAME,
         false,
         LingxiMdTier::User,
@@ -245,7 +272,7 @@ pub fn walk(cwd: &Path, home: &Path, managed_dir: Option<&Path>) -> Hierarchy {
         &mut processed,
     );
     collect_rules(
-        &user_dir.join(RULES_DIR),
+        &user_config_dir.join(RULES_DIR),
         LingxiMdTier::User,
         &mut out,
         &mut processed,
@@ -300,6 +327,24 @@ pub fn walk(cwd: &Path, home: &Path, managed_dir: Option<&Path>) -> Hierarchy {
     // orchestrator reverses again to restore the splice order.
     out.reverse();
     Hierarchy { entries: out }
+}
+
+/// Managed instructions without probing any user or project directory.
+#[must_use]
+pub fn walk_managed(managed: &Path) -> Hierarchy {
+    let mut entries = Vec::new();
+    let mut processed = std::collections::HashSet::new();
+    emit_probe(
+        managed,
+        FILE_NAME,
+        false,
+        super::LingxiMdTier::Managed,
+        &mut entries,
+        &mut processed,
+    );
+    probe_managed_rules(managed, &mut entries, &mut processed);
+    entries.reverse();
+    Hierarchy { entries }
 }
 
 /// Probe `dir` for a file named `want` (case-insensitive) and, when found and
@@ -497,6 +542,7 @@ fn collect_rules_inner(
             && processed.insert(path.clone())
         {
             out.push(HierarchyEntry {
+                origin: HierarchyEntryOrigin::RuleDirectory,
                 path,
                 is_local_override: false,
                 exact_case: true,
@@ -524,6 +570,7 @@ fn probe(
         let s = name.to_string_lossy();
         if s.to_ascii_lowercase() == want_lc && ent.file_type().ok()?.is_file() {
             return Some(HierarchyEntry {
+                origin: HierarchyEntryOrigin::InstructionFile,
                 path: ent.path(),
                 is_local_override: is_local,
                 exact_case: s == want,

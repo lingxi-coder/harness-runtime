@@ -25,7 +25,7 @@
 //!   [`tokio_util::sync::CancellationToken`] (twin of
 //!   `subscribeToCommandQueue` ⇒ `abortController.abort()` in print.ts).
 
-use lingxi_core::types::{AgentId, HookId, ToolUseId};
+use lingxi_core::types::{AgentId, HookId, MessageId, ToolUseId};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -132,6 +132,15 @@ impl QueuedCommand {
 /// The payload of a [`QueuedCommand`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum QueuedCommandContent {
+    /// Wake a main conversation for an already admitted peer report. The
+    /// recipient owns the body and its independent consumption acknowledgment;
+    /// this marker must never be joined into human prompt text.
+    HandbackWake {
+        /// Session and activation pinned by trusted reporting admission.
+        scope: lingxi_core::host::handback::HandbackSessionScope,
+        /// Stable report identity, separate from this queue marker's UUID.
+        message_id: MessageId,
+    },
     /// Raw text from the human user.
     UserInput {
         /// User-supplied text.
@@ -222,8 +231,12 @@ pub enum QueuePriority {
 /// Where a queued command came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QueueSource {
+    /// An admitted ordinary subagent report, with Peer authority.
+    SubagentHandback,
     /// Direct prompt input from the user.
     PromptInput,
+    /// Slash command queued by a Mod's `$.command.run` call.
+    Plugin,
     /// Subagent task completion notification.
     TaskCompletion,
     /// Inter-agent `send_message`.
@@ -257,6 +270,31 @@ pub struct MessageQueueManager {
 }
 
 impl MessageQueueManager {
+    /// Wake a host at next priority without carrying report text through user
+    /// prompt processing. Queue removal acknowledges only this wake marker.
+    pub async fn enqueue_handback_wake(
+        &self,
+        scope: lingxi_core::host::handback::HandbackSessionScope,
+        message_id: MessageId,
+    ) {
+        self.enqueue(QueuedCommand {
+            uuid: format!(
+                "handback-wake:{}:{}",
+                scope.activation_epoch,
+                message_id.as_uuid()
+            ),
+            content: QueuedCommandContent::HandbackWake { scope, message_id },
+            priority: QueuePriority::Next,
+            queued_at: SystemTime::now(),
+            source: QueueSource::SubagentHandback,
+            agent_id: None,
+            skip_slash_commands: true,
+            is_meta: true,
+            scheduled_task_id: None,
+            scheduled_fire_id: None,
+        })
+        .await;
+    }
     /// Enqueue a passive goal retry through the ordinary host turn lifecycle.
     pub async fn enqueue_goal_retry(&self, uuid: String, body: String, cancel: CancellationToken) {
         self.enqueue(QueuedCommand {
@@ -353,17 +391,26 @@ impl MessageQueueManager {
     /// driver can run it as the interrupting turn; `Later` waits for the normal
     /// between-turn drain.
     pub async fn take_mid_turn_prompt(&self) -> Option<String> {
+        let batch = self.take_mid_turn_commands().await?;
+        join_prompt_values(&batch).map(|(joined, _)| joined)
+    }
+
+    /// Consume the same batch while retaining each command's source for
+    /// session.receive screening at the host boundary.
+    pub async fn take_mid_turn_commands(&self) -> Option<Vec<QueuedCommand>> {
         let batch = self
             .get_by_max_priority(QueuePriority::Next, |command| {
                 command.is_main_thread()
                     && !command.is_slash_command()
                     && command.priority == QueuePriority::Next
+                    && !matches!(command.content, QueuedCommandContent::HandbackWake { .. })
             })
             .await;
-        let (joined, consumed) = join_prompt_values(&batch)?;
+        let (_, consumed) = join_prompt_values(&batch)?;
+        let selected = batch.into_iter().take(consumed.len()).collect();
         self.consume(&consumed, "drained mid-turn into running turn")
             .await;
-        Some(joined)
+        Some(selected)
     }
 
     /// Append `cmd` to the queue; wakes one waiter and logs an `Enqueue`.
@@ -635,6 +682,42 @@ mod tests {
             skip_slash_commands: false,
             is_meta: false,
         }
+    }
+
+    #[tokio::test]
+    async fn handback_wake_retains_target_and_never_blocks_or_joins_human_prompts() {
+        let queue = MessageQueueManager::new();
+        let scope = lingxi_core::host::handback::HandbackSessionScope {
+            session_id: lingxi_core::types::SessionId::new(),
+            activation_epoch: 7,
+        };
+        let message_id = MessageId::new();
+        let active = CancellationToken::new();
+        queue.register_active_turn(active.clone()).await;
+        queue.enqueue_handback_wake(scope, message_id).await;
+        queue.enqueue(mk(QueuePriority::Next, "human input")).await;
+        assert!(
+            !active.is_cancelled(),
+            "next-priority reporting does not interrupt its caller"
+        );
+        let snapshot = queue.snapshot().await;
+        let marker: QueuedCommand =
+            serde_json::from_str(&serde_json::to_string(&snapshot[0]).unwrap()).unwrap();
+        assert_eq!(marker.source, QueueSource::SubagentHandback);
+        assert!(marker.is_meta && marker.skip_slash_commands);
+        assert!(marker.text().is_none());
+        assert!(
+            matches!(marker.content, QueuedCommandContent::HandbackWake { scope: restored, message_id: restored_id }
+            if restored == scope && restored_id == message_id)
+        );
+        assert_eq!(
+            queue.take_mid_turn_prompt().await.as_deref(),
+            Some("human input")
+        );
+        assert!(matches!(
+            queue.dequeue_main_thread().await.unwrap().content,
+            QueuedCommandContent::HandbackWake { .. }
+        ));
     }
 
     #[test]

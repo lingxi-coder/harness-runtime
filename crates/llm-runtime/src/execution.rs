@@ -25,6 +25,40 @@ pub(crate) fn wire_error(error: LlmError) -> wire::LlmError {
     }
 }
 
+/// Resolve Native's Anthropic ID policy from trusted Host routing facts and
+/// the same process environment inputs that Native reads. Host auto-mode
+/// labels and arbitrary endpoint URLs never assign a provider kind.
+fn native_traceparent_for_protocol(protocol: wire::ProtocolFamily) -> Option<String> {
+    if matches!(
+        protocol,
+        wire::ProtocolFamily::AnthropicMessages
+            | wire::ProtocolFamily::BedrockClaude
+            | wire::ProtocolFamily::FoundryClaude
+            | wire::ProtocolFamily::VertexClaude
+    ) {
+        telemetry::otel::capture_current_trace_context().map(|context| context.traceparent)
+    } else {
+        None
+    }
+}
+
+fn native_request_header_facts(
+    protocol: wire::ProtocolFamily,
+    provider_id: &crate::ProviderId,
+    selected_url: &str,
+) -> lingxi_llm_client::providers::response_headers::NativeAnthropicRequestHeaderFacts {
+    use lingxi_llm_client::providers::response_headers::{
+        NativeAnthropicProvider, NativeAnthropicRequestHeaderFacts,
+    };
+
+    let provider = match provider_id {
+        crate::ProviderId::AnthropicFirstParty => NativeAnthropicProvider::FirstParty,
+        crate::ProviderId::BedrockClaude => NativeAnthropicProvider::Bedrock,
+        _ => NativeAnthropicProvider::Other,
+    };
+    NativeAnthropicRequestHeaderFacts::from_process_environment(protocol, provider, selected_url)
+}
+
 struct PreparationOnly;
 #[async_trait::async_trait]
 impl sdk::Transport for PreparationOnly {
@@ -91,12 +125,14 @@ impl std::fmt::Debug for ClientCache {
 pub(crate) async fn prepare(
     cache: &ClientCache,
     mut profile: wire::ProviderProfile,
+    selected_auth: wire::AuthStrategy,
     route: &crate::ResolvedRoute,
     request: &crate::LlmRequest,
     transport: Option<Arc<dyn Transport>>,
     authenticator: Arc<dyn sdk::Authenticator>,
-    mode: sdk::RequestMode,
+    preparation: (sdk::RequestMode, Option<wire::CapabilitySupport>),
 ) -> Result<(sdk::RequestDraft, ProviderRequest), LlmError> {
+    let (mode, fast_capability) = preparation;
     // This exact connection was already selected by the application's policy.
     // Keep the route auth strategy for provider body policy, while credentials
     // are still applied by the host after its final body/header policies.
@@ -126,10 +162,13 @@ pub(crate) async fn prepare(
     let client = cache.get(&profile, transport)?;
     let mut input = crate::upstream::request(request, profile.protocol)?;
     input.model.clone_from(&route.display_model);
-    let draft = Box::pin(client.prepare_draft_on(
+    let mut draft = Box::pin(client.prepare_draft_on(
         &profile.profile_name,
         &input,
         &sdk::RequestOptions {
+            anthropic_request_kind,
+            message_text_utf16_overrides: request.execution.message_json_string_overrides.clone(),
+            fast_capability,
             authenticator: Some(sdk::client::options::RequestAuthenticator(authenticator)),
             account_scope: request.execution.account_scope.clone(),
             file_account_scope: request.execution.file_account_scope.clone(),
@@ -139,53 +178,113 @@ pub(crate) async fn prepare(
     ))
     .await
     .map_err(crate::upstream::error)?;
+    draft
+        .apply_request_body_auth_policy(body_auth_strategy)
+        .map_err(crate::upstream::error)?;
     let http = draft.request();
     let mut host = ProviderRequest::post_json(
         http.url.clone(),
-        serde_json::from_slice(&http.body).map_err(|e| LlmError::InvalidRequest {
-            message: e.to_string(),
-        })?,
+        draft.semantic_body_json().map_err(crate::upstream::error)?,
     );
     host.method.clone_from(&http.method);
     host.headers = http.headers.iter().cloned().collect();
-    host.json_string_overrides =
-        crate::upstream::message_string_overrides(request, profile.protocol)?;
+    host.json_encoding =
+        lingxi_llm_client::exact_json::JsonEncoding::for_protocol(profile.protocol);
+    host.body_protocol = Some(profile.protocol);
+    host.anthropic_request_kind = anthropic_request_kind;
+    host.json_string_overrides = draft.message_json_string_overrides().clone();
     Ok((draft, host))
 }
 
 pub(crate) async fn seal(
     mut draft: sdk::RequestDraft,
     request: &ProviderRequest,
+    native_provider_id: Option<&crate::ProviderId>,
 ) -> Result<sdk::PreparedCall, LlmError> {
-    let wire = draft.request_mut();
-    wire.url.clone_from(&request.url);
-    wire.method.clone_from(&request.method);
-    wire.headers = request
-        .headers
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    if let Some(bytes) = &request.body_bytes {
-        wire.body = bytes.clone().into();
+    // Preparation exposes an authenticated byte snapshot. When host policy
+    // edits the paired semantic body or exact strings, that old snapshot is
+    // stale even if it remains in ProviderRequest::body_bytes. Re-encode and
+    // reauthenticate those edits rather than restoring the old signed body.
+    // A distinct caller-supplied raw image remains authoritative.
+    let preserve_raw = request.body_bytes.as_ref().is_some_and(|bytes| {
+        bytes.as_slice() != draft.request().body.as_ref()
+            || (draft
+                .semantic_body_json()
+                .is_ok_and(|body| body == request.body_json)
+                && draft.request_json_string_overrides() == &request.json_string_overrides)
+    });
+    {
+        let wire = draft.request_mut();
+        wire.url.clone_from(&request.url);
+        wire.method.clone_from(&request.method);
+        wire.headers = request
+            .headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+    }
+    if let Some(bytes) = request.body_bytes.as_ref().filter(|_| preserve_raw) {
+        draft
+            .set_json_body(request.body_json.clone(), &request.json_string_overrides)
+            .map_err(crate::upstream::error)?;
+        draft.set_body_bytes(bytes.clone().into(), request.body_json.clone());
     } else {
         draft
             .set_json_body(request.body_json.clone(), &request.json_string_overrides)
             .map_err(crate::upstream::error)?;
     }
+    if let Some(provider_id) = native_provider_id {
+        let protocol = draft.profile().protocol;
+        let facts = native_request_header_facts(protocol, provider_id, &request.url);
+        draft
+            .set_native_anthropic_request_header_facts(facts)
+            .map_err(crate::upstream::error)?;
+        if let Some(traceparent) = native_traceparent_for_protocol(protocol) {
+            draft
+                .set_native_traceparent(traceparent)
+                .map_err(crate::upstream::error)?;
+        }
+    }
     Box::pin(draft.seal()).await.map_err(crate::upstream::error)
 }
 
-pub(crate) fn response(raw: &sdk::HttpResponse) -> ProviderResponse {
+pub(crate) fn response(
+    raw: &sdk::HttpResponse,
+    protocol: wire::ProtocolFamily,
+    provider_id: &str,
+) -> ProviderResponse {
     let headers = raw
         .headers
         .iter()
         .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
         .collect();
+    let metadata = lingxi_llm_client::providers::response_headers::ProviderResponseHeaders::decode(
+        protocol,
+        provider_id,
+        &raw.headers,
+        std::time::SystemTime::now(),
+    );
     ProviderResponse {
         status: raw.status,
-        request_id: extract_response_request_id(&headers),
+        request_id: metadata.request_id,
         headers,
-        body_json: serde_json::from_slice(&raw.body).unwrap_or_default(),
+        body_json: raw.payload_value(),
+    }
+}
+
+/// Wire-facing provider identity derived from the resolved route. These are
+/// protocol identities, independent of similarly named Host UI auto-mode labels.
+pub(crate) fn response_provider_id(provider: &crate::ProviderId) -> &str {
+    match provider {
+        crate::ProviderId::AnthropicFirstParty => "anthropic",
+        crate::ProviderId::OpenAI => "openai",
+        crate::ProviderId::OpenAICompatible { name } | crate::ProviderId::Custom { name } => name,
+        crate::ProviderId::Gemini => "gemini",
+        crate::ProviderId::VertexGemini => "vertex-gemini",
+        crate::ProviderId::VertexClaude => "vertex-claude",
+        crate::ProviderId::BedrockClaude => "bedrock",
+        crate::ProviderId::FoundryClaude => "foundry",
+        crate::ProviderId::AzureOpenAI => "azure-openai",
     }
 }
 
@@ -209,10 +308,76 @@ pub(crate) fn decode(collected: &sdk::CollectedResponse) -> Result<wire::ChatRes
     Ok(decoded)
 }
 
+/// Credential material belongs to one draft. The SDK authenticates a Responses
+/// handshake before it seals the final body; both must use the same account.
+/// This snapshot contains no account-change generation; cache overage fencing
+/// is carried separately by the Host request context.
+pub(crate) struct RequestCredentialSnapshot {
+    pub profile: String,
+    pub credential: tokio::sync::OnceCell<Option<crate::Credential>>,
+}
+
 pub(crate) struct HostAuthenticator {
-    pub client: crate::ModelRuntime,
-    pub now: Option<std::time::SystemTime>,
-    pub failure: HostFailure,
+    client: crate::ModelRuntime,
+    now: Option<std::time::SystemTime>,
+    failure: HostFailure,
+    snapshot: Option<RequestCredentialSnapshot>,
+}
+
+impl HostAuthenticator {
+    pub(crate) async fn captured_credential(&self) -> Result<Option<crate::Credential>, LlmError> {
+        let snapshot = self
+            .snapshot
+            .as_ref()
+            .ok_or_else(|| LlmError::InvalidRequest {
+                message: "credential capture requires a request draft".into(),
+            })?;
+        self.client.capture_request_credential(snapshot).await
+    }
+    pub(crate) fn for_request(
+        client: crate::ModelRuntime,
+        profile: String,
+        now: Option<std::time::SystemTime>,
+        failure: HostFailure,
+    ) -> Self {
+        Self {
+            client,
+            now,
+            failure,
+            snapshot: Some(RequestCredentialSnapshot {
+                profile,
+                credential: tokio::sync::OnceCell::new(),
+            }),
+        }
+    }
+
+    /// A file service may perform multiple operations and refresh credentials
+    /// between them. It does not share a model draft's authentication snapshot.
+    pub(crate) fn live(
+        client: crate::ModelRuntime,
+        now: Option<std::time::SystemTime>,
+        failure: HostFailure,
+    ) -> Self {
+        Self {
+            client,
+            now,
+            failure,
+            snapshot: None,
+        }
+    }
+
+    /// Authenticate one wire image at the requested time while retaining the
+    /// credential material already captured by this draft's other operations.
+    pub(crate) async fn authenticate_at(
+        &self,
+        profile_name: &str,
+        request: &mut sdk::HttpRequest,
+        now: std::time::SystemTime,
+    ) -> Result<(), LlmError> {
+        self.client
+            .authenticate_wire(profile_name, request, now, self.snapshot.as_ref())
+            .await
+    }
 }
 #[async_trait::async_trait]
 impl sdk::Authenticator for HostAuthenticator {
@@ -222,30 +387,22 @@ impl sdk::Authenticator for HostAuthenticator {
         profile: &wire::ProviderProfile,
         _: Option<&wire::Secret<String>>,
     ) -> Result<(), wire::LlmError> {
-        self.client
-            .authenticate_wire(
-                &profile.profile_name,
-                request,
-                self.now.unwrap_or_else(std::time::SystemTime::now),
-            )
-            .await
-            .map_err(|error| {
-                *self.failure.lock().expect("host failure") = Some(error.clone());
-                wire_error(error)
-            })
+        self.authenticate_at(
+            &profile.profile_name,
+            request,
+            self.now.unwrap_or_else(std::time::SystemTime::now),
+        )
+        .await
+        .map_err(|error| {
+            *self.failure.lock().expect("host failure") = Some(error.clone());
+            wire_error(error)
+        })
     }
 }
 
-/// Finite host deadline for non-stream model work, excluding budget admission.
-pub(crate) fn non_stream_timeout() -> std::time::Duration {
-    std::time::Duration::from_millis(
-        std::env::var("API_TIMEOUT_MS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(crate::model::stream_watchdog::API_TIMEOUT_DEFAULT_MS),
-    )
-}
+#[cfg(test)]
+#[path = "execution_auth_snapshot_tests.rs"]
+mod auth_snapshot_tests;
 
 pub(crate) fn non_stream_bound<'a, T: Send + 'a>(
     timeout: std::time::Duration,
@@ -316,6 +473,29 @@ pub(crate) async fn next_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_traceparent_capture_uses_current_context_only_for_anthropic_routes() {
+        let parent = telemetry::otel::SerializedTraceContext {
+            traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into(),
+            tracestate: None,
+        };
+        telemetry::otel::with_trace_context_future(Some(&parent), async {
+            assert_eq!(
+                native_traceparent_for_protocol(wire::ProtocolFamily::AnthropicMessages),
+                Some(parent.traceparent.clone())
+            );
+            assert_eq!(
+                native_traceparent_for_protocol(wire::ProtocolFamily::BedrockClaude),
+                Some(parent.traceparent.clone())
+            );
+            assert_eq!(
+                native_traceparent_for_protocol(wire::ProtocolFamily::OpenAiChat),
+                None
+            );
+        })
+        .await;
+    }
     use futures::StreamExt;
     struct Heartbeats;
     #[async_trait::async_trait]
@@ -404,18 +584,19 @@ mod tests {
 }
 
 pub(crate) fn extract_response_request_id(
+    protocol: wire::ProtocolFamily,
+    provider_id: &str,
     headers: &std::collections::BTreeMap<String, String>,
 ) -> Option<String> {
-    [
-        "request-id",
-        "x-request-id",
-        "apim-request-id",
-        "x-ms-request-id",
-        "x-amzn-requestid",
-        "x-amzn-request-id",
-        "x-goog-request-id",
-    ]
-    .iter()
-    .find_map(|name| headers.get(*name))
-    .cloned()
+    let headers: Vec<(String, String)> = headers
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    lingxi_llm_client::providers::response_headers::ProviderResponseHeaders::decode(
+        protocol,
+        provider_id,
+        &headers,
+        std::time::SystemTime::now(),
+    )
+    .request_id
 }

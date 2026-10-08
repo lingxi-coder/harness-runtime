@@ -1,0 +1,215 @@
+{
+  "oracle": "Claude Code 2.1.289 refusal fallback text projection",
+  "native_binary_sha256": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69",
+  "execution_scope": "Exact $dt and text-helper source executed with explicit model eligibility, display-label, family, provider, interactive, and feedback facts. No Native CLI/provider/network path executed.",
+  "source_windows": [
+    {
+      "label": "API error text prefix",
+      "start": 181462894,
+      "end_exclusive": 181462922,
+      "sha256": "47f7ba124f8da99bda599c37e90063e2d49e6f645c8a721cd20a1895fdaa8b15"
+    },
+    {
+      "label": "interactive-mode gate",
+      "start": 179307203,
+      "end_exclusive": 179307263,
+      "sha256": "c5962d665b6699f61261e7a0bccf7d54659c6deee200a6725eeb6402707056f1"
+    },
+    {
+      "label": "provider mode and first-party cyber gate",
+      "start": 180332633,
+      "end_exclusive": 180333499,
+      "sha256": "6b09cc3f86c4cfd10bca85995b4c7c2343880839ba2dbd816349f6bf0c7a91cb"
+    },
+    {
+      "label": "feedback command and product setting gate",
+      "start": 186171443,
+      "end_exclusive": 186171956,
+      "sha256": "5f5a000f728ef8cea9c617397a1334ea1729022b0e90aaf5d21bfbb91974f872"
+    },
+    {
+      "label": "nonessential-traffic environment interpretation",
+      "start": 179441125,
+      "end_exclusive": 179441394,
+      "sha256": "158d4b04144dbc09ec8a0154aefcbce587dd255b92f55f8e4b0bb75d2a66b90d"
+    },
+    {
+      "label": "refusal API-error row formatter",
+      "start": 188298052,
+      "end_exclusive": 188299837,
+      "sha256": "7a19dc31283968e16b1583ddc200d3b9ad0097f094e9de501f61733083242455"
+    },
+    {
+      "label": "server fallback refusal callsite and metadata",
+      "start": 195455728,
+      "end_exclusive": 195456130,
+      "sha256": "af0bc32abd5dfa44b69a773d6f4ccd44a63fb9e9de57ffa025433f46f3a5c149"
+    },
+    {
+      "label": "model refusal-eligibility gate",
+      "start": 186201771,
+      "end_exclusive": 186202286,
+      "sha256": "afc3bc7a841ef1885df70297e3b1d17f5d360b552cd2517c11ccd1b11baa9abf"
+    },
+    {
+      "label": "Fable model prefix predicate used by refusal policy",
+      "start": 183123030,
+      "end_exclusive": 183123083,
+      "sha256": "f622a8db0ae4acef0a12a8a476624524447dc82dc24adbb3eb4f0c4f0dce4fd5"
+    },
+    {
+      "label": "configured default Fable identity predicate",
+      "start": 182031092,
+      "end_exclusive": 182031181,
+      "sha256": "ec753829a5e805deab8d94010c0ea4cf7dab9272414179484c4d11ece96b6ddc"
+    },
+    {
+      "label": "Fable family catalogue matcher",
+      "start": 182029462,
+      "end_exclusive": 182029513,
+      "sha256": "db2f41b3aa8fb2c265b6a468128e874250e668681bc64ab81291050e35dbc1b9"
+    },
+    {
+      "label": "Fable aliases excluded from generic model learning link",
+      "start": 186193447,
+      "end_exclusive": 186193506,
+      "sha256": "dde7eae9e9618f82480a586f5c4c6800c5286de21e5186ecab8abe065086073a"
+    },
+    {
+      "label": "special refusal categories",
+      "start": 186198608,
+      "end_exclusive": 186198654,
+      "sha256": "5ecb2ded983173867c841488e7286264be099d8512f8512488250c2d05058989"
+    },
+    {
+      "label": "refusal model help URL selector",
+      "start": 186204278,
+      "end_exclusive": 186204775,
+      "sha256": "cc581a5b365323ffb9430ee8803d18d4d162a26aebb8fe2f0181fd8c2cacc6af"
+    },
+    {
+      "label": "Cyber Verification copy and link",
+      "start": 186204775,
+      "end_exclusive": 186205263,
+      "sha256": "f36f2cea4045312d4e443997d3183ff80afbaa471926b0f80a97746c318b2fe3"
+    },
+    {
+      "label": "category-specific safeguard copy and Details suffix",
+      "start": 186205433,
+      "end_exclusive": 186205940,
+      "sha256": "4f4c2ecfa8c4188122f8b66b6b41333c7839fb6bf9cab65997105793182813a7"
+    },
+    {
+      "label": "family-specific first-time refusal copy",
+      "start": 186206171,
+      "end_exclusive": 186207723,
+      "sha256": "b29ec1877e6d928aecd32e2c93f06f75f880b1135aff954fb29249a4c66a069d"
+    },
+    {
+      "label": "text sanitizer used by Details",
+      "start": 179180145,
+      "end_exclusive": 179180355,
+      "sha256": "2b5d27192155093a7667d43136545373288704fce520d8b9c54f711f40ba3250"
+    },
+    {
+      "label": "Details suffix code-unit cap",
+      "start": 179180355,
+      "end_exclusive": 179180367,
+      "sha256": "e501a6ad9408cc3b7ca35eff60f3eddf6ee576011f94aca9a9b7c0b401761e1d"
+    },
+    {
+      "label": "model display-label resolver",
+      "start": 182057675,
+      "end_exclusive": 182058133,
+      "sha256": "e183021156d7a04d442e223123365ae9b57f9d47ff478d6e5e68b3b78acd2b2f"
+    },
+    {
+      "label": "request ID suffix filter",
+      "start": 188301883,
+      "end_exclusive": 188301957,
+      "sha256": "7111be7252031995a70a25118547e3a1cfca5087f5d6f6fe748fd9ae252db434"
+    },
+    {
+      "label": "completed tool results enter attempt-local je through Tn",
+      "start": 195439205,
+      "end_exclusive": 195439671,
+      "sha256": "acbac16529445942a6c430201d13f36f9f1401f1ed384d0ddebfa31164c77e5d"
+    },
+    {
+      "label": "attachments and projected user rows accumulate in je",
+      "start": 195429764,
+      "end_exclusive": 195430089,
+      "sha256": "0f2b2a6e52dbbc3f5932f2f60e43d6912d64070d27545cbaa103f2dbe6411e23"
+    },
+    {
+      "label": "tool-returned new_messages enter executor rows",
+      "start": 188849094,
+      "end_exclusive": 188849265,
+      "sha256": "7fb51a35eb372c51dcfc83e34a2bd7155962d9adb1cf3414bd1ce0a154d727dc"
+    },
+    {
+      "label": "Native streaming tool block dispatcher W1",
+      "start": 188814536,
+      "end_exclusive": 188819240,
+      "sha256": "2dac343f7459b2386e673fc7726ae690d0b2bb0304ae2e8727fda593fcbaa3d4"
+    },
+    {
+      "label": "accepted fallback resets the full je array when tool uses were tombstoned",
+      "start": 195457049,
+      "end_exclusive": 195457553,
+      "sha256": "620a9fbe09bfbd2bc31b4de0331018e69829feff4bb46c7ea51cd2c881f422af"
+    }
+  ],
+  "observations": {
+    "refusal_row": "API error row, invalid_request, stop_reason refusal, stop_details is the supplied refusal object; explanation is null at the actual server-fallback callsite.",
+    "model_gate": "eYe(servingModel) controls the model-labelled refusal branch. Its catalog/settings-backed KI decision is pinned but supplied as modelEligible in this formatter probe.",
+    "help_links": "The generic help link is selected by b1r from the serving-model identity: Opus 5 routes to /16049681, Fable identities/aliases and the configured default Fable route to /15363606, and other or absent identities to /8106465.",
+    "first_party_copy": "The no-displayable-model cyber branch is special only for provider kind firstParty, anthropicAws, anthropicGoogleCloud, or gateway; the provider and interactive/feedback facts are injected in this probe.",
+    "family_copy": "Native family lookup enables first-time wording for the configured sonnet family on cyber; claude-opus-5-5 is an additional explicit first-time model. Actual family lookup is injected from the dynamic model catalog.",
+    "output_accumulator": "je receives projected user rows from completed tool results and attachment rows; tool-returned newMessages are queued as completed executor rows, so whole-je cleanup is broader than raw tool_result."
+  },
+  "outputs": [
+    {
+      "name": "first-party interactive sonnet cyber refusal",
+      "content": "API Error: Claude Sonnet 5's safeguards flagged this session (https://www.anthropic.com/legal/aup). You may be seeing this for the first time on a Sonnet model: Claude Sonnet 5 is more capable and has stronger safeguards as a result, which can sometimes flag non-cybersecurity work. We're improving these safeguards to reduce the amount of incorrectly flagged messages. Claude Code can't respond to your last message with Claude Sonnet 5.\n\nDouble press esc to edit your last message, or try a different model with /model.\n\nSend feedback with /feedback or learn more: https://support.claude.com/en/articles/8106465\n\nDetails: `[cyber]`\n\nRequest ID: req_289",
+      "error": "invalid_request",
+      "requestId": "req_289",
+      "stop_reason": "refusal"
+    },
+    {
+      "name": "non-interactive first-party cyber with no displayable model",
+      "content": "API Error: Claude Sonnet 5's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work. Apply to the Cyber Verification Program to reduce these interruptions. Learn more: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude\n\nDetails: `[cyber]`\n\nRequest ID: req_289",
+      "error": "invalid_request",
+      "requestId": "req_289",
+      "stop_reason": "refusal"
+    },
+    {
+      "name": "non-interactive Bedrock bio with feedback disabled and no model",
+      "content": "API Error: Claude can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup\n\nDetails: `[bio]`",
+      "error": "invalid_request",
+      "requestId": "bad id",
+      "stop_reason": "refusal"
+    },
+    {
+      "name": "interactive mode with nonessential traffic disabled suppresses feedback CTA",
+      "content": "API Error: Claude can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup",
+      "error": "invalid_request",
+      "requestId": null,
+      "stop_reason": "refusal"
+    },
+    {
+      "name": "eligible Fable model uses the Fable help page",
+      "content": "API Error: Claude Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup). Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate biology tasks. Claude Code can't respond to this message with Claude Fable 5.1.\n\nDouble press esc to edit your last message, or try a different model with /model.\n\nYou can learn more: https://support.claude.com/en/articles/15363606\n\nDetails: `[bio]`",
+      "error": "invalid_request",
+      "requestId": null,
+      "stop_reason": "refusal"
+    },
+    {
+      "name": "eligible Opus 5 effort alias uses the Opus help page",
+      "content": "API Error: Claude Opus 5's safeguards flagged this message (https://www.anthropic.com/legal/aup). Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate biology tasks. Claude Code can't respond to this message with Claude Opus 5.\n\nTry rephrasing the request in a new session or change your model.\n\nLearn more: https://support.claude.com/en/articles/16049681\n\nDetails: `[bio]`\n\nRequest ID: req_opus",
+      "error": "invalid_request",
+      "requestId": "req_opus",
+      "stop_reason": "refusal"
+    }
+  ]
+}

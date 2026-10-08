@@ -36,11 +36,22 @@ pub struct CascadeHop {
 pub struct RefusalCascadeState {
     tried: Vec<String>,
     latched: bool,
+    active_target: Option<String>,
     episode: RefusalEpisode,
     queue: NoticeQueue,
 }
 
 impl RefusalCascadeState {
+    /// The accepted local cascade target, supplied as trusted query context.
+    pub fn target_model(&self) -> Option<&str> {
+        self.active_target.as_deref()
+    }
+
+    /// A user model pick drops target ownership without rearming the episode's
+    /// refusal routing. Native `oae` unsets only the model-selection latch.
+    pub fn clear_target(&mut self) {
+        self.active_target = None;
+    }
     /// Take the next hop away from `current_model`, or `None` when the cascade
     /// is exhausted, latched, or unconfigured.
     ///
@@ -91,6 +102,7 @@ impl RefusalCascadeState {
         let more_hops_possible = !stage.remaining_chain.is_empty();
         let fallback_model = stage.model;
         self.tried.push(fallback_model.clone());
+        self.active_target = Some(fallback_model.clone());
 
         self.episode.merge(RefusalNotice {
             uuid: uuid.clone(),
@@ -127,11 +139,134 @@ impl RefusalCascadeState {
     pub fn reset_routing(&mut self) {
         self.tried.clear();
         self.latched = false;
+        self.clear_target();
     }
 
     /// Whether the once-per-session latch has fired.
     #[must_use]
     pub fn is_latched(&self) -> bool {
         self.latched
+    }
+}
+
+/// Native `$Fo` inputs captured by the query host, outside provider input.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FallbackTargetContext {
+    pub server_fallback: Option<crate::host::refusal_server::QueryPolicy>,
+    pub user_model: String,
+    pub turn_override: Option<String>,
+    pub chain_step_model: Option<String>,
+    /// Native `P1e` accepts a latch only while the raw main-loop override still
+    /// equals its model. Identity equivalence alone cannot keep a stale latch.
+    pub latched_model: Option<String>,
+    pub main_loop_override: Option<String>,
+    pub refusal_header_armed: bool,
+    pub refusal_occurred: bool,
+    pub refusal_lane_enabled: bool,
+    pub refusal_origin_request_id: Option<String>,
+}
+
+impl FallbackTargetContext {
+    pub fn is_target(&self, request_model: &str, identity: impl Fn(&str) -> String) -> bool {
+        let request = identity(request_model);
+        (identity(&self.user_model) != request
+            && [&self.turn_override, &self.chain_step_model]
+                .into_iter()
+                .flatten()
+                .any(|model| identity(model) == request))
+            || self.latched_model.as_ref().is_some_and(|model| {
+                self.main_loop_override.as_ref() == Some(model) && identity(model) == request
+            })
+    }
+}
+
+tokio::task_local! {
+    static QUERY_FALLBACK_TARGET: FallbackTargetContext;
+}
+
+pub async fn scope_fallback_target<F: std::future::Future>(
+    context: FallbackTargetContext,
+    future: F,
+) -> F::Output {
+    QUERY_FALLBACK_TARGET.scope(context, future).await
+}
+
+pub fn current_fallback_target() -> Option<FallbackTargetContext> {
+    QUERY_FALLBACK_TARGET.try_with(Clone::clone).ok()
+}
+
+#[cfg(test)]
+mod target_context_tests {
+    use super::*;
+    #[tokio::test]
+    async fn accepted_cascade_target_is_scoped_to_the_query_and_reset_removes_it() {
+        let mut cascade = RefusalCascadeState::default();
+        assert_eq!(cascade.target_model(), None);
+        cascade
+            .next_hop(&["target".into()], "origin", "notice".into())
+            .unwrap();
+        assert_eq!(cascade.target_model(), Some("target"));
+        let context = FallbackTargetContext {
+            user_model: "origin".into(),
+            turn_override: cascade.target_model().map(str::to_owned),
+            ..Default::default()
+        };
+        assert_eq!(current_fallback_target(), None);
+        scope_fallback_target(context.clone(), async {
+            assert_eq!(current_fallback_target(), Some(context.clone()));
+            scope_fallback_target(Default::default(), async {
+                assert_eq!(current_fallback_target(), Some(Default::default()));
+            })
+            .await;
+            assert_eq!(current_fallback_target(), Some(context.clone()));
+        })
+        .await;
+        assert_eq!(current_fallback_target(), None);
+        cascade.clear_target();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/fallback_target_2_1_288.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(cascade.target_model()).unwrap(),
+            fixture["modelPickState"]["targetAfterPick"]
+        );
+        assert_eq!(
+            cascade.is_latched(),
+            fixture["modelPickState"]["routingStillLatched"]
+                .as_bool()
+                .unwrap()
+        );
+        assert!(cascade
+            .next_hop(&["target".into()], "origin", "again".into())
+            .is_none());
+        cascade.reset_routing();
+        assert_eq!(cascade.target_model(), None);
+    }
+
+    #[test]
+    fn native_query_target_combines_user_override_chain_and_live_latch() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/fallback_target_2_1_288.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let string = |name: &str| case[name].as_str().map(str::to_owned);
+            let context = FallbackTargetContext {
+                user_model: string("user_model").unwrap(),
+                turn_override: string("turn_override"),
+                chain_step_model: string("chain_step_model"),
+                latched_model: string("latched_model"),
+                main_loop_override: string("main_loop_override"),
+                ..Default::default()
+            };
+            assert_eq!(
+                context.is_target(case["request_model"].as_str().unwrap(), |model| {
+                    fixture["identities"][model].as_str().unwrap().to_owned()
+                }),
+                case["expected"].as_bool().unwrap(),
+                "{case}"
+            );
+        }
     }
 }

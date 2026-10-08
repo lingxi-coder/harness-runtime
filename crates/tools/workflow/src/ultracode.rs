@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 /// Default number of non-meta user turns between sparse reminders.
 pub const DEFAULT_ULTRACODE_CADENCE: u32 = 10;
-/// Environment override used by Claude Code's `bop()` resolution.
-pub const ULTRACODE_CADENCE_ENV: &str = "CLAUDE_CODE_JUNIPER_SUNDIAL";
+/// Product environment override for the reminder cadence.
+pub const ULTRACODE_CADENCE_ENV: &str = branding::ULTRACODE_CADENCE_ENV;
 
 const ENTER_TEXT: &str = "Ultracode is on. Use the Workflow tool on every substantive task and keep orchestration aligned with the user's request.";
 const SPARSE_TEXT: &str = "Ultracode is still on. Continue using Workflow for substantive tasks.";
@@ -21,20 +21,19 @@ const REMINDER_SUFFIX: &str = "\n</system-reminder>";
 
 /// Runtime inputs that decide whether Ultracode is active.
 #[derive(Debug, Clone, Copy)]
-pub struct UltracodeGate<'a> {
-    /// Resolved model id. Empty means the model has not resolved yet.
-    pub model: &'a str,
-    /// Resolved effort.
-    pub effort: Option<&'a str>,
+pub struct UltracodeGate {
+    /// Explicit session switch, independent of the selected effort.
+    pub enabled: bool,
+    /// Current model's xhigh capability, acquired by the host.
+    pub model_supported: bool,
     /// Whether Workflow is available and not disabled by policy.
     pub workflows_enabled: bool,
 }
-
-impl UltracodeGate<'_> {
-    /// Claude's `EK(model, effort, workflowsOn)` projection.
+impl UltracodeGate {
+    /// Independent enablement, model support and policy admission must all hold.
     #[must_use]
     pub fn active(self) -> bool {
-        !self.model.trim().is_empty() && self.effort == Some("xhigh") && self.workflows_enabled
+        self.enabled && self.model_supported && self.workflows_enabled
     }
 }
 
@@ -133,7 +132,7 @@ impl UltracodeState {
     /// pass the same inputs and serialize the returned attachments identically.
     pub fn advance(
         &mut self,
-        gate: UltracodeGate<'_>,
+        gate: UltracodeGate,
         config: UltracodeConfig,
         user_prompt: &str,
         is_meta_turn: bool,
@@ -208,10 +207,10 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn active_gate() -> UltracodeGate<'static> {
+    fn active_gate() -> UltracodeGate {
         UltracodeGate {
-            model: "claude-opus-5",
-            effort: Some("xhigh"),
+            enabled: true,
+            model_supported: true,
             workflows_enabled: true,
         }
     }
@@ -240,7 +239,7 @@ mod tests {
 
         let exit = state.advance(
             UltracodeGate {
-                effort: Some("high"),
+                enabled: false,
                 ..active_gate()
             },
             config,
@@ -296,8 +295,8 @@ mod tests {
     #[test]
     fn keyword_attachment_requires_literal_token_and_setting() {
         let gate = UltracodeGate {
-            model: "claude-opus-5",
-            effort: Some("high"),
+            enabled: false,
+            model_supported: true,
             workflows_enabled: true,
         };
         let mut state = UltracodeState::default();

@@ -574,7 +574,9 @@ impl MobileOAuthManager {
                     ))
                     .await;
                 match credential {
-                    Ok(Credential::BearerToken(token)) => (token, None, false),
+                    Ok(Credential::AnthropicOAuth { access_token, .. }) => {
+                        (access_token, None, false)
+                    }
                     _ => {
                         return provider_connection_failure(
                             "Anthropic OAuth 会话已失效，请重新登录",
@@ -835,20 +837,15 @@ pub(super) fn resolve_default_model_ref(
     )
 }
 
-pub(super) const MOBILE_ENABLED_PROFILES_KEY: &str = "mobileEnabledProfiles";
-
-/// File-backed settings override legacy native launch defaults using the same
-/// field merge rules as desktop. Explicit file profiles remain selectable even
-/// when an older native launcher sends its own profile allowlist.
-pub(super) fn mobile_provider_settings(
+/// Preserve the admitted source layers for policies that cannot use a merged scalar.
+pub(super) fn mobile_effective_settings(
     cfg: &MobileConfig,
-) -> Result<lingxi_core::settings::SettingsJson, lingxi_core::settings::SettingsError> {
+) -> Result<lingxi_core::settings::EffectiveSettings, lingxi_core::settings::SettingsError> {
     use lingxi_core::settings::{
         FileLayerScope, LoadInputs, Settings, SettingsJson, SupplementalLayers,
     };
-
     let env = std::env::vars().collect();
-    let layered = Settings::load_with_layers_from_user_path(
+    Settings::load_with_layers_from_user_path(
         LoadInputs {
             env: &env,
             project_dir: &cfg.cwd,
@@ -857,8 +854,20 @@ pub(super) fn mobile_provider_settings(
         FileLayerScope::ALL,
         SupplementalLayers::default(),
         Some(&cfg.lingxi_home.join("settings.json")),
-    )?
-    .settings;
+    )
+}
+
+pub(super) const MOBILE_ENABLED_PROFILES_KEY: &str = "mobileEnabledProfiles";
+
+/// File-backed settings override legacy native launch defaults using the same
+/// field merge rules as desktop. Explicit file profiles remain selectable even
+/// when an older native launcher sends its own profile allowlist.
+pub(super) fn mobile_provider_settings(
+    cfg: &MobileConfig,
+) -> Result<lingxi_core::settings::SettingsJson, lingxi_core::settings::SettingsError> {
+    use lingxi_core::settings::SettingsJson;
+
+    let layered = mobile_effective_settings(cfg)?.settings;
     let explicit_allowlist = layered
         .routing
         .as_ref()

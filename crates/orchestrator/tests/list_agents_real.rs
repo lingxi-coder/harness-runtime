@@ -13,6 +13,7 @@ use tokio::sync::RwLock;
 
 fn mk(name: &str, desc: &str, tools: Vec<String>) -> AgentDefinition {
     AgentDefinition {
+        omit_instructions: false,
         cache_ttl: None,
         agent_type: name.into(),
         when_to_use: desc.into(),
@@ -38,6 +39,7 @@ fn mk(name: &str, desc: &str, tools: Vec<String>) -> AgentDefinition {
         initial_prompt: None,
         color: None,
         observer: None,
+        offer_provider: None,
     }
 }
 

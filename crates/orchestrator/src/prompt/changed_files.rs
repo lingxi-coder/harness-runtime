@@ -44,23 +44,18 @@
 //! `agent_listing_delta` — a deliberate position divergence recorded at the
 //! call site.
 //!
-//! Two deliberate deviations from `Izm`, both non-model-visible:
+//! The producer performs the current Read-tool call after route and policy
+//! checks, then consumes only the Native reminder result kinds. The Read call
+//! owns its read-state refresh; this renderer does not rewrite cache state.
+//! `qhe` (the permission-context path filter) has no orchestrator-side
+//! analogue, so the producer uses its current path-policy snapshot.
 //!
-//! * The re-read is a plain filesystem read that REWRITES the `read_file_state`
-//!   entry (content + mtime) rather than a nested `Read` tool invocation. The
-//!   oracle's re-read exists to refresh the entry so the reminder does not
-//!   repeat; doing it directly has the same effect without re-entering the tool
-//!   layer (and without emitting a second `readFileState` telemetry event).
-//! * `qhe` (the permission-context path filter) has no orchestrator-side
-//!   analogue; the producer instead skips anything that is not a readable UTF-8
-//!   file, which is the only way a denied path can reach here.
-//!
-//! Entries recorded from a PARTIAL read (`offset`/`limit` set) are skipped, like
-//! the oracle. So are `seeded_from_context` / `is_partial_view` entries: the
-//! recorded content for those deliberately differs from disk (frontmatter
-//! stripping, token-cap truncation), so a byte compare would fire every turn
-//! forever. That is the port's stand-in for the oracle's
-//! `truncatedByTokenCap === true` early return plus its `vNe` content compare.
+//! Entries recorded with an `offset` or `limit` are skipped before reading,
+//! like the oracle. A newly token-truncated full text result is suppressed only
+//! after the actual Read call returns `truncatedByTokenCap: true`; the cached
+//! `is_partial_view` flag is not used as a pre-read filter.
+
+use lingxi_core::types::{ConversationMessage, ImageSource, MessageId};
 
 /// `m3T = 16384` @296537358 — the per-turn snippet budget shared by every
 /// changed file.
@@ -75,13 +70,52 @@ pub const DIFF_CONTEXT_LINES: usize = 8;
 /// The separator between rendered hunks inside one snippet.
 pub const HUNK_SEPARATOR: &str = "\n...\n";
 
-/// One changed file, as `Izm` yields it.
+/// One changed file result, as `NTr` yields it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangedFile {
     /// Absolute path, as recorded in `readFileState`.
     pub filename: String,
-    /// The rendered diff snippet, or `""` once the budget is exhausted.
+    /// The rendered text diff snippet, or `""` once the budget is exhausted.
     pub snippet: String,
+    /// Native's `edited_image_file` carries an image result as typed data. The
+    /// current 2.1.291 default reminder renderer maps that variant to no model
+    /// message, so this is retained as a typed result and is never flattened to
+    /// text or emitted as a new image block.
+    pub image: Option<ImageSource>,
+}
+
+impl ChangedFile {
+    /// Build a text reminder from a Native `Read` text result.
+    #[must_use]
+    pub fn text(filename: String, snippet: String) -> Self {
+        Self {
+            filename,
+            snippet,
+            image: None,
+        }
+    }
+
+    /// Preserve an actual current Read image result as a typed image source.
+    #[must_use]
+    pub fn from_read_result(filename: String, data: &serde_json::Value) -> Option<Self> {
+        if data.get("type")?.as_str()? != "image" {
+            return None;
+        }
+        let file = data.get("file")?;
+        let image_data = file.get("base64")?.as_str()?.to_owned();
+        let media_type = file.get("type")?.as_str()?.to_owned();
+        if image_data.is_empty() {
+            return None;
+        }
+        Some(Self {
+            filename,
+            snippet: String::new(),
+            image: Some(ImageSource::Base64 {
+                media_type,
+                data: image_data,
+            }),
+        })
+    }
 }
 
 /// The shared first sentence of both renderer arms.
@@ -105,6 +139,9 @@ rather than undoing it yourself \u{2014} otherwise no need to call it out."
 /// `read_tool_name` is the oracle's `${mC.name}`.
 #[must_use]
 pub fn render_changed_file(file: &ChangedFile, read_tool_name: &str) -> String {
+    if file.image.is_some() {
+        return String::new();
+    }
     let note = changed_file_note(&file.filename);
     if file.snippet.is_empty() {
         format!(
@@ -119,6 +156,25 @@ filled the snippet budget; use {read_tool_name} if you need the current content.
     }
 }
 
+/// Render a Native changed-file result through the current default attachment
+/// renderer. In 2.1.291 `edited_image_file` maps to an empty message list; keep
+/// its payload typed on [`ChangedFile`] but do not add model-visible image
+/// blocks without a proven Native consumer.
+#[must_use]
+pub fn render_changed_file_message(
+    file: &ChangedFile,
+    read_tool_name: &str,
+) -> Option<ConversationMessage> {
+    if file.image.is_some() {
+        return None;
+    }
+    let body = render_changed_file(file, read_tool_name);
+    Some(ConversationMessage::user_meta(
+        MessageId::new(),
+        format!("<system-reminder>\n{body}\n</system-reminder>"),
+    ))
+}
+
 /// The budget tail of `Izm`.
 ///
 /// The threshold is checked BEFORE the current snippet is added, so the entry
@@ -129,6 +185,9 @@ filled the snippet budget; use {read_tool_name} if you need the current content.
 pub fn apply_snippet_budget(files: &mut [ChangedFile]) {
     let mut acc = 0usize;
     for file in files.iter_mut() {
+        if file.image.is_some() {
+            continue;
+        }
         if acc >= CHANGED_FILE_SNIPPET_BUDGET {
             file.snippet.clear();
         } else {
@@ -276,6 +335,7 @@ mod tests {
         ChangedFile {
             filename: "/tmp/a.rs".into(),
             snippet: snippet.into(),
+            image: None,
         }
     }
 
@@ -322,6 +382,30 @@ mod tests {
             render_changed_file(&file(""), "Read"),
             "Note: /tmp/a.rs changed on disk since you last read it. That's usually deliberate, so take it as the current state rather than reverting it; if the change looks wrong, say so rather than undoing it yourself — otherwise no need to call it out. The diff is omitted here because other changed files this turn already filled the snippet budget; use Read if you need the current content."
         );
+    }
+
+    #[test]
+    fn current_native_image_result_stays_typed_and_default_renderer_is_empty() {
+        let data = serde_json::json!({
+            "type": "image",
+            "file": {"base64": "aW1hZ2U=", "type": "image/png"}
+        });
+        let image = ChangedFile::from_read_result("/tmp/pic.png".into(), &data)
+            .expect("Native image result should remain typed");
+        assert_eq!(
+            image.image,
+            Some(ImageSource::Base64 {
+                media_type: "image/png".into(),
+                data: "aW1hZ2U=".into(),
+            })
+        );
+        assert!(image.snippet.is_empty());
+        assert!(render_changed_file_message(&image, "Read").is_none());
+
+        let text = ChangedFile::text("/tmp/a.rs".into(), "diff".into());
+        let mut mixed = vec![text, image.clone()];
+        apply_snippet_budget(&mut mixed);
+        assert_eq!(mixed[1], image, "images do not consume text snippet budget");
     }
 
     #[test]

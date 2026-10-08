@@ -2697,8 +2697,9 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                     .collect();
                 std::fs::write(&fixture.transcript_path, filtered).unwrap();
                 let identity_path = std::path::PathBuf::from(format!(
-                    "{}.lingxi-message-identities",
-                    fixture.transcript_path.display()
+                    "{}{}",
+                    fixture.transcript_path.display(),
+                    branding::SESSION_MESSAGE_IDENTITY_LOG_SUFFIX
                 ));
                 assert!(
                     std::fs::read_to_string(identity_path)

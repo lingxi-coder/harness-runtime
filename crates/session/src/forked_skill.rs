@@ -55,7 +55,7 @@ pub const EFFORT_MAX: i64 = 1000;
 
 /// The named effort levels (claude `VN_`). An `effort` is either one of these
 /// or an integer in `EFFORT_MIN..=EFFORT_MAX`.
-pub const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+pub const EFFORT_LEVELS: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// `effort` — either a named level or an integer (claude
 /// `De.union([De.enum(VN_), De.number().int().min(1).max(1000)])`).

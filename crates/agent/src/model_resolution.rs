@@ -1,57 +1,337 @@
 //! Resolve an agent definition's model preference to a concrete wire model id.
 //!
-//! 1:1 port of claude-code's `getAgentModel` (`src/utils/model/agent.ts:37-95`)
-//! plus the helpers it leans on (`getRuntimeMainLoopModel`, `getDefault*Model`,
-//! `aliasMatchesParentTier`, `getCanonicalName`, `parseUserSpecifiedModel`, the
-//! Bedrock region-prefix helpers, and `getAPIProvider`'s Bedrock arm). Without
-//! this, the runner's `resolve_model` emits the bare definition string
-//! (`"inherit"` / `"haiku"` / `"sonnet"`), which is not a valid Anthropic model
-//! id, so built-in subagent spawns error at the provider on a default install
-//! (the provider router only substitutes configured `routing.aliases`). See
-//! [`resolve_agent_model`].
-//!
-//! ## Precedence (`getAgentModel`, agent.ts:43-94)
-//! 1. **`LINGXI_SUBAGENT_MODEL`** env override (HIGHEST) → resolved via
-//!    `parseUserSpecifiedModel`, bypassing the Bedrock region prefix (the TS
-//!    early-return at agent.ts:43-45 returns before `applyParentRegionPrefix`).
-//!    The TS guard `if (process.env.LINGXI_SUBAGENT_MODEL)` is falsy for
-//!    BOTH unset and empty-string, hence the `.filter(|s| !s.is_empty())`.
-//! 2. **`toolSpecifiedModel`** (agent.ts:70-76) — NOT separately ported here.
-//!    The LingXi spawn path (`handle.rs::spawn`) already converts AgentTool's
-//!    per-call `model` field into `AgentModel::Alias` and passes it as the
-//!    `model` arg, so the alias/tier logic below covers it identically. This is
-//!    the one intentional structural deviation from the TS line-for-line shape.
-//! 3. **`Inherit`** (agent.ts:78-88) → `getRuntimeMainLoopModel` so an agent on
-//!    `inherit` gets `opusplan`→Opus / `haiku`→Sonnet runtime resolution in plan
-//!    mode (else the parent model unchanged).
-//! 4. **alias / explicit** (agent.ts:90-94) → if the bare family alias matches
-//!    the parent's tier (`aliasMatchesParentTier` via `getCanonicalName`)
-//!    inherit the parent's EXACT id (no surprising downgrade); else
-//!    `applyParentRegionPrefix(parseUserSpecifiedModel(spec), spec)`.
-//!
-//! ## Bedrock cross-region prefix inheritance (agent.ts:50-67)
-//! When the parent model carries a cross-region inference prefix (`eu.`, `us.`,
-//! …) and the provider is Bedrock, alias/explicit-resolved ids inherit that
-//! prefix — UNLESS the original spec already pins its own region prefix (then it
-//! is preserved, to avoid silent data-residency violations).
-//!
-//! ## Documented smaller deferrals (not modeled here)
-//! - **Live session model**: the parent model is the BOOT-time configured model
-//!   (a snapshot threaded from `cfg.model`), not the live session model — so a
-//!   mid-session `/model` switch is not reflected in subsequently-spawned
-//!   subagents. claude-code threads the live `parentModel`.
-//! - **Nested spawns**: the parent model is always the main-loop model, not the
-//!   immediate parent subagent's (the frozen request carries no parent model).
-//! - **`toolSpecifiedModel` double-handle**: see precedence note 2 above — the
-//!   spawn path maps AgentTool's per-call model into `AgentModel::Alias` before
-//!   this fn, so the alias tier/default logic covers it; a future change that
-//!   threads the per-call model straight in as a separate arg must NOT run the
-//!   alias logic twice.
+//! Provider identity and alias defaults come from the host's selected route.
+//! Model changes resolve a model and profile together, so overlapping catalogs
+//! retain the intended endpoint and credentials. The managed allowlist and
+//! permission-mode policy remain part of subagent selection.
 
 use crate::definition::{AgentDefinition, AgentModel, AgentSource};
-use lingxi_core::host::env::is_env_truthy;
 use llm_runtime::model::allowlist::{self, ModelEnforcement};
 use permission::PermissionMode;
+
+/// Provider kind that affects Native alias and legacy-model decisions.
+///
+/// This is intentionally not inferred from a profile name or endpoint. A host
+/// must map it from the configured provider identity; unknown/custom providers
+/// stay `Other` until they have an explicit identity source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModelProviderKind {
+    /// Anthropic's first-party provider.
+    FirstParty,
+    /// Claude on Amazon Bedrock (`bedrock`, distinct from `anthropicAws`).
+    Bedrock,
+    /// Claude on Vertex.
+    Vertex,
+    /// Claude on Azure AI Foundry.
+    Foundry,
+    /// Explicit Anthropic AWS service provider identity.
+    AnthropicAws,
+    /// Explicit Anthropic Google Cloud provider identity.
+    AnthropicGoogleCloud,
+    /// Anthropic Mantle provider identity.
+    Mantle,
+    /// Explicit Anthropic gateway provider identity.
+    Gateway,
+    /// Other or not-yet-classified provider.
+    #[default]
+    Other,
+}
+
+/// Exact selected route facts used by model resolution.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelRouteFacts {
+    /// Current concrete/requested model id.
+    pub model: String,
+    /// Selected profile, if the host has an explicit profile for this route.
+    pub profile: Option<String>,
+    /// Provider identity from the route resolver/configuration.
+    pub provider: Option<ModelProviderKind>,
+    /// Configured endpoint. This is descriptive route data; it is not used to
+    /// guess provider kind.
+    pub endpoint: Option<String>,
+    /// Configured protocol family, when known.
+    pub protocol: Option<String>,
+}
+
+/// Family aliases selected from the active route's host catalog or explicit
+/// family overrides. `Some("")` is a real configured override and must remain
+/// distinct from `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FamilyModelDefaults {
+    /// `opus` family default or explicit override.
+    pub opus: Option<String>,
+    /// `sonnet` family default or explicit override.
+    pub sonnet: Option<String>,
+    /// `haiku` family default or explicit override.
+    pub haiku: Option<String>,
+    /// `fable` family default or explicit override.
+    pub fable: Option<String>,
+}
+
+impl FamilyModelDefaults {
+    /// Return one configured family default without collapsing `Some("")`.
+    #[must_use]
+    pub fn get(&self, family: &str) -> Option<&str> {
+        match family {
+            "opus" => self.opus.as_deref(),
+            "sonnet" => self.sonnet.as_deref(),
+            "haiku" => self.haiku.as_deref(),
+            "fable" => self.fable.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+/// Presence-sensitive, host-owned context for one selected model route.
+///
+/// `best_model`, `fable_strategy_available`, `native_1m`, and the entitlement
+/// snapshot are optional because the current runtime does not yet provide the
+/// corresponding Native catalog/feature sources. Missing values are not
+/// synthesized from profile names or endpoint URLs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelResolutionContext {
+    /// Resolved or explicitly selected route.
+    pub route: ModelRouteFacts,
+    /// Defaults/overrides for the active route.
+    pub family_defaults: FamilyModelDefaults,
+    /// Concrete provider-local IDs registered on this route. These are host
+    /// catalog facts, so a wire ID named `opus` is distinct from an alias.
+    pub registered_model_ids: std::collections::BTreeSet<String>,
+    /// Explicit catalog aliases on this route, with normalized keys and
+    /// distinct wire-model candidates. Multiple candidates remain ambiguous.
+    pub catalog_aliases: std::collections::BTreeMap<String, Vec<String>>,
+    /// Native's dynamically selected `best` model, when a trusted source exists.
+    pub best_model: Option<String>,
+    /// Whether the Native Fable strategy is available for this host/session.
+    pub fable_strategy_available: Option<bool>,
+    /// Native 1M support for the model currently being resolved, when known.
+    pub native_1m: Option<bool>,
+    /// Explicit entitlement result, when a trusted source exists.
+    pub entitlement_allowed: Option<bool>,
+    /// LingXi switch equivalent to Native's truthy 1M-disable gate.
+    pub disable_1m_context: bool,
+}
+
+/// Host route lookup failure. The Agent layer reports ambiguity and missing
+/// configured routes instead of selecting the first/last same-named profile.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ModelResolutionError {
+    /// No configured route could serve the requested model/profile.
+    #[error("no configured model route for model {model:?} and profile {profile:?}: {reason}")]
+    RouteUnavailable {
+        /// Requested model.
+        model: String,
+        /// Requested profile, if supplied.
+        profile: Option<String>,
+        /// Route resolver detail.
+        reason: String,
+    },
+    /// More than one configured profile can serve an unqualified model.
+    #[error("model {model:?} is served by multiple profiles: {profiles:?}")]
+    AmbiguousRoute {
+        /// Requested model.
+        model: String,
+        /// Matching profile names.
+        profiles: Vec<String>,
+    },
+    /// The host did not provide an actual default for this family on the route.
+    #[error("no {family} model default is available for profile {profile:?}")]
+    MissingFamilyDefault {
+        /// Missing family name.
+        family: String,
+        /// Selected profile, if available.
+        profile: Option<String>,
+    },
+}
+
+/// Synchronous route-context provider. Implementations may own a runtime or
+/// config snapshot internally, but callers exchange only owned route facts.
+pub trait ModelResolutionContextProvider: Send + Sync {
+    /// Resolve route facts for a concrete model/profile pair.
+    fn context_for_route(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<ModelResolutionContext, ModelResolutionError>;
+}
+
+/// A model and its provider route resolved together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedModelSelection {
+    /// Provider-local model sent on the wire.
+    pub model: String,
+    /// Profile that selects the configured endpoint and credentials.
+    pub model_profile: Option<String>,
+    /// Facts for the selected route, including its scoped aliases.
+    pub model_resolution_context: ModelResolutionContext,
+}
+
+/// Resolve a user model preference while keeping model and provider identity
+/// together. Relative family aliases use the parent's catalog. Concrete models
+/// prefer that route, and may select another configured route when unavailable
+/// there. A qualified `profile/model` reference is resolved by the host registry.
+pub fn resolve_user_model_selection(
+    model_input: &str,
+    model_profile: Option<&str>,
+    parent_context: &ModelResolutionContext,
+    provider: &dyn ModelResolutionContextProvider,
+) -> Result<ResolvedModelSelection, ModelResolutionError> {
+    let model_input = lingxi_core::host::effort::trim_js_whitespace(model_input);
+    let relative_alias = is_relative_model_alias(model_input);
+    let (context, resolve_alias) = if let Some(profile) = model_profile {
+        let context = provider.context_for_route(model_input, Some(profile))?;
+        let resolve_alias = relative_alias && !is_registered_concrete_model(model_input, &context);
+        (context, resolve_alias)
+    } else if relative_alias {
+        // A retired parent model is not needed to retrieve its profile's
+        // aliases. Only a registered concrete ID may discover another route
+        // when this profile has no meaning for the relative preference.
+        let scoped = parent_context
+            .route
+            .profile
+            .as_deref()
+            .and_then(|profile| provider.context_for_route(model_input, Some(profile)).ok())
+            .filter(|context| {
+                is_registered_concrete_model(model_input, context)
+                    || has_relative_model_preference(model_input, context)
+            })
+            .unwrap_or_else(|| parent_context.clone());
+        if is_registered_concrete_model(model_input, &scoped) {
+            let context =
+                provider.context_for_route(model_input, scoped.route.profile.as_deref())?;
+            (context, false)
+        } else if has_relative_model_preference(model_input, &scoped) {
+            (scoped, true)
+        } else {
+            match provider.context_for_route(model_input, None) {
+                Ok(context) if is_registered_concrete_model(model_input, &context) => {
+                    (context, false)
+                }
+                Ok(context)
+                    if parent_context.route.profile.is_none()
+                        && has_relative_model_preference(model_input, &context) =>
+                {
+                    (context, true)
+                }
+                Err(error @ ModelResolutionError::AmbiguousRoute { .. }) => return Err(error),
+                _ => (scoped, true),
+            }
+        }
+    } else {
+        let context = match provider
+            .context_for_route(model_input, parent_context.route.profile.as_deref())
+        {
+            Ok(context) => context,
+            Err(ModelResolutionError::RouteUnavailable { .. })
+                if parent_context.route.profile.is_some() =>
+            {
+                provider.context_for_route(model_input, None)?
+            }
+            Err(error) => return Err(error),
+        };
+        (context, false)
+    };
+    let model = if resolve_alias {
+        resolve_user_specified_model(model_input, &context)?
+    } else {
+        // The host already resolved the request to a concrete wire ID. Never
+        // reinterpret that ID as a native family or strategy name.
+        let model = &context.route.model;
+        if !context.disable_1m_context && has_1m_context(model) {
+            normalize_1m_suffix(model)
+        } else {
+            model.clone()
+        }
+    };
+    let final_context = provider.context_for_route(&model, context.route.profile.as_deref())?;
+    Ok(ResolvedModelSelection {
+        model: final_context.route.model.clone(),
+        model_profile: final_context.route.profile.clone(),
+        model_resolution_context: final_context,
+    })
+}
+
+pub(crate) fn is_registered_concrete_model(model: &str, context: &ModelResolutionContext) -> bool {
+    let model = lingxi_core::host::effort::trim_js_whitespace(model);
+    let bare = strip_1m_suffix(model);
+    context.registered_model_ids.iter().any(|registered| {
+        registered.eq_ignore_ascii_case(model) || registered.eq_ignore_ascii_case(&bare)
+    })
+}
+
+pub(crate) fn has_relative_model_preference(model: &str, context: &ModelResolutionContext) -> bool {
+    let base = strip_1m_suffix(&model.to_lowercase());
+    context.catalog_aliases.contains_key(&base)
+        || match base.as_str() {
+            "opus" | "sonnet" | "haiku" | "fable" => context.family_defaults.get(&base).is_some(),
+            "opusplan" => context.family_defaults.sonnet.is_some(),
+            "best" => context.best_model.is_some() || context.family_defaults.opus.is_some(),
+            _ => false,
+        }
+}
+
+/// Resolve a skill model preference using the live parent route. An inherited
+/// context-window suffix is retained only when the host confirms that the
+/// target on that same route supports it. Explicit suffixes retain the normal
+/// user-model semantics.
+pub fn resolve_skill_model_selection(
+    model_input: &str,
+    model_profile: Option<&str>,
+    parent_context: &ModelResolutionContext,
+    provider: &dyn ModelResolutionContextProvider,
+) -> Result<ResolvedModelSelection, ModelResolutionError> {
+    let selection =
+        resolve_user_model_selection(model_input, model_profile, parent_context, provider)?;
+    let target = &selection.model_resolution_context;
+    if !has_1m_context(&parent_context.route.model)
+        || has_1m_context(model_input)
+        || has_1m_context(&selection.model)
+        || parent_context.disable_1m_context
+        || target.disable_1m_context
+        || target.native_1m != Some(true)
+        || target.route.provider.is_none()
+        || target.route.profile != parent_context.route.profile
+        || target.route.provider != parent_context.route.provider
+        || target.route.endpoint != parent_context.route.endpoint
+        || target.route.protocol != parent_context.route.protocol
+        || (target.route.provider == Some(ModelProviderKind::Other)
+            && target.route.profile.is_none()
+            && target.route.endpoint.is_none())
+    {
+        return Ok(selection);
+    }
+    resolve_user_model_selection(
+        &format!("{}[1m]", selection.model),
+        selection.model_profile.as_deref(),
+        parent_context,
+        provider,
+    )
+}
+
+/// Whether a model preference names a route-scoped family or reserved model
+/// strategy, optionally with a context-window suffix.
+#[must_use]
+pub fn is_relative_model_alias(model: &str) -> bool {
+    let normalized = lingxi_core::host::effort::trim_js_whitespace(model).to_lowercase();
+    let base = strip_1m_suffix(&normalized);
+    matches!(
+        base.as_str(),
+        "opus" | "sonnet" | "haiku" | "fable" | "best" | "opusplan"
+    )
+}
+
+impl<F> ModelResolutionContextProvider for F
+where
+    F: Fn(&str, Option<&str>) -> Result<ModelResolutionContext, ModelResolutionError> + Send + Sync,
+{
+    fn context_for_route(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<ModelResolutionContext, ModelResolutionError> {
+        self(model, profile)
+    }
+}
 
 /// Managed model-restriction context threaded into the plan-mode upgrade swap
 /// (binary `RF`) and the subagent model-request gate (binary `ble`/`Qly`). Boot
@@ -94,205 +374,6 @@ impl<'a> ModelRestriction<'a> {
 /// `true` when a restriction is present AND actively bars `model`.
 fn restriction_bars(restriction: Option<ModelRestriction<'_>>, model: &str) -> bool {
     restriction.is_some_and(|r| r.bars(model))
-}
-
-/// Canonical concrete id for a bare family alias.
-///
-/// Mirrors the current Rust catalog (orchestrator `DEFAULT_MODEL` +
-/// `handle_impl` `available_models`); claude-code sources these from
-/// `getModelStrings()`. DRIFT NOTE: keep aligned with those (and with
-/// `tools/skill/src/model_override.rs`) when the default model versions change.
-fn family_default_id(family_lower: &str) -> Option<&'static str> {
-    match family_lower {
-        "opus" => Some("claude-opus-4-8"),
-        // 2.1.198 alias table: sonnet.default = "claude-sonnet-5" (was 4-6).
-        "sonnet" => Some("claude-sonnet-5"),
-        "haiku" => Some("claude-haiku-4-5"),
-        _ => None,
-    }
-}
-
-/// The Sonnet family default id for non-firstParty (3P) providers.
-///
-/// `getDefaultSonnetModel()` (`model.ts:119-128`) returns `getModelStrings().sonnet45`
-/// — canonical first-party id `claude-sonnet-4-5-20250929` (`configs.ts:45`) — when
-/// `getAPIProvider() !== 'firstParty'` (Bedrock/Vertex/Foundry), since those
-/// providers may not yet have Sonnet 5. firstParty is on `claude-sonnet-5`
-/// (`family_default_id("sonnet")`; 2.1.198 alias table
-/// `sonnet.per_provider = {bedrock/vertex/foundry: "claude-sonnet-4-5"}`).
-///
-/// Haiku does NOT diverge by provider (`getDefaultHaikuModel` has no provider
-/// branch — Haiku 4.5 is on all platforms). Opus diverges only for Foundry as
-/// of 2.1.207 (Bedrock/Vertex joined the 4-8 default) — see
-/// [`OPUS_FOUNDRY_DEFAULT_ID`] / [`get_default_opus_model`].
-const SONNET_3P_DEFAULT_ID: &str = "claude-sonnet-4-5-20250929";
-
-/// The Opus family default id for the Foundry provider. In the 2.1.207 alias
-/// table Opus moved to per-provider ids: `opus.default = claude-opus-4-8` with
-/// `per_provider = {bedrock: "claude-opus-4-8", vertex: "claude-opus-4-8",
-/// foundry: "claude-opus-4-6", mantle: "claude-opus-4-8", anthropic_aws:
-/// "claude-opus-4-8", gateway: "claude-opus-4-7"}`. So Bedrock/Vertex now match
-/// the first-party 4-8 default and ONLY Foundry stays on 4-6 (verified against
-/// the 2.1.207 binary; the changelog names only Bedrock/Vertex/Claude-on-AWS).
-/// The port detects only Bedrock/Vertex/Foundry via the `CLAUDE_CODE_USE_*` env
-/// vars — mantle/anthropic_aws/gateway have no runtime representation and all
-/// resolve to the 4-8 default anyway (except gateway 4-7, undetected).
-const OPUS_FOUNDRY_DEFAULT_ID: &str = "claude-opus-4-6";
-
-/// `getDefaultOpusModel()` (`db()`/`nJe()` in 2.1.207): the
-/// `ANTHROPIC_DEFAULT_OPUS_MODEL` env override (when non-empty) wins; else the
-/// 2.1.207 alias table resolves `COn("opus", provider) ?? opus48`. Only Foundry
-/// (`OPUS_FOUNDRY_DEFAULT_ID` = `claude-opus-4-6`) diverges from the 4-8 default;
-/// firstParty/Bedrock/Vertex all get `claude-opus-4-8`.
-fn get_default_opus_model() -> String {
-    if let Some(v) = std::env::var("ANTHROPIC_DEFAULT_OPUS_MODEL")
-        .ok()
-        .filter(|s| !s.is_empty())
-    {
-        return v;
-    }
-    if api_provider_is_foundry() {
-        return OPUS_FOUNDRY_DEFAULT_ID.to_string();
-    }
-    family_default_id("opus")
-        .expect("opus is a known family")
-        .to_string()
-}
-
-/// `getDefaultSonnetModel()` (`model.ts:118-128`): the
-/// `ANTHROPIC_DEFAULT_SONNET_MODEL` env override (when non-empty) wins; else the
-/// default is provider-aware — `claude-sonnet-4-5-20250929` for non-firstParty
-/// (Bedrock/Vertex/Foundry, which lag), `claude-sonnet-5` for firstParty
-/// (2.1.198 alias table).
-fn get_default_sonnet_model() -> String {
-    if let Some(v) = std::env::var("ANTHROPIC_DEFAULT_SONNET_MODEL")
-        .ok()
-        .filter(|s| !s.is_empty())
-    {
-        return v;
-    }
-    if api_provider_is_first_party() {
-        return family_default_id("sonnet")
-            .expect("sonnet is a known family")
-            .to_string();
-    }
-    SONNET_3P_DEFAULT_ID.to_string()
-}
-
-/// `getDefaultHaikuModel()` (`model.ts:130-138`): env override, else default.
-/// Haiku 4.5 is available on all platforms (firstParty/Foundry/Bedrock/Vertex),
-/// so the TS has no provider branch — collapsed here.
-fn get_default_haiku_model() -> String {
-    env_default("ANTHROPIC_DEFAULT_HAIKU_MODEL", "haiku")
-}
-
-/// Shared body for the env-override `getDefault*Model` helpers whose defaults do
-/// NOT diverge by provider (opus / haiku): env override (when non-empty) wins,
-/// else the family default id. Sonnet is provider-aware — see
-/// [`get_default_sonnet_model`] — so it does NOT route through here.
-fn env_default(env_var: &str, family_lower: &str) -> String {
-    if let Some(v) = std::env::var(env_var).ok().filter(|s| !s.is_empty()) {
-        return v;
-    }
-    family_default_id(family_lower)
-        .expect("env_default called with a known family")
-        .to_string()
-}
-
-/// `getRuntimeMainLoopModel` (`model.ts:145-167`): in plan mode, `opusplan`
-/// resolves to Opus (without `[1m]`) and `haiku` resolves to Sonnet; otherwise
-/// the main-loop model unchanged.
-///
-/// NOTE the TS keys off `getUserSpecifiedModelSetting()` — the RAW user setting
-/// string (e.g. `'opusplan'` / `'haiku'`) — which is why `model_setting` is
-/// threaded SEPARATELY from `main_loop_model` (the resolved id). Without it the
-/// Inherit branch is byte-identical to returning the parent model.
-fn get_runtime_main_loop_model(
-    permission_mode: PermissionMode,
-    main_loop_model: &str,
-    exceeds_200k_tokens: bool,
-    model_setting: Option<&str>,
-) -> String {
-    get_runtime_main_loop_model_restricted(
-        permission_mode,
-        main_loop_model,
-        exceeds_200k_tokens,
-        model_setting,
-        None,
-        &mut |_| {},
-    )
-}
-
-/// [`get_runtime_main_loop_model`] with the managed model-restriction gate the
-/// binary `RF` applies to the plan-mode upgrade model. When the `opusplan`→Opus
-/// (or `haiku`→Sonnet) upgrade model is BARRED by the managed allowlist, the
-/// upgrade is replaced by the newest permitted model of that family (binary
-/// `j5`), or — when nothing in the family is permitted — by the resting model
-/// (the setting resolved normally). Each substitution emits its byte-exact
-/// warning through `warn` (the caller de-duplicates, mirroring the binary `SN`
-/// set). With `restriction == None` (or an inactive one) this is byte-identical
-/// to the unrestricted resolution.
-fn get_runtime_main_loop_model_restricted(
-    permission_mode: PermissionMode,
-    main_loop_model: &str,
-    exceeds_200k_tokens: bool,
-    model_setting: Option<&str>,
-    restriction: Option<ModelRestriction<'_>>,
-    warn: &mut dyn FnMut(&str),
-) -> String {
-    let plan = permission_mode == PermissionMode::Plan;
-
-    // opusplan (with or without an explicit [1m] tag) upgrades to Opus in plan
-    // mode unless the context already exceeds 200k tokens.
-    let is_opusplan = model_setting == Some("opusplan") || model_setting == Some("opusplan[1m]");
-    if is_opusplan && plan && !exceeds_200k_tokens {
-        let one_m = model_setting == Some("opusplan[1m]");
-        let upgrade = if one_m {
-            format!("{}[1m]", get_default_opus_model())
-        } else {
-            get_default_opus_model()
-        };
-        if restriction_bars(restriction, &upgrade) {
-            if let Some((allow, ovr, catalog)) =
-                restriction.and_then(|r| r.active().map(|(a, o)| (a, o, r.catalog)))
-            {
-                if let Some(newest) =
-                    allowlist::newest_permitted_in_family("opus", catalog, Some(allow), Some(ovr))
-                {
-                    warn(allowlist::warnings::PLAN_OPUSPLAN_NEWEST);
-                    return newest;
-                }
-            }
-            warn(allowlist::warnings::PLAN_OPUSPLAN_RESTING);
-            // The resting model = the raw setting resolved normally (opusplan →
-            // Sonnet), preserving the [1m] tag the setting carried.
-            return parse_user_specified_model(model_setting.unwrap_or("opusplan"));
-        }
-        return upgrade;
-    }
-
-    // haiku plan setting upgrades to Sonnet in plan mode.
-    if model_setting == Some("haiku") && plan {
-        let upgrade = get_default_sonnet_model();
-        if restriction_bars(restriction, &upgrade) {
-            if let Some((allow, ovr, catalog)) =
-                restriction.and_then(|r| r.active().map(|(a, o)| (a, o, r.catalog)))
-            {
-                if let Some(newest) =
-                    allowlist::newest_permitted_in_family("sonnet", catalog, Some(allow), Some(ovr))
-                {
-                    warn(allowlist::warnings::PLAN_HAIKU_NEWEST);
-                    return newest;
-                }
-            }
-            warn(allowlist::warnings::PLAN_HAIKU_RESTING);
-            // Resting model for the `haiku` setting = Haiku.
-            return parse_user_specified_model("haiku");
-        }
-        return upgrade;
-    }
-
-    main_loop_model.to_string()
 }
 
 /// Cross-region inference profile prefixes for Bedrock (`bedrock.ts:189`).
@@ -359,35 +440,6 @@ fn apply_bedrock_region_prefix(model_id: &str, prefix: &str) -> String {
     model_id.to_string()
 }
 
-/// `getAPIProvider() === 'bedrock'` (`providers.ts:6-13`): only the Bedrock arm
-/// is needed for the region-prefix seam (vertex/foundry never apply the region
-/// prefix). Uses the strict-allowlist `is_env_truthy`.
-fn api_provider_is_bedrock() -> bool {
-    is_env_truthy(std::env::var("CLAUDE_CODE_USE_BEDROCK").ok().as_deref())
-}
-
-/// `getAPIProvider() === 'foundry'`: the 2.1.207 precedence chain is
-/// `bedrock > foundry > anthropicAws > mantle > vertex > firstParty` (verified
-/// against the binary), so the provider is Foundry iff `CLAUDE_CODE_USE_BEDROCK`
-/// is falsy AND `CLAUDE_CODE_USE_FOUNDRY` is env-truthy (Foundry outranks
-/// Vertex/firstParty). This is the sole provider whose Opus default (4-6)
-/// diverges from the 4-8 alias-table default.
-fn api_provider_is_foundry() -> bool {
-    !is_env_truthy(std::env::var("CLAUDE_CODE_USE_BEDROCK").ok().as_deref())
-        && is_env_truthy(std::env::var("CLAUDE_CODE_USE_FOUNDRY").ok().as_deref())
-}
-
-/// `getAPIProvider() === 'firstParty'` (`providers.ts:6-13`): the falsy tail of
-/// the Bedrock > Vertex > Foundry > firstParty precedence chain — first-party iff
-/// none of `CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY` is env-truthy. Uses
-/// the strict-allowlist `is_env_truthy` (same as the TS `isEnvTruthy`), so a
-/// non-allowlisted value (e.g. `"0"` / `"false"`) does NOT switch providers.
-fn api_provider_is_first_party() -> bool {
-    !is_env_truthy(std::env::var("CLAUDE_CODE_USE_BEDROCK").ok().as_deref())
-        && !is_env_truthy(std::env::var("CLAUDE_CODE_USE_VERTEX").ok().as_deref())
-        && !is_env_truthy(std::env::var("CLAUDE_CODE_USE_FOUNDRY").ok().as_deref())
-}
-
 /// Check if a bare family alias (`opus`/`sonnet`/`haiku`) matches the parent
 /// model's tier. When it does, the subagent inherits the parent's EXACT model
 /// string instead of resolving the alias to a provider default. 1:1 with
@@ -403,7 +455,10 @@ fn api_provider_is_first_party() -> bool {
 /// provider noise), NOT a raw substring on the full id.
 fn alias_matches_parent_tier(alias: &str, parent_model: &str) -> bool {
     let canonical = canonical_name(parent_model);
-    match alias.to_lowercase().as_str() {
+    match lingxi_core::host::effort::trim_js_whitespace(alias)
+        .to_lowercase()
+        .as_str()
+    {
         "opus" => canonical.contains("opus"),
         "sonnet" => canonical.contains("sonnet"),
         "haiku" => canonical.contains("haiku"),
@@ -411,14 +466,13 @@ fn alias_matches_parent_tier(alias: &str, parent_model: &str) -> bool {
     }
 }
 
-/// Resolve a full model id to a shorter canonical family name. Faithful copy of
-/// `tools/skill/src/model_override.rs::canonical_name` (ports
+/// Resolve a full model id to a shorter canonical family name (ports
 /// `firstPartyNameToCanonical`, `model.ts:217-270`); the
 /// `resolveOverriddenModel`/Bedrock-ARN indirection (`getCanonicalName`,
 /// `model.ts:279-283`) is a no-op for these substring checks, so it is folded
-/// in (identical to the skill copy's note).
+/// in.
 fn canonical_name(model: &str) -> String {
-    let name = model.to_lowercase();
+    let name = lingxi_core::host::effort::trim_js_whitespace(model).to_lowercase();
     // Order matters: check more specific versions first (4-6 before 4-5 before 4).
     if name.contains("claude-opus-4-6") {
         return "claude-opus-4-6".to_string();
@@ -472,64 +526,283 @@ fn canonical_name(model: &str) -> String {
     name
 }
 
-/// Resolve a user/agent-specified model string to a concrete id — the
-/// alias-resolution subset of `parseUserSpecifiedModel` (`model.ts:445-505`),
-/// EXACTLY as in `tools/skill/src/model_override.rs`. Bare family aliases
-/// (`opus` / `sonnet` / `haiku` / `opusplan` / `best`) map to their default id
-/// (preserving a trailing `[1m]`, except `best` which `getBestModel` ignores
-/// `[1m]` for); every other string passes through with only `[1m]` normalized.
+/// Resolve a user-specified model using facts for the actual selected route.
 ///
-/// The alias arms route through the env-aware `get_default_*_model` helpers
-/// (matching the TS `getDefaultSonnetModel()` / `getDefaultHaikuModel()` /
-/// `getDefaultOpusModel()` calls at `model.ts:459-465`), so the
-/// `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` env overrides take effect.
-///
-/// The ant-model registry, the legacy Opus 4.0/4.1 first-party remap, and the
-/// Foundry deployment-id passthrough branches of `parseUserSpecifiedModel` are
-/// NOT modeled (unreachable from this seam — see the skill copy's note).
-///
-/// Public entry point — claude's `getMainLoopModel()` → `parseUserSpecifiedModel`.
-/// The composition root calls this to resolve the user/CLI model setting (a bare
-/// alias like `opusplan`/`sonnet`, or a full id) to the concrete main-loop wire
-/// id BEFORE handing it to a subagent/teammate spawner as the `parent_model`.
-/// Without this the `AgentModel::Inherit` default-mode branch returns the raw
-/// alias (a bogus wire id); claude passes the RESOLVED `mainLoopModel` as the
-/// child's parent. The raw alias is still passed separately as `model_setting`
-/// so the plan-mode `opusplan→Opus` swap can fire.
-#[must_use]
-pub fn resolve_user_specified_model(model_input: &str) -> String {
-    parse_user_specified_model(model_input)
-}
-
-fn parse_user_specified_model(model_input: &str) -> String {
-    let trimmed = model_input.trim();
+/// This is the production `At(model)` boundary. Provider identity, endpoint,
+/// protocol, family defaults, and Native-only catalog facts arrive from the
+/// host's route-context provider; this pure resolver never reads provider env
+/// switches or guesses provider kind from a profile name/URL. `Some("")` in a
+/// family default is preserved as a configured empty override.
+pub fn resolve_user_specified_model(
+    model_input: &str,
+    context: &ModelResolutionContext,
+) -> Result<String, ModelResolutionError> {
+    let trimmed = lingxi_core::host::effort::trim_js_whitespace(model_input);
     let normalized = trimmed.to_lowercase();
+    if context.disable_1m_context && has_1m_context(&normalized) {
+        // Native's `_I` is a JS-truthy gate: a disabled 1M suffix bypasses
+        // alias parsing and preserves the supplied spelling.
+        return Ok(trimmed.to_string());
+    }
+
+    if is_registered_concrete_model(trimmed, context) {
+        return Ok(if has_1m_context(trimmed) {
+            normalize_1m_suffix(trimmed)
+        } else {
+            trimmed.to_string()
+        });
+    }
+
     let has_1m_tag = has_1m_context(&normalized);
-    let base = strip_1m_suffix(&normalized);
-    let suffix = if has_1m_tag { "[1m]" } else { "" };
+    let base = if has_1m_tag {
+        strip_1m_suffix(&normalized)
+    } else {
+        normalized.clone()
+    };
+    let family_default = |family: &str| {
+        context
+            .family_defaults
+            .get(family)
+            .map(str::to_owned)
+            .ok_or_else(|| ModelResolutionError::MissingFamilyDefault {
+                family: family.to_string(),
+                profile: context.route.profile.clone(),
+            })
+    };
+
+    // Explicit catalog aliases own their meaning. The four family defaults
+    // retain their provider-specific override policy; reserved strategies such
+    // as best/opusplan apply only when the catalog has no explicit alias.
+    if !matches!(base.as_str(), "opus" | "sonnet" | "haiku" | "fable") {
+        if let Some(models) = context.catalog_aliases.get(&base) {
+            return match models.as_slice() {
+                [model] => Ok(append_1m_suffix(model.clone(), has_1m_tag)),
+                _ => Err(ModelResolutionError::RouteUnavailable {
+                    model: trimmed.to_string(),
+                    profile: context.route.profile.clone(),
+                    reason: format!(
+                        "configured alias must select one model; candidates: {models:?}"
+                    ),
+                }),
+            };
+        }
+    }
 
     match base.as_str() {
-        // `opusplan` → Sonnet default (Opus only in plan mode), 1:1 with TS.
-        "opusplan" | "sonnet" => format!("{}{suffix}", get_default_sonnet_model()),
-        "haiku" => format!("{}{suffix}", get_default_haiku_model()),
-        "opus" => format!("{}{suffix}", get_default_opus_model()),
-        // `getBestModel` returns the Opus default and ignores any [1m] suffix.
-        "best" => get_default_opus_model(),
+        "opusplan" | "sonnet" => Ok(append_1m_suffix(family_default("sonnet")?, has_1m_tag)),
+        "haiku" => Ok(append_1m_suffix(family_default("haiku")?, has_1m_tag)),
+        "opus" => Ok(append_1m_suffix(family_default("opus")?, has_1m_tag)),
+        "fable" => {
+            if context.fable_strategy_available == Some(false) {
+                return Err(ModelResolutionError::MissingFamilyDefault {
+                    family: "fable".to_string(),
+                    profile: context.route.profile.clone(),
+                });
+            }
+            // Native has an additional dynamic endpoint/catalog gate for Fable
+            // and 1M. The host has no trusted source for those facts yet, so it
+            // keeps an explicitly supplied suffix and does not claim parity.
+            Ok(append_1m_suffix(family_default("fable")?, has_1m_tag))
+        }
+        "best" => {
+            // The Native `kI()` strategy/catalog lookup and entitlement overlay
+            // are not available in this runtime. Use a trusted host best model
+            // when supplied; otherwise preserve the current host Opus fallback.
+            match context.best_model.as_ref() {
+                Some(model) => Ok(model.clone()),
+                None => family_default("opus"),
+            }
+        }
         _ => {
-            // Non-alias: preserve the original case, normalizing only `[1m]`.
+            // Non-aliases retain caller casing; a recognized 1M suffix is
+            // normalized to one canonical trailing marker.
             if has_1m_tag {
-                format!("{}[1m]", strip_1m_suffix(trimmed))
+                Ok(normalize_1m_suffix(trimmed))
             } else {
-                trimmed.to_string()
+                Ok(trimmed.to_string())
             }
         }
     }
 }
 
+/// Resolve the current host's user model setting using route facts. This helper
+/// is also used by the live session selection provider, so boot and subsequent
+/// Agent/teammate spawns share the same model/profile classification.
+pub fn resolve_agent_model_with_context(
+    model: &AgentModel,
+    parent_model: &str,
+    permission_mode: PermissionMode,
+    model_setting: Option<&str>,
+    context: &ModelResolutionContext,
+) -> Result<String, ModelResolutionError> {
+    resolve_agent_model_restricted_with_context(
+        model,
+        parent_model,
+        permission_mode,
+        model_setting,
+        None,
+        context,
+        &mut |_| {},
+    )
+}
+
+/// [`resolve_agent_model_with_context`] with the managed-model restriction.
+/// Route identity and family aliases still come exclusively from `context`.
+pub fn resolve_agent_model_restricted_with_context(
+    model: &AgentModel,
+    parent_model: &str,
+    permission_mode: PermissionMode,
+    model_setting: Option<&str>,
+    restriction: Option<ModelRestriction<'_>>,
+    context: &ModelResolutionContext,
+    warn: &mut dyn FnMut(&str),
+) -> Result<String, ModelResolutionError> {
+    // Claude's tier strategies belong to an identified Claude provider. A
+    // live route can differ from the boot model setting, and other providers
+    // may define these alias names with their own catalog meaning.
+    let native_tier_strategy = matches!(
+        context.route.provider,
+        Some(
+            ModelProviderKind::FirstParty
+                | ModelProviderKind::Bedrock
+                | ModelProviderKind::Vertex
+                | ModelProviderKind::Foundry
+                | ModelProviderKind::AnthropicAws
+                | ModelProviderKind::AnthropicGoogleCloud
+                | ModelProviderKind::Mantle
+                | ModelProviderKind::Gateway
+        )
+    );
+    let inherit = |warn: &mut dyn FnMut(&str)| -> Result<String, ModelResolutionError> {
+        let plan = native_tier_strategy
+            && permission_mode == PermissionMode::Plan
+            && !model_setting.is_some_and(|setting| is_registered_concrete_model(setting, context));
+        if plan
+            && !model_setting
+                .is_some_and(|setting| setting == "opusplan" || setting == "opusplan[1m]")
+        {
+            if model_setting == Some("haiku") {
+                let upgrade = resolve_user_specified_model("sonnet", context)?;
+                if restriction_bars(restriction, &upgrade) {
+                    if let Some((allow, overrides, catalog)) =
+                        restriction.and_then(|r| r.active().map(|(a, o)| (a, o, r.catalog)))
+                    {
+                        if let Some(newest) = allowlist::newest_permitted_in_family(
+                            "sonnet",
+                            catalog,
+                            Some(allow),
+                            Some(overrides),
+                        ) {
+                            warn(allowlist::warnings::PLAN_HAIKU_NEWEST);
+                            return Ok(newest);
+                        }
+                    }
+                    warn(allowlist::warnings::PLAN_HAIKU_RESTING);
+                    return resolve_user_specified_model("haiku", context);
+                }
+                return Ok(upgrade);
+            }
+        }
+        if plan
+            && (model_setting == Some("opusplan") || model_setting == Some("opusplan[1m]"))
+            && !context.catalog_aliases.contains_key("opusplan")
+        {
+            let one_m = model_setting == Some("opusplan[1m]");
+            let mut upgrade = resolve_user_specified_model("opus", context)?;
+            if one_m && !upgrade.to_lowercase().ends_with("[1m]") {
+                upgrade.push_str("[1m]");
+            }
+            if restriction_bars(restriction, &upgrade) {
+                if let Some((allow, overrides, catalog)) =
+                    restriction.and_then(|r| r.active().map(|(a, o)| (a, o, r.catalog)))
+                {
+                    if let Some(newest) = allowlist::newest_permitted_in_family(
+                        "opus",
+                        catalog,
+                        Some(allow),
+                        Some(overrides),
+                    ) {
+                        warn(allowlist::warnings::PLAN_OPUSPLAN_NEWEST);
+                        return Ok(newest);
+                    }
+                }
+                warn(allowlist::warnings::PLAN_OPUSPLAN_RESTING);
+                return resolve_user_specified_model(model_setting.unwrap_or("opusplan"), context);
+            }
+            return Ok(upgrade);
+        }
+        Ok(parent_model.to_string())
+    };
+
+    // `LINGXI_SUBAGENT_MODEL` is a user override, not a provider identity
+    // source. It keeps Native's early-return ordering and bypasses region-prefix
+    // inheritance.
+    if let Some(value) = std::env::var(branding::SUBAGENT_MODEL_ENV)
+        .ok()
+        .filter(|value| !value.is_empty())
+    {
+        let resolved = resolve_user_specified_model(&value, context)?;
+        if restriction_bars(restriction, &resolved) {
+            warn(&format!(
+                "Subagent model \"{value}{}",
+                allowlist::warnings::NOT_IN_ALLOWLIST_SUBAGENT
+            ));
+            return inherit(warn);
+        }
+        return Ok(resolved);
+    }
+
+    let parent_region_prefix = get_bedrock_region_prefix(parent_model);
+    let apply_parent_region_prefix = |resolved: &str, original_spec: &str| -> String {
+        if let Some(prefix) = parent_region_prefix {
+            if context.route.provider == Some(ModelProviderKind::Bedrock) {
+                if get_bedrock_region_prefix(original_spec).is_some() {
+                    return resolved.to_owned();
+                }
+                return apply_bedrock_region_prefix(resolved, prefix);
+            }
+        }
+        resolved.to_owned()
+    };
+
+    match model {
+        AgentModel::Inherit => inherit(warn),
+        AgentModel::Explicit(spec) | AgentModel::Alias(spec) => {
+            if native_tier_strategy
+                && !is_registered_concrete_model(spec, context)
+                && context
+                    .family_defaults
+                    .get(&lingxi_core::host::effort::trim_js_whitespace(spec).to_lowercase())
+                    .is_some()
+                && alias_matches_parent_tier(spec, parent_model)
+            {
+                return Ok(parent_model.to_string());
+            }
+            let resolved = resolve_user_specified_model(spec, context)?;
+            let resolved = apply_parent_region_prefix(&resolved, spec);
+            if restriction_bars(restriction, &resolved) {
+                warn(&format!(
+                    "Subagent model \"{spec}{}",
+                    allowlist::warnings::NOT_IN_ALLOWLIST_SUBAGENT
+                ));
+                return inherit(warn);
+            }
+            Ok(resolved)
+        }
+    }
+}
+
+fn append_1m_suffix(model: String, requested: bool) -> String {
+    if requested {
+        normalize_1m_suffix(&model)
+    } else {
+        model
+    }
+}
+
 /// `true` if `model` carries an explicit `[1m]` suffix (case-insensitive).
-/// Mirrors `has1mContext` reduced to the substring test (the
-/// `CLAUDE_CODE_DISABLE_1M_CONTEXT` gate is not modeled here — `[1m]` passthrough
-/// is a no-op for the family-default resolution this seam performs).
+/// Mirrors Native `lbt`'s case-insensitive substring test. The caller applies
+/// Native `Xd`'s environment gate.
 fn has_1m_context(model: &str) -> bool {
     model.to_lowercase().contains("[1m]")
 }
@@ -538,10 +811,23 @@ fn has_1m_context(model: &str) -> bool {
 /// `replace(/\[1m]$/i, '').trim()`.
 fn strip_1m_suffix(s: &str) -> String {
     if s.to_lowercase().ends_with("[1m]") {
-        s[..s.len() - 4].trim().to_string()
+        lingxi_core::host::effort::trim_js_whitespace(&s[..s.len() - 4]).to_string()
     } else {
-        s.trim().to_string()
+        lingxi_core::host::effort::trim_js_whitespace(s).to_string()
     }
+}
+
+/// Native `e$` removes every contiguous trailing `[1m]` tag, trims, and adds
+/// one canonical suffix.
+fn normalize_1m_suffix(s: &str) -> String {
+    let mut base = lingxi_core::host::effort::trim_js_whitespace(s).to_string();
+    while base.to_lowercase().ends_with("[1m]") {
+        base.truncate(base.len() - "[1m]".len());
+        base = base
+            .trim_end_matches(lingxi_core::host::effort::javascript_whitespace)
+            .to_string();
+    }
+    format!("{base}[1m]")
 }
 
 /// The Explore model-cap ladder — claude-code 2.1.198 `Kyl`
@@ -572,13 +858,12 @@ fn model_contains_any(model: &str, needles: &[&str]) -> bool {
 /// `fr() !== "firstParty"` gate: the composition root passes `false` when the
 /// session's default model routes to a non-Anthropic provider profile
 /// (OpenAI/Gemini/…), which behaves exactly like the TS non-firstParty branch
-/// (→ `false` → Explore inherits). The env half (`CLAUDE_CODE_USE_BEDROCK` /
-/// `_VERTEX` / `_FOUNDRY`) is checked here, same as `fr()`.
+/// (→ `false` → Explore inherits). The host route is authoritative.
 fn session_model_exceeds_explore_cap(
     session_model: &str,
     session_provider_first_party: bool,
 ) -> bool {
-    if !session_provider_first_party || !api_provider_is_first_party() {
+    if !session_provider_first_party {
         return false;
     }
     let cap_idx = EXPLORE_MODEL_CAP_LADDER
@@ -628,7 +913,6 @@ pub fn resolve_builtin_explore_model(
     }
     if lingxi_core::host::env::is_env_truthy(
         std::env::var("LINGXI_DISABLE_EXPLORE_INHERIT_CAP")
-            .or_else(|_| std::env::var("CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP"))
             .ok()
             .as_deref(),
     ) {
@@ -641,1000 +925,893 @@ pub fn resolve_builtin_explore_model(
     }
 }
 
-/// Resolve `model` to a concrete wire model string given the parent / main-loop
-/// model, the live permission mode, and the RAW user model setting. 1:1 port of
-/// `getAgentModel` (`agent.ts:37-95`). See the module docs for the precedence and
-/// the deferred nuances.
-///
-/// `permission_mode` is the live/boot permission mode anchor (Inherit routes
-/// through `getRuntimeMainLoopModel`). `model_setting` is the RAW user model
-/// setting string (`getUserSpecifiedModelSetting()`, e.g. `"opusplan"` /
-/// `"haiku"` / `None`) — NOT the resolved id; without it the Inherit branch
-/// returns the parent model unchanged (faithful: a non-opusplan setting never
-/// triggers the plan-mode swap).
-#[must_use]
-pub fn resolve_agent_model(
-    model: &AgentModel,
-    parent_model: &str,
-    permission_mode: PermissionMode,
-    model_setting: Option<&str>,
-) -> String {
-    resolve_agent_model_restricted(
-        model,
-        parent_model,
-        permission_mode,
-        model_setting,
-        None,
-        &mut |_| {},
-    )
-}
-
-/// [`resolve_agent_model`] with the managed-allowlist subagent gate the binary
-/// `ble`/`Qly` applies. When a subagent's EXPLICITLY-requested (or
-/// `LINGXI_SUBAGENT_MODEL`-env) model resolves to an id BARRED by the managed
-/// allowlist, the request is dropped and the subagent inherits the parent /
-/// runtime main-loop model (itself plan-mode-gated), emitting the byte-exact
-/// `Subagent model "<m>" is not in the availableModels allowlist; inheriting the
-/// parent model instead` warning through `warn` (the caller de-duplicates,
-/// mirroring the binary `SN` set).
-///
-/// An `AgentModel::Inherit` request, or a bare family alias that tier-matches the
-/// parent, is NEVER barred — those already resolve to the parent/runtime model.
-/// With `restriction == None` (or an inactive one) this is byte-identical to the
-/// unrestricted resolution.
-#[must_use]
-pub fn resolve_agent_model_restricted(
-    model: &AgentModel,
-    parent_model: &str,
-    permission_mode: PermissionMode,
-    model_setting: Option<&str>,
-    restriction: Option<ModelRestriction<'_>>,
-    warn: &mut dyn FnMut(&str),
-) -> String {
-    // The inherited / runtime main-loop model an explicitly-requested-but-barred
-    // subagent (and the Inherit branch) falls back to — plan-mode-gated (binary
-    // `i()` = `RF(...)`).
-    let inherit = |warn: &mut dyn FnMut(&str)| {
-        get_runtime_main_loop_model_restricted(
-            permission_mode,
-            parent_model,
-            false,
-            model_setting,
-            restriction,
-            warn,
-        )
-    };
-    // Emit the byte-exact "Subagent model … inheriting the parent model instead"
-    // warning (binary `Qly`), naming the REQUESTED model string.
-    let warn_subagent = |warn: &mut dyn FnMut(&str), requested: &str| {
-        warn(&format!(
-            "Subagent model \"{requested}{}",
-            allowlist::warnings::NOT_IN_ALLOWLIST_SUBAGENT
-        ));
-    };
-
-    // 1. LINGXI_SUBAGENT_MODEL env override (HIGHEST). The TS guard is falsy
-    //    for both unset AND empty-string. This branch bypasses the Bedrock prefix
-    //    (the TS early-return precedes applyParentRegionPrefix).
-    if let Some(v) = std::env::var("LINGXI_SUBAGENT_MODEL")
-        .ok()
-        .filter(|s| !s.is_empty())
-    {
-        let resolved = parse_user_specified_model(&v);
-        if restriction_bars(restriction, &resolved) {
-            warn_subagent(warn, &v);
-            return inherit(warn);
-        }
-        return resolved;
-    }
-
-    // Extract Bedrock region prefix from the parent model to inherit for
-    // subagents (so subagents use the same cross-region inference profile).
-    let parent_region_prefix = get_bedrock_region_prefix(parent_model);
-
-    // Apply the parent region prefix for Bedrock models. `original_spec` is the
-    // raw model string before resolution (alias or full id). If the user
-    // explicitly specified a full model id that already carries its own region
-    // prefix (e.g. "eu.anthropic.…"), we preserve it instead of overwriting with
-    // the parent's prefix (prevents silent data-residency violations).
-    let apply_parent_region_prefix = |resolved: &str, original_spec: &str| -> String {
-        if let Some(prefix) = parent_region_prefix {
-            if api_provider_is_bedrock() {
-                if get_bedrock_region_prefix(original_spec).is_some() {
-                    return resolved.to_owned();
-                }
-                return apply_bedrock_region_prefix(resolved, prefix);
-            }
-        }
-        resolved.to_owned()
-    };
-
-    // 2. toolSpecifiedModel (agent.ts:70-76) — NOT separately ported; the spawn
-    //    path maps AgentTool's per-call model into AgentModel::Alias upstream, so
-    //    the alias/tier tail below covers it (one intentional deviation).
-
-    match model {
-        // 3. Inherit → runtime main-loop resolution (opusplan→Opus / haiku→Sonnet
-        //    in plan mode; else the parent model unchanged). Never allowlist-gated
-        //    (it already yields the parent/runtime model).
-        AgentModel::Inherit => inherit(warn),
-        // 4. Explicit / Alias share the same tail: if the bare family alias
-        //    matches the parent's tier, inherit the parent's EXACT id; else
-        //    resolve + apply the parent region prefix. Real explicit ids are
-        //    full `claude-…` strings, which parse_user_specified_model passes
-        //    through unchanged (case preserved, only [1m] normalized), so this is
-        //    byte-identical to the old verbatim passthrough for them. A resolved
-        //    model the managed allowlist BARS falls back to the inherited model.
-        AgentModel::Explicit(spec) | AgentModel::Alias(spec) => {
-            if alias_matches_parent_tier(spec, parent_model) {
-                return parent_model.to_string();
-            }
-            let resolved = parse_user_specified_model(spec);
-            let resolved = apply_parent_region_prefix(&resolved, spec);
-            if restriction_bars(restriction, &resolved) {
-                warn_subagent(warn, spec);
-                return inherit(warn);
-            }
-            resolved
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ---- env-var serialization -------------------------------------------
-    //
-    // LINGXI_SUBAGENT_MODEL / CLAUDE_CODE_USE_BEDROCK / ANTHROPIC_DEFAULT_*
-    // mutate process-global env. To avoid cross-test races (cargo runs tests in
-    // parallel within a crate), all env-mutating tests share one Mutex and clean
-    // up after themselves. (migrations/src/context.rs sets env directly; we add a
-    // guard since multiple tests here touch the same vars.)
     use std::sync::Mutex;
+
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    const DEFAULT: PermissionMode = PermissionMode::Default;
 
     struct EnvGuard {
         key: &'static str,
         prev: Option<String>,
     }
     impl EnvGuard {
-        fn set(key: &'static str, val: &str) -> Self {
+        fn set(key: &'static str, value: &str) -> Self {
             let prev = std::env::var(key).ok();
-            std::env::set_var(key, val);
+            std::env::set_var(key, value);
             Self { key, prev }
         }
     }
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
+            if let Some(value) = &self.prev {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
             }
         }
     }
 
-    const DEFAULT: PermissionMode = PermissionMode::Default;
+    fn test_context(
+        profile: &str,
+        model: &str,
+        provider: ModelProviderKind,
+    ) -> ModelResolutionContext {
+        ModelResolutionContext {
+            route: ModelRouteFacts {
+                model: model.into(),
+                profile: Some(profile.into()),
+                provider: Some(provider),
+                ..Default::default()
+            },
+            family_defaults: FamilyModelDefaults {
+                opus: Some("claude-opus-4-8".into()),
+                sonnet: Some("claude-sonnet-5".into()),
+                haiku: Some("claude-haiku-4-5".into()),
+                fable: Some("claude-fable-5-1".into()),
+            },
+            ..Default::default()
+        }
+    }
+
+    fn resolve_test_model_restricted(
+        model: &AgentModel,
+        parent_model: &str,
+        permission_mode: PermissionMode,
+        model_setting: Option<&str>,
+        restriction: Option<ModelRestriction<'_>>,
+        warn: &mut dyn FnMut(&str),
+    ) -> String {
+        resolve_agent_model_restricted_with_context(
+            model,
+            parent_model,
+            permission_mode,
+            model_setting,
+            restriction,
+            &test_context("anthropic", parent_model, ModelProviderKind::FirstParty),
+            warn,
+        )
+        .unwrap()
+    }
 
     #[test]
-    fn inherit_resolves_to_parent_model() {
+    fn user_model_aliases_use_supplied_route_catalog() {
+        let mut context = test_context("custom", "parent", ModelProviderKind::Other);
+        context.family_defaults = FamilyModelDefaults {
+            opus: Some("powerful-model".into()),
+            sonnet: Some("balanced-model".into()),
+            haiku: Some("fast-model".into()),
+            fable: Some("large-model".into()),
+        };
+        for (alias, expected) in [
+            ("OPUS", "powerful-model"),
+            ("sonnet", "balanced-model"),
+            ("haiku", "fast-model"),
+            ("fable", "large-model"),
+            ("opusplan", "balanced-model"),
+            ("best", "powerful-model"),
+        ] {
+            assert_eq!(
+                resolve_user_specified_model(alias, &context).unwrap(),
+                expected
+            );
+        }
+        context.best_model = Some("catalog-best".into());
         assert_eq!(
-            resolve_agent_model(&AgentModel::Inherit, "claude-opus-4-7", DEFAULT, None),
-            "claude-opus-4-7"
+            resolve_user_specified_model("best", &context).unwrap(),
+            "catalog-best"
         );
     }
 
     #[test]
-    fn explicit_passes_through_verbatim() {
-        // Real explicit ids are full `claude-…` strings → parse passes them
-        // through unchanged.
+    fn explicit_catalog_aliases_precede_reserved_model_strategies() {
+        let mut context = ModelResolutionContext {
+            route: ModelRouteFacts {
+                model: "gpt-balanced".into(),
+                profile: Some("openai".into()),
+                provider: Some(ModelProviderKind::Other),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        context
+            .catalog_aliases
+            .insert("best".into(), vec!["gpt-best".into()]);
+        context
+            .catalog_aliases
+            .insert("opusplan".into(), vec!["gpt-balanced".into()]);
+        context
+            .catalog_aliases
+            .insert("fast".into(), vec!["gpt-fast".into()]);
+        for (alias, expected) in [
+            ("best", "gpt-best"),
+            ("opusplan", "gpt-balanced"),
+            ("fast", "gpt-fast"),
+        ] {
+            assert_eq!(
+                resolve_user_specified_model(alias, &context).unwrap(),
+                expected
+            );
+        }
         assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Explicit("claude-sonnet-4-6".to_string()),
-                "claude-opus-4-7",
-                DEFAULT,
-                None,
-            ),
-            "claude-sonnet-4-6"
+            resolve_user_specified_model("BEST[1M]", &context).unwrap(),
+            "gpt-best[1m]"
         );
+        context
+            .catalog_aliases
+            .insert("best".into(), vec!["gpt-a".into(), "gpt-b".into()]);
+        assert!(matches!(
+            resolve_user_specified_model("best", &context),
+            Err(ModelResolutionError::RouteUnavailable { .. })
+        ));
     }
 
     #[test]
-    fn family_alias_of_different_tier_resolves_to_default_id() {
-        // parent is opus; agent asks for haiku/sonnet → family default concrete id.
-        // The `sonnet` default is provider-aware (#18) so pin firstParty under the
-        // ENV_LOCK to assert the 1P id deterministically.
+    fn plan_tier_strategies_do_not_replace_foreign_live_routes() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("haiku".to_string()),
-                "claude-opus-4-7",
-                DEFAULT,
-                None,
-            ),
-            "claude-haiku-4-5"
-        );
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("sonnet".to_string()),
-                "claude-opus-4-7",
-                DEFAULT,
-                None,
-            ),
-            "claude-sonnet-5"
-        );
+        let _env = clear_subagent_env();
+        let enforcement = active(&["custom-live-model"]);
+        let catalog = catalog(&["custom-live-model", "claude-sonnet-5", "claude-opus-4-8"]);
+        for provider in [Some(ModelProviderKind::Other), None] {
+            for defaults in [
+                FamilyModelDefaults::default(),
+                test_context("a", "parent", ModelProviderKind::Other).family_defaults,
+            ] {
+                let context = ModelResolutionContext {
+                    route: ModelRouteFacts {
+                        model: "custom-live-model".into(),
+                        profile: Some("custom".into()),
+                        provider,
+                        ..Default::default()
+                    },
+                    family_defaults: defaults,
+                    ..Default::default()
+                };
+                for boot_setting in ["haiku", "opusplan", "opusplan[1m]"] {
+                    let mut warnings = Vec::new();
+                    let model = resolve_agent_model_restricted_with_context(
+                        &AgentModel::Inherit,
+                        &context.route.model,
+                        PermissionMode::Plan,
+                        Some(boot_setting),
+                        Some(ModelRestriction {
+                            enforcement: &enforcement,
+                            catalog: &catalog,
+                        }),
+                        &context,
+                        &mut |warning| warnings.push(warning.to_owned()),
+                    )
+                    .unwrap();
+                    assert_eq!(model, "custom-live-model");
+                    assert!(warnings.is_empty());
+                }
+            }
+        }
     }
 
     #[test]
-    fn family_alias_matching_parent_tier_inherits_exact_parent() {
-        // parent IS opus → "opus" inherits the parent's exact id, not a default.
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("opus".to_string()),
-                "claude-opus-4-9-future",
-                DEFAULT,
-                None,
-            ),
-            "claude-opus-4-9-future"
-        );
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("sonnet".to_string()),
-                "claude-sonnet-4-6",
-                DEFAULT,
-                None,
-            ),
-            "claude-sonnet-4-6"
-        );
-    }
-
-    #[test]
-    fn family_alias_is_case_insensitive() {
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("Haiku".to_string()),
-                "claude-opus-4-7",
-                DEFAULT,
-                None,
-            ),
-            "claude-haiku-4-5"
-        );
-    }
-
-    #[test]
-    fn non_family_alias_passes_through() {
-        // A custom alias the user may have mapped via routing.aliases.
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("my-fast-model".to_string()),
-                "claude-opus-4-7",
-                DEFAULT,
-                None,
-            ),
-            "my-fast-model"
-        );
-    }
-
-    #[test]
-    fn family_alias_with_non_anthropic_parent_resolves_to_default_id() {
-        // A 3P / non-Anthropic parent MODEL is not any Claude tier, so a family
-        // alias resolves to the family default (NOT the parent). Pin firstParty
-        // under the ENV_LOCK since the `sonnet` default is provider-aware (#18);
-        // the parent model id (gemini/…) is unrelated to the API provider env.
+    fn plan_tier_strategies_preserve_identified_claude_provider_behavior() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("opus".to_string()),
-                "openai/gpt-4o",
-                DEFAULT,
-                None,
-            ),
-            "claude-opus-4-8"
-        );
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("sonnet".to_string()),
-                "gemini/gemini-2.0-flash",
-                DEFAULT,
-                None,
-            ),
-            "claude-sonnet-5"
-        );
+        let _env = clear_subagent_env();
+        for provider in [
+            ModelProviderKind::FirstParty,
+            ModelProviderKind::Bedrock,
+            ModelProviderKind::Vertex,
+            ModelProviderKind::Foundry,
+            ModelProviderKind::AnthropicAws,
+            ModelProviderKind::AnthropicGoogleCloud,
+            ModelProviderKind::Mantle,
+            ModelProviderKind::Gateway,
+        ] {
+            let context = test_context("native", "claude-haiku-4-5", provider);
+            for (setting, expected) in [
+                ("haiku", "claude-sonnet-5"),
+                ("opusplan", "claude-opus-4-8"),
+                ("opusplan[1m]", "claude-opus-4-8[1m]"),
+            ] {
+                assert_eq!(
+                    resolve_agent_model_with_context(
+                        &AgentModel::Inherit,
+                        &context.route.model,
+                        PermissionMode::Plan,
+                        Some(setting),
+                        &context,
+                    )
+                    .unwrap(),
+                    expected,
+                );
+            }
+        }
     }
 
     #[test]
-    fn cross_tier_family_alias_resolves_to_that_familys_default() {
-        // parent is sonnet, agent asks for opus (different tier) → opus default id.
-        // The opus default is provider-aware (#2), so pin firstParty deterministically.
+    fn foreign_family_aliases_keep_catalog_meaning_for_claude_shaped_ids() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("opus".to_string()),
-                "claude-sonnet-4-6",
-                DEFAULT,
-                None,
-            ),
-            "claude-opus-4-8"
-        );
-    }
-
-    // ---- G10: new edge cases ----------------------------------------------
-
-    #[test]
-    fn subagent_model_env_override_wins_over_everything() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = EnvGuard::set("LINGXI_SUBAGENT_MODEL", "haiku");
-        // Override beats Inherit, Alias, and Explicit alike — resolved via
-        // parse_user_specified_model.
-        assert_eq!(
-            resolve_agent_model(&AgentModel::Inherit, "claude-opus-4-7", DEFAULT, None),
-            "claude-haiku-4-5"
-        );
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("sonnet".to_string()),
-                "claude-opus-4-7",
-                DEFAULT,
-                None,
-            ),
-            "claude-haiku-4-5"
-        );
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Explicit("claude-sonnet-4-6".to_string()),
-                "claude-opus-4-7",
-                DEFAULT,
-                None,
-            ),
-            "claude-haiku-4-5"
-        );
+        let _env = clear_subagent_env();
+        for provider in [Some(ModelProviderKind::Other), None] {
+            for (alias, parent) in [
+                ("opus", "claude-opus-4-8"),
+                ("sonnet", "claude-sonnet-5"),
+                ("haiku", "claude-haiku-4-5"),
+            ] {
+                let context = ModelResolutionContext {
+                    route: ModelRouteFacts {
+                        model: parent.into(),
+                        profile: Some("custom".into()),
+                        provider,
+                        ..Default::default()
+                    },
+                    family_defaults: FamilyModelDefaults {
+                        opus: Some("configured-powerful".into()),
+                        sonnet: Some("configured-balanced".into()),
+                        haiku: Some("configured-fast".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                for preference in [
+                    AgentModel::Alias(alias.into()),
+                    AgentModel::Explicit(alias.into()),
+                ] {
+                    assert_eq!(
+                        resolve_agent_model_with_context(
+                            &preference,
+                            parent,
+                            PermissionMode::Plan,
+                            Some("haiku"),
+                            &context,
+                        )
+                        .unwrap(),
+                        context.family_defaults.get(alias).unwrap(),
+                    );
+                }
+            }
+        }
     }
 
     #[test]
-    fn subagent_model_env_override_empty_string_is_ignored() {
+    fn configured_opusplan_alias_inherits_selected_model_in_plan_mode() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _g = EnvGuard::set("LINGXI_SUBAGENT_MODEL", "");
-        // Empty-string is falsy in the TS guard → not honored; Inherit falls
-        // through to the parent.
+        let _env = clear_subagent_env();
+        let mut context = ModelResolutionContext {
+            route: ModelRouteFacts {
+                model: "gpt-balanced".into(),
+                profile: Some("openai".into()),
+                provider: Some(ModelProviderKind::Other),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        context
+            .catalog_aliases
+            .insert("opusplan".into(), vec!["gpt-balanced".into()]);
         assert_eq!(
-            resolve_agent_model(&AgentModel::Inherit, "claude-opus-4-7", DEFAULT, None),
-            "claude-opus-4-7"
-        );
-    }
-
-    #[test]
-    fn inherit_opusplan_plan_mode_resolves_to_opus() {
-        // opusplan in plan mode resolves to the opus default, which is
-        // provider-aware (#2) → pin firstParty deterministically.
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        assert_eq!(
-            resolve_agent_model(
+            resolve_agent_model_with_context(
                 &AgentModel::Inherit,
-                "claude-sonnet-4-6",
+                "gpt-balanced",
                 PermissionMode::Plan,
                 Some("opusplan"),
-            ),
-            "claude-opus-4-8"
+                &context
+            )
+            .unwrap(),
+            "gpt-balanced"
         );
-    }
-
-    #[test]
-    fn inherit_opusplan_default_mode_returns_parent_unchanged() {
         assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Inherit,
-                "claude-sonnet-4-6",
-                PermissionMode::Default,
-                Some("opusplan"),
-            ),
-            "claude-sonnet-4-6"
-        );
-    }
-
-    #[test]
-    fn inherit_haiku_plan_mode_resolves_to_sonnet() {
-        // Resolves to the Sonnet default, which is provider-aware (#18) → pin
-        // firstParty under the ENV_LOCK to assert the 1P id deterministically.
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Inherit,
-                "claude-opus-4-7",
+            resolve_agent_model_with_context(
+                &AgentModel::Alias("opusplan".into()),
+                "gpt-balanced",
                 PermissionMode::Plan,
-                Some("haiku"),
-            ),
+                None,
+                &context
+            )
+            .unwrap(),
+            "gpt-balanced"
+        );
+    }
+
+    #[test]
+    fn absent_family_default_errors_on_current_profile() {
+        let context = ModelResolutionContext {
+            route: ModelRouteFacts {
+                profile: Some("openai".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_user_specified_model("sonnet", &context),
+            Err(ModelResolutionError::MissingFamilyDefault {
+                family: "sonnet".into(),
+                profile: Some("openai".into())
+            })
+        );
+    }
+
+    #[test]
+    fn configured_empty_family_default_is_presence_sensitive() {
+        let mut context = ModelResolutionContext::default();
+        context.family_defaults.fable = Some(String::new());
+        assert_eq!(resolve_user_specified_model("fable", &context).unwrap(), "");
+        context.fable_strategy_available = Some(false);
+        assert!(matches!(
+            resolve_user_specified_model("fable", &context),
+            Err(ModelResolutionError::MissingFamilyDefault { .. })
+        ));
+    }
+
+    #[test]
+    fn model_normalization_preserves_casing_and_ecmascript_whitespace() {
+        let context = test_context("a", "parent", ModelProviderKind::FirstParty);
+        assert_eq!(
+            resolve_user_specified_model("\u{feff}SoNnEt\u{feff}", &context).unwrap(),
             "claude-sonnet-5"
         );
-    }
-
-    #[test]
-    fn inherit_no_setting_plan_mode_returns_parent_unchanged() {
         assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Inherit,
-                "claude-opus-4-7",
-                PermissionMode::Plan,
-                None
-            ),
-            "claude-opus-4-7"
+            resolve_user_specified_model("\u{0085}sonnet\u{0085}", &context).unwrap(),
+            "\u{0085}sonnet\u{0085}"
         );
-    }
-
-    // ---- G10: Bedrock cross-region prefix inheritance ----------------------
-
-    #[test]
-    fn bedrock_family_default_is_not_a_foundation_model_so_prefix_is_noop() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = EnvGuard::set("CLAUDE_CODE_USE_BEDROCK", "1");
-        // parent has a us. prefix; on Bedrock (non-firstParty) the `sonnet` alias
-        // resolves to the 3P Sonnet default (claude-sonnet-4-5-20250929, #18),
-        // which is NOT a foundation (anthropic.*) id, so apply_bedrock_region_prefix
-        // is a no-op.
         assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("sonnet".to_string()),
-                "us.anthropic.claude-opus-4-6-v1:0",
-                DEFAULT,
-                None,
-            ),
-            "claude-sonnet-4-5-20250929"
+            resolve_user_specified_model("Custom-Model[1m][1M]", &context).unwrap(),
+            "Custom-Model[1m]"
+        );
+        assert_eq!(
+            resolve_user_specified_model("OPUS[1M]", &context).unwrap(),
+            "claude-opus-4-8[1m]"
+        );
+        let mut disabled = context;
+        disabled.disable_1m_context = true;
+        assert_eq!(
+            resolve_user_specified_model("OPUS[1M]", &disabled).unwrap(),
+            "OPUS[1M]"
         );
     }
 
     #[test]
-    fn bedrock_foundation_model_inherits_parent_prefix() {
+    fn explicit_model_ids_are_preserved_for_every_provider() {
+        for provider in [
+            ModelProviderKind::FirstParty,
+            ModelProviderKind::Bedrock,
+            ModelProviderKind::Gateway,
+            ModelProviderKind::Other,
+        ] {
+            let context = test_context("a", "parent", provider);
+            assert_eq!(
+                resolve_user_specified_model("claude-opus-4-1-20250805", &context).unwrap(),
+                "claude-opus-4-1-20250805"
+            );
+            assert_eq!(
+                resolve_user_specified_model("CLAUDE-OPUS-4-1-20250805[1M]", &context).unwrap(),
+                "CLAUDE-OPUS-4-1-20250805[1m]"
+            );
+            assert_eq!(
+                resolve_user_specified_model("Custom-Wire-Model", &context).unwrap(),
+                "Custom-Wire-Model"
+            );
+        }
+    }
+
+    #[test]
+    fn same_tier_alias_preserves_exact_parent_model() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _g = EnvGuard::set("CLAUDE_CODE_USE_BEDROCK", "1");
-        // An explicit foundation id (anthropic.*) gets the parent's us. prefix.
+        let _env = clear_subagent_env();
+        let parent = "us.anthropic.claude-opus-4-6-v1:0";
+        let context = test_context("bedrock", parent, ModelProviderKind::Bedrock);
         assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Explicit("anthropic.claude-sonnet-4-6-v1:0".to_string()),
-                "us.anthropic.claude-opus-4-6-v1:0",
+            resolve_agent_model_with_context(
+                &AgentModel::Alias("opus".into()),
+                parent,
                 DEFAULT,
                 None,
-            ),
+                &context
+            )
+            .unwrap(),
+            parent
+        );
+        assert!(!alias_matches_parent_tier("opus[1m]", parent));
+        assert!(!alias_matches_parent_tier("best", parent));
+    }
+
+    #[test]
+    fn bedrock_region_prefix_uses_selected_provider() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = clear_subagent_env();
+        let parent = "us.anthropic.claude-opus-4-6-v1:0";
+        let mut context = test_context("bedrock", parent, ModelProviderKind::Bedrock);
+        let requested = AgentModel::Explicit("anthropic.claude-sonnet-4-6-v1:0".into());
+        assert_eq!(
+            resolve_agent_model_with_context(&requested, parent, DEFAULT, None, &context).unwrap(),
             "us.anthropic.claude-sonnet-4-6-v1:0"
         );
-    }
-
-    #[test]
-    fn bedrock_original_spec_with_own_prefix_is_preserved() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = EnvGuard::set("CLAUDE_CODE_USE_BEDROCK", "1");
-        // The explicit spec already pins eu. → the parent's us. prefix does NOT
-        // overwrite it.
+        let pinned = AgentModel::Explicit("eu.anthropic.claude-sonnet-4-6-v1:0".into());
         assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Explicit("eu.anthropic.claude-sonnet-4-6-v1:0".to_string()),
-                "us.anthropic.claude-opus-4-6-v1:0",
-                DEFAULT,
-                None,
-            ),
+            resolve_agent_model_with_context(&pinned, parent, DEFAULT, None, &context).unwrap(),
             "eu.anthropic.claude-sonnet-4-6-v1:0"
         );
-    }
-
-    #[test]
-    fn bedrock_prefix_not_applied_when_not_bedrock_provider() {
-        // No CLAUDE_CODE_USE_BEDROCK → api_provider_is_bedrock() is false → the
-        // foundation id is returned unchanged even though the parent has a us.
-        // prefix. (Guarded by the lock to avoid a concurrent test setting the var.)
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = EnvGuard {
-            key: "CLAUDE_CODE_USE_BEDROCK",
-            prev: std::env::var("CLAUDE_CODE_USE_BEDROCK").ok(),
-        };
-        std::env::remove_var("CLAUDE_CODE_USE_BEDROCK");
+        context.route.provider = Some(ModelProviderKind::Other);
         assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Explicit("anthropic.claude-sonnet-4-6-v1:0".to_string()),
-                "us.anthropic.claude-opus-4-6-v1:0",
-                DEFAULT,
-                None,
-            ),
+            resolve_agent_model_with_context(&requested, parent, DEFAULT, None, &context).unwrap(),
             "anthropic.claude-sonnet-4-6-v1:0"
         );
     }
 
     #[test]
-    fn alias_matches_parent_tier_via_canonical_inherits_exact_parent() {
-        // parent is a Bedrock-prefixed opus id; canonical_name strips the prefix
-        // so Alias("opus") tier-matches and inherits the EXACT parent id.
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("opus".to_string()),
-                "us.anthropic.claude-opus-4-6-v1:0",
-                DEFAULT,
-                None,
-            ),
-            "us.anthropic.claude-opus-4-6-v1:0"
-        );
-    }
-
-    #[test]
-    fn non_bare_aliases_do_not_tier_match() {
-        // opus[1m] / best / opusplan are NOT bare family aliases → default arm
-        // false, so they do NOT inherit the parent even when same family.
-        assert!(!alias_matches_parent_tier("opus[1m]", "claude-opus-4-7"));
-        assert!(!alias_matches_parent_tier("best", "claude-opus-4-7"));
-        assert!(!alias_matches_parent_tier("opusplan", "claude-opus-4-7"));
-        assert!(alias_matches_parent_tier("opus", "claude-opus-4-7"));
-    }
-
-    #[test]
-    fn default_opus_model_env_override() {
+    fn explore_model_cap_uses_host_provider_and_product_switch() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _g = EnvGuard::set("ANTHROPIC_DEFAULT_OPUS_MODEL", "custom-opus-id");
-        assert_eq!(get_default_opus_model(), "custom-opus-id");
-    }
-
-    // ---- #18: 3P-provider Sonnet family default (Bedrock/Vertex/Foundry) ------
-    //
-    // claude-code's getDefaultSonnetModel() (model.ts:118-128) returns
-    // getModelStrings().sonnet45 (canonical claude-sonnet-4-5-20250929) for
-    // non-firstParty providers, and sonnet46 (claude-sonnet-4-6) for firstParty.
-    // getDefaultOpusModel/getDefaultHaikuModel do NOT differ by provider today.
-    //
-    // Each test scopes ALL THREE provider env vars under the shared ENV_LOCK so a
-    // concurrent test setting CLAUDE_CODE_USE_* cannot leak in.
-
-    /// Clear all three provider env vars (restored on Drop), pinning firstParty.
-    fn clear_provider_env() -> [EnvGuard; 3] {
-        let mk = |k: &'static str| {
-            let g = EnvGuard {
-                key: k,
-                prev: std::env::var(k).ok(),
-            };
-            std::env::remove_var(k);
-            g
-        };
-        [
-            mk("CLAUDE_CODE_USE_BEDROCK"),
-            mk("CLAUDE_CODE_USE_VERTEX"),
-            mk("CLAUDE_CODE_USE_FOUNDRY"),
-        ]
-    }
-
-    #[test]
-    fn sonnet_default_is_5_on_first_party() {
-        // 2.1.198 alias table: sonnet.default = claude-sonnet-5.
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        assert!(api_provider_is_first_party());
-        assert_eq!(get_default_sonnet_model(), "claude-sonnet-5");
-        // The bare `sonnet` alias resolves through the same default on firstParty.
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("sonnet".to_string()),
-                "openai/gpt-4o",
-                DEFAULT,
-                None,
-            ),
-            "claude-sonnet-5"
-        );
-    }
-
-    #[test]
-    fn sonnet_default_is_4_5_on_bedrock() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        let _b = EnvGuard::set("CLAUDE_CODE_USE_BEDROCK", "1");
-        assert!(!api_provider_is_first_party());
-        assert_eq!(get_default_sonnet_model(), "claude-sonnet-4-5-20250929");
-    }
-
-    #[test]
-    fn sonnet_default_is_4_5_on_vertex() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        let _v = EnvGuard::set("CLAUDE_CODE_USE_VERTEX", "1");
-        assert!(!api_provider_is_first_party());
-        assert_eq!(get_default_sonnet_model(), "claude-sonnet-4-5-20250929");
-        // The bare `sonnet` alias resolves to the 3P default on Vertex. Parent is
-        // non-Anthropic so no tier-match early-return can shadow it.
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("sonnet".to_string()),
-                "openai/gpt-4o",
-                DEFAULT,
-                None,
-            ),
-            "claude-sonnet-4-5-20250929"
-        );
-        // `opusplan` also resolves to the Sonnet default outside plan mode, so it
-        // too gets the 3P id.
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("opusplan".to_string()),
-                "openai/gpt-4o",
-                DEFAULT,
-                None,
-            ),
-            "claude-sonnet-4-5-20250929"
-        );
-    }
-
-    #[test]
-    fn sonnet_default_is_4_5_on_foundry() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        let _f = EnvGuard::set("CLAUDE_CODE_USE_FOUNDRY", "1");
-        assert!(!api_provider_is_first_party());
-        assert_eq!(get_default_sonnet_model(), "claude-sonnet-4-5-20250929");
-    }
-
-    #[test]
-    fn sonnet_env_override_wins_over_provider_default() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        let _b = EnvGuard::set("CLAUDE_CODE_USE_BEDROCK", "1");
-        // ANTHROPIC_DEFAULT_SONNET_MODEL (non-empty) beats the 3P provider branch.
-        let _o = EnvGuard::set("ANTHROPIC_DEFAULT_SONNET_MODEL", "custom-sonnet-id");
-        assert_eq!(get_default_sonnet_model(), "custom-sonnet-id");
-    }
-
-    #[test]
-    fn non_truthy_provider_env_stays_first_party() {
-        // A non-allowlisted value ("0") is NOT truthy under the strict allowlist,
-        // so the provider stays firstParty and Sonnet stays 4.6 — matching the TS
-        // isEnvTruthy semantics.
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        let _b = EnvGuard::set("CLAUDE_CODE_USE_BEDROCK", "0");
-        assert!(api_provider_is_first_party());
-        assert_eq!(get_default_sonnet_model(), "claude-sonnet-5");
-    }
-
-    #[test]
-    fn opus_differs_by_provider_haiku_does_not() {
-        // 2.1.207 alias table: opus.default = claude-opus-4-8 with
-        // per_provider{bedrock:4-8, vertex:4-8, foundry:4-6, …}. Only Foundry
-        // diverges now (Bedrock/Vertex joined the 4-8 default). Haiku has no
-        // provider branch (same id on all platforms).
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        // firstParty → 4-8
-        assert_eq!(get_default_opus_model(), "claude-opus-4-8");
-        let haiku_fp = get_default_haiku_model();
-        // Bedrock → 4-8 (2.1.207 change)
-        {
-            let _b = EnvGuard::set("CLAUDE_CODE_USE_BEDROCK", "1");
-            assert_eq!(get_default_opus_model(), "claude-opus-4-8");
-            assert_eq!(get_default_haiku_model(), haiku_fp);
-        }
-        // Vertex → 4-8 (2.1.207 change)
-        {
-            let _v = EnvGuard::set("CLAUDE_CODE_USE_VERTEX", "1");
-            assert_eq!(get_default_opus_model(), "claude-opus-4-8");
-        }
-        // Foundry → 4-6 (still diverges)
-        {
-            let _f = EnvGuard::set("CLAUDE_CODE_USE_FOUNDRY", "1");
-            assert_eq!(get_default_opus_model(), "claude-opus-4-6");
-        }
-        // Precedence: Bedrock outranks Foundry → 4-8 even with both set.
-        {
-            let _f = EnvGuard::set("CLAUDE_CODE_USE_FOUNDRY", "1");
-            let _b = EnvGuard::set("CLAUDE_CODE_USE_BEDROCK", "1");
-            assert_eq!(get_default_opus_model(), "claude-opus-4-8");
-        }
-        // ANTHROPIC_DEFAULT_OPUS_MODEL override wins even on Foundry.
-        {
-            let _f = EnvGuard::set("CLAUDE_CODE_USE_FOUNDRY", "1");
-            let _o = EnvGuard::set("ANTHROPIC_DEFAULT_OPUS_MODEL", "custom-opus-id");
-            assert_eq!(get_default_opus_model(), "custom-opus-id");
-        }
-    }
-
-    // ---- M2 Part B: registry pins (per-provider alias-table identity) -------
-    //
-    // Verified against the REAL 2.1.207 binary registry (extracted 2026-07-14):
-    // - alias table `sonnet.per_provider = {bedrock/vertex/foundry/mantle →
-    //   "claude-sonnet-4-5", anthropic_aws/gateway → "claude-sonnet-4-6"}`,
-    //   default "claude-sonnet-5".
-    // - alias table `opus.per_provider = {bedrock/vertex/mantle/anthropic_aws →
-    //   "claude-opus-4-8", foundry → "claude-opus-4-6", gateway →
-    //   "claude-opus-4-7"}`, default "claude-opus-4-8". (2.1.207 moved
-    //   Bedrock/Vertex/Claude-on-AWS onto the 4-8 default; only Foundry stays
-    //   4-6.)
-    // - sonnet-5 `provider_ids.anthropic_aws = "claude-sonnet-5"` (same string
-    //   as first_party — the id does not diverge for anthropicAws).
-    //
-    // LingXi's provider detection is 2-way (firstParty vs the env-detected
-    // Bedrock/Vertex/Foundry), so the anthropic_aws / mantle / gateway arms
-    // have no runtime representation — the ids they'd resolve to are pinned
-    // here so a future anthropicAws-aware host wires the RIGHT values (and any
-    // upstream alias-table change shows up as a deliberate test edit).
-
-    #[test]
-    fn registry_2_1_207_pins_match_binary() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        // Defaults (firstParty arm) — shared with the anthropic_aws sonnet-5
-        // provider id, which is byte-identical to first_party.
-        assert_eq!(family_default_id("sonnet"), Some("claude-sonnet-5"));
-        assert_eq!(family_default_id("opus"), Some("claude-opus-4-8"));
-        assert_eq!(family_default_id("haiku"), Some("claude-haiku-4-5"));
-        // Foundry arm — the only Opus per_provider divergence in 2.1.207.
-        assert_eq!(OPUS_FOUNDRY_DEFAULT_ID, "claude-opus-4-6");
-        // Sonnet 3P arm (bedrock/vertex/foundry per_provider) unchanged.
-        assert_eq!(SONNET_3P_DEFAULT_ID, "claude-sonnet-4-5-20250929");
-    }
-
-    #[test]
-    fn registry_anthropic_aws_gateway_alias_targets_pass_through() {
-        // The 2.1.207 per_provider alias targets (sonnet anthropic_aws/gateway
-        // → claude-sonnet-4-6, opus gateway → claude-opus-4-7) are real catalog
-        // ids: an explicit request for either must pass through verbatim so an
-        // anthropicAws/gateway-configured profile can route them unmodified.
-        for id in ["claude-sonnet-4-6", "claude-opus-4-7"] {
-            assert_eq!(
-                resolve_agent_model(
-                    &AgentModel::Explicit(id.to_string()),
-                    "claude-opus-4-8",
-                    DEFAULT,
-                    None,
-                ),
-                id
-            );
-        }
-    }
-
-    // ---- Tier3#14: alias arms honor ANTHROPIC_DEFAULT_*_MODEL env overrides --
-    //
-    // claude-code's parseUserSpecifiedModel routes its alias arms through
-    // getDefaultSonnetModel() / getDefaultHaikuModel() / getDefaultOpusModel()
-    // (model.ts:459-465), so the ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL env
-    // overrides win for the corresponding family alias. The full resolve path
-    // (resolve_agent_model → parse_user_specified_model) must reflect that.
-    //
-    // Parent is non-Anthropic ("openai/gpt-4o") so no tier-match early-return
-    // can shadow the alias resolution.
-
-    #[test]
-    fn opus_alias_honors_env_override() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = EnvGuard::set("ANTHROPIC_DEFAULT_OPUS_MODEL", "custom-opus-id");
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("opus".to_string()),
-                "openai/gpt-4o",
-                DEFAULT,
-                None,
-            ),
-            "custom-opus-id"
-        );
-        // The [1m] suffix is preserved on top of the env override.
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("opus[1m]".to_string()),
-                "openai/gpt-4o",
-                DEFAULT,
-                None,
-            ),
-            "custom-opus-id[1m]"
-        );
-    }
-
-    #[test]
-    fn sonnet_alias_honors_env_override() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = EnvGuard::set("ANTHROPIC_DEFAULT_SONNET_MODEL", "custom-sonnet-id");
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("sonnet".to_string()),
-                "openai/gpt-4o",
-                DEFAULT,
-                None,
-            ),
-            "custom-sonnet-id"
-        );
-        // `opusplan` resolves to the Sonnet default outside plan mode, so it too
-        // honors ANTHROPIC_DEFAULT_SONNET_MODEL.
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("opusplan".to_string()),
-                "openai/gpt-4o",
-                DEFAULT,
-                None,
-            ),
-            "custom-sonnet-id"
-        );
-    }
-
-    #[test]
-    fn haiku_alias_honors_env_override() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = EnvGuard::set("ANTHROPIC_DEFAULT_HAIKU_MODEL", "custom-haiku-id");
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("haiku".to_string()),
-                "openai/gpt-4o",
-                DEFAULT,
-                None,
-            ),
-            "custom-haiku-id"
-        );
-    }
-
-    #[test]
-    fn best_alias_honors_opus_env_override() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = EnvGuard::set("ANTHROPIC_DEFAULT_OPUS_MODEL", "custom-opus-id");
-        // `best` → getBestModel → Opus default (ignoring any [1m] suffix).
-        assert_eq!(
-            resolve_agent_model(
-                &AgentModel::Alias("best".to_string()),
-                "openai/gpt-4o",
-                DEFAULT,
-                None,
-            ),
-            "custom-opus-id"
-        );
-    }
-
-    // ── GAe/obm/dPn (2.1.198): built-in Explore model from the session model ──
-
-    /// A built-in Explore stand-in matching the fields `GAe` consults.
-    fn builtin_explore_def() -> AgentDefinition {
-        let mut def = crate::builtins::builtin_agent_definitions()
+        let _env = EnvGuard::set("LINGXI_DISABLE_EXPLORE_INHERIT_CAP", "");
+        let def = crate::builtins::builtin_agent_definitions()
             .into_iter()
-            .find(|d| d.agent_type == "Explore")
-            .expect("Explore is a built-in");
-        // The 2.1.198 frontmatter is `model:"inherit"` (qme); assert it here so
-        // the GAe tests below exercise the real definition.
-        assert!(matches!(def.model, AgentModel::Inherit));
-        def.model = AgentModel::Inherit;
-        def
-    }
-
-    #[test]
-    fn explore_on_fable_class_session_caps_at_opus() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        let def = builtin_explore_def();
-        // fable/mythos-class session models name none of haiku/sonnet/opus →
-        // obm true → the "opus" alias (Yyl).
-        for session in [
-            "claude-fable-5-1",
-            "claude-mythos-5-1-20260901",
-            "CLAUDE-FABLE-5[1m]",
-        ] {
-            assert!(
-                matches!(
-                    resolve_builtin_explore_model(&def, session, true),
-                    AgentModel::Alias(ref a) if a == "opus"
-                ),
-                "{session} → opus cap"
-            );
-        }
-    }
-
-    /// 2.1.266 `yX`'s kill-switch, ahead of the cap test: a deployment can let
-    /// Explore run on the full session model.
-    #[test]
-    fn explore_inherit_cap_kill_switch_restores_plain_inherit() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        let def = builtin_explore_def();
-        // Premise: this session WOULD be capped without the switch, so a pass
-        // below cannot come from the session model being under the cap anyway.
+            .find(|def| def.agent_type == "Explore")
+            .unwrap();
         assert!(
-            matches!(
-                resolve_builtin_explore_model(&def, "claude-fable-5-1", true),
-                AgentModel::Alias(ref a) if a == "opus"
-            ),
-            "premise: a fable-class session is capped",
+            matches!(resolve_builtin_explore_model(&def, "claude-fable-5-1", true), AgentModel::Alias(model) if model == "opus")
         );
-        std::env::set_var("LINGXI_DISABLE_EXPLORE_INHERIT_CAP", "1");
-        let got = resolve_builtin_explore_model(&def, "claude-fable-5-1", true);
-        std::env::remove_var("LINGXI_DISABLE_EXPLORE_INHERIT_CAP");
-        assert!(
-            matches!(got, AgentModel::Inherit),
-            "the kill-switch returns plain `inherit`, got {got:?}",
-        );
-    }
-
-    #[test]
-    fn explore_on_claude_family_session_inherits() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        let def = builtin_explore_def();
-        // dPn is a case-insensitive substring test over ["haiku","sonnet","opus"].
-        for session in [
-            "claude-sonnet-5",
-            "claude-opus-4-8-20260115",
-            "claude-haiku-4-5",
-            "CLAUDE-OPUS-4-6",
-        ] {
-            assert!(
-                matches!(
-                    resolve_builtin_explore_model(&def, session, true),
-                    AgentModel::Inherit
-                ),
-                "{session} → inherit"
-            );
-        }
-    }
-
-    #[test]
-    fn explore_on_non_first_party_env_provider_inherits() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        let def = builtin_explore_def();
-        // fr() !== "firstParty" (Bedrock/Vertex/Foundry) → obm false → inherit,
-        // even for a fable-class session model.
-        for var in [
-            "CLAUDE_CODE_USE_BEDROCK",
-            "CLAUDE_CODE_USE_VERTEX",
-            "CLAUDE_CODE_USE_FOUNDRY",
-        ] {
-            let _p = EnvGuard::set(var, "1");
-            assert!(
-                matches!(
-                    resolve_builtin_explore_model(&def, "claude-fable-5-1", true),
-                    AgentModel::Inherit
-                ),
-                "{var} → inherit"
-            );
-        }
-    }
-
-    #[test]
-    fn explore_on_non_anthropic_profile_inherits() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        let def = builtin_explore_def();
-        // LingXi multi-provider: a session routed to a non-Anthropic provider
-        // profile (OpenAI/Gemini/…) behaves like the non-firstParty branch.
         assert!(matches!(
             resolve_builtin_explore_model(&def, "gpt-4o", false),
             AgentModel::Inherit
         ));
+        assert!(matches!(
+            resolve_builtin_explore_model(&def, "claude-fable-5-1", false),
+            AgentModel::Inherit
+        ));
+        assert!(matches!(
+            resolve_builtin_explore_model(&def, "claude-opus-4-8", true),
+            AgentModel::Inherit
+        ));
+        let _disabled = EnvGuard::set("LINGXI_DISABLE_EXPLORE_INHERIT_CAP", "1");
+        assert!(matches!(
+            resolve_builtin_explore_model(&def, "claude-fable-5-1", true),
+            AgentModel::Inherit
+        ));
+    }
+
+    fn skill_route_provider(
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<ModelResolutionContext, ModelResolutionError> {
+        let (qualifier, requested) = model
+            .split_once('/')
+            .map_or((None, model), |(profile, model)| (Some(profile), model));
+        if profile
+            .zip(qualifier)
+            .is_some_and(|(profile, qualifier)| profile != qualifier)
+        {
+            return Err(ModelResolutionError::RouteUnavailable {
+                model: model.into(),
+                profile: profile.map(str::to_owned),
+                reason: "conflicting profile qualifier".into(),
+            });
+        }
+        let profile = profile.or(qualifier).unwrap_or("a");
+        let one_m = has_1m_context(requested);
+        let requested = strip_1m_suffix(requested);
+        let model = match requested.as_str() {
+            "parent" | "target" => requested,
+            "balanced" => "target".into(),
+            _ => {
+                return Err(ModelResolutionError::RouteUnavailable {
+                    model: model.into(),
+                    profile: Some(profile.into()),
+                    reason: "model absent".into(),
+                });
+            }
+        };
+        Ok(ModelResolutionContext {
+            route: ModelRouteFacts {
+                model: append_1m_suffix(model, one_m),
+                profile: Some(profile.into()),
+                provider: Some(ModelProviderKind::Other),
+                endpoint: Some(format!("https://{profile}.example")),
+                protocol: Some("custom".into()),
+            },
+            family_defaults: FamilyModelDefaults {
+                sonnet: Some("target".into()),
+                ..Default::default()
+            },
+            catalog_aliases: [("balanced".into(), vec!["target".into()])].into(),
+            native_1m: Some(true),
+            ..Default::default()
+        })
     }
 
     #[test]
-    fn non_explore_and_non_builtin_defs_keep_their_model() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
-        // Non-Explore built-in: model untouched (GAe early-return on agentType).
-        let plan = crate::builtins::builtin_agent_definitions()
-            .into_iter()
-            .find(|d| d.agent_type == "Plan")
-            .unwrap();
+    fn skill_model_selection_inherits_1m_only_with_trusted_same_route_support() {
+        let parent = skill_route_provider("parent[1m]", Some("a")).unwrap();
+        for preference in ["balanced", "sonnet", "target"] {
+            let selected =
+                resolve_skill_model_selection(preference, None, &parent, &skill_route_provider)
+                    .unwrap();
+            assert_eq!(selected.model, "target[1m]");
+            assert_eq!(selected.model_profile.as_deref(), Some("a"));
+        }
+        for support in [None, Some(false)] {
+            let provider = |model: &str, profile: Option<&str>| {
+                let mut context = skill_route_provider(model, profile)?;
+                context.native_1m = support;
+                Ok(context)
+            };
+            let selected =
+                resolve_skill_model_selection("target", None, &parent, &provider).unwrap();
+            assert_eq!(selected.model, "target");
+        }
+        let provider = |model: &str, profile: Option<&str>| {
+            let mut context = skill_route_provider(model, profile)?;
+            context.disable_1m_context = true;
+            Ok(context)
+        };
+        let selected = resolve_skill_model_selection("target", None, &parent, &provider).unwrap();
+        assert_eq!(selected.model, "target");
+        let mut disabled_parent = parent.clone();
+        disabled_parent.disable_1m_context = true;
+        assert_eq!(
+            resolve_skill_model_selection("target", None, &disabled_parent, &skill_route_provider)
+                .unwrap()
+                .model,
+            "target"
+        );
+    }
+
+    #[test]
+    fn skill_model_selection_cross_profile_keeps_target_route_without_inherited_1m() {
+        let parent = skill_route_provider("parent[1m]", Some("a")).unwrap();
+        for (model, profile) in [("b/target", None), ("target", Some("b"))] {
+            let selected =
+                resolve_skill_model_selection(model, profile, &parent, &skill_route_provider)
+                    .unwrap();
+            assert_eq!(selected.model, "target");
+            assert_eq!(selected.model_profile.as_deref(), Some("b"));
+        }
+        let selected =
+            resolve_skill_model_selection("b/target[1m]", None, &parent, &skill_route_provider)
+                .unwrap();
+        assert_eq!(selected.model, "target[1m]");
+        assert_eq!(selected.model_profile.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn skill_model_selection_does_not_infer_provider_from_matching_kind() {
+        let parent = skill_route_provider("parent[1m]", Some("a")).unwrap();
+        let provider = |model: &str, profile: Option<&str>| {
+            let mut context = skill_route_provider(model, profile)?;
+            context.route.endpoint = Some("https://different.example".into());
+            Ok(context)
+        };
+        assert_eq!(
+            resolve_skill_model_selection("target", None, &parent, &provider)
+                .unwrap()
+                .model,
+            "target"
+        );
+        let mut unscoped_parent = parent;
+        unscoped_parent.route.profile = None;
+        unscoped_parent.route.endpoint = None;
+        let unscoped_provider = |model: &str, profile: Option<&str>| {
+            let mut context = skill_route_provider(model, profile)?;
+            context.route.profile = None;
+            context.route.endpoint = None;
+            Ok(context)
+        };
+        assert_eq!(
+            resolve_skill_model_selection("target", None, &unscoped_parent, &unscoped_provider)
+                .unwrap()
+                .model,
+            "target"
+        );
+    }
+
+    #[test]
+    fn skill_model_selection_invalid_route_returns_error_without_a_model_fallback() {
+        let parent = skill_route_provider("parent", Some("a")).unwrap();
         assert!(matches!(
-            resolve_builtin_explore_model(&plan, "claude-fable-5-1", true),
-            AgentModel::Inherit
-        ));
-        let statusline = crate::builtins::builtin_agent_definitions()
-            .into_iter()
-            .find(|d| d.agent_type == "statusline-setup")
-            .unwrap();
-        assert!(matches!(
-            resolve_builtin_explore_model(&statusline, "claude-fable-5-1", true),
-            AgentModel::Alias(ref a) if a == "sonnet"
-        ));
-        // A USER-DEFINED agent literally named "Explore": source != built-in →
-        // untouched (GAe early-return on source).
-        let mut user_explore = builtin_explore_def();
-        user_explore.source = AgentSource::Settings(lingxi_core::types::SettingsScope::User);
-        user_explore.model = AgentModel::Alias("sonnet".to_string());
-        assert!(matches!(
-            resolve_builtin_explore_model(&user_explore, "claude-fable-5-1", true),
-            AgentModel::Alias(ref a) if a == "sonnet"
+            resolve_skill_model_selection("missing", None, &parent, &skill_route_provider),
+            Err(ModelResolutionError::RouteUnavailable { .. })
         ));
     }
 
-    // ── H-BIN-08: managed availableModels restriction (binary RF / ble/Qly) ──
-    //
-    // These exercise the boot-wired managed-allowlist gate. All pin firstParty
-    // (clear_provider_env) so the provider-aware Opus/Sonnet defaults are
-    // deterministic, and clear LINGXI_SUBAGENT_MODEL so the env branch is inert.
+    fn two_profile_provider(
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<ModelResolutionContext, ModelResolutionError> {
+        let (qualified_profile, bare) = model
+            .split_once('/')
+            .map_or((None, model), |(profile, bare)| (Some(profile), bare));
+        if profile
+            .zip(qualified_profile)
+            .is_some_and(|(profile, qualifier)| profile != qualifier)
+        {
+            return Err(ModelResolutionError::RouteUnavailable {
+                model: model.into(),
+                profile: profile.map(str::to_owned),
+                reason: "conflicting profile qualifier".into(),
+            });
+        }
+        let profile = profile.or(qualified_profile);
+        if profile.is_some_and(|profile| profile != "a" && profile != "b") {
+            return Err(ModelResolutionError::RouteUnavailable {
+                model: model.into(),
+                profile: profile.map(str::to_owned),
+                reason: "unknown profile".into(),
+            });
+        }
+        let target = match (bare, profile) {
+            ("shared", None) => {
+                return Err(ModelResolutionError::AmbiguousRoute {
+                    model: bare.into(),
+                    profiles: vec!["a".into(), "b".into()],
+                });
+            }
+            ("shared", Some(profile)) => profile,
+            ("only-b", None | Some("b")) => "b",
+            ("only-a", None | Some("a")) => "a",
+            _ => {
+                return Err(ModelResolutionError::RouteUnavailable {
+                    model: model.into(),
+                    profile: profile.map(str::to_owned),
+                    reason: "model absent".into(),
+                });
+            }
+        };
+        Ok(test_context(target, bare, ModelProviderKind::Other))
+    }
+
+    #[test]
+    fn registered_native_alias_names_keep_their_concrete_route() {
+        for wire_model in ["opus", "sonnet", "haiku", "fable", "best", "opusplan"] {
+            let provider = |model: &str, profile: Option<&str>| {
+                let qualified = format!("custom/{wire_model}");
+                let selected = match (model, profile) {
+                    (model, None) if model == wire_model || model == qualified => "custom",
+                    (model, Some("custom")) if model == wire_model => "custom",
+                    _ => {
+                        return Err(ModelResolutionError::RouteUnavailable {
+                            model: model.into(),
+                            profile: profile.map(str::to_owned),
+                            reason: "model is not registered on this profile".into(),
+                        })
+                    }
+                };
+                let mut context = test_context(selected, wire_model, ModelProviderKind::Other);
+                context.registered_model_ids.insert(wire_model.into());
+                // A conflicting default must not replace an actual wire ID.
+                context.family_defaults = FamilyModelDefaults {
+                    opus: Some("different-opus".into()),
+                    sonnet: Some("different-sonnet".into()),
+                    haiku: Some("different-haiku".into()),
+                    fable: Some("different-fable".into()),
+                };
+                Ok(context)
+            };
+            let parent = ModelResolutionContext::default();
+            let qualified = format!("custom/{wire_model}");
+            for (model, profile) in [
+                (wire_model, None),
+                (wire_model, Some("custom")),
+                (qualified.as_str(), None),
+            ] {
+                let selected =
+                    resolve_user_model_selection(model, profile, &parent, &provider).unwrap();
+                assert_eq!(selected.model, wire_model);
+                assert_eq!(selected.model_profile.as_deref(), Some("custom"));
+            }
+            let context = provider(wire_model, Some("custom")).unwrap();
+            assert_eq!(
+                resolve_user_specified_model(wire_model, &context).unwrap(),
+                wire_model
+            );
+        }
+    }
+
+    #[test]
+    fn changed_relative_alias_retains_parent_profile_among_duplicate_models() {
+        let mut parent = test_context("a", "only-a", ModelProviderKind::Other);
+        parent.family_defaults.sonnet = Some("shared".into());
+        let selection =
+            resolve_user_model_selection("sonnet", None, &parent, &two_profile_provider).unwrap();
+        assert_eq!(selection.model, "shared");
+        assert_eq!(selection.model_profile.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn native_plan_inheritance_preserves_registered_literal_strategy_names() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = clear_subagent_env();
+        for (setting, alias_upgrade) in [
+            ("haiku", "claude-sonnet-5"),
+            ("opusplan", "claude-opus-4-8"),
+            ("opusplan[1m]", "claude-opus-4-8[1m]"),
+        ] {
+            let mut context = test_context("native", setting, ModelProviderKind::FirstParty);
+            context
+                .registered_model_ids
+                .insert(strip_1m_suffix(setting));
+            assert_eq!(
+                resolve_agent_model_with_context(
+                    &AgentModel::Inherit,
+                    setting,
+                    PermissionMode::Plan,
+                    Some(setting),
+                    &context,
+                )
+                .unwrap(),
+                setting,
+            );
+            context.registered_model_ids.clear();
+            assert_eq!(
+                resolve_agent_model_with_context(
+                    &AgentModel::Inherit,
+                    setting,
+                    PermissionMode::Plan,
+                    Some(setting),
+                    &context,
+                )
+                .unwrap(),
+                alias_upgrade,
+            );
+        }
+    }
+
+    #[test]
+    fn native_same_tier_does_not_replace_a_registered_literal_model() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = clear_subagent_env();
+        let mut context = test_context("native", "claude-sonnet-5", ModelProviderKind::FirstParty);
+        context.registered_model_ids.insert("sonnet".into());
+        context.family_defaults.sonnet = Some("different-sonnet".into());
+        for preference in [
+            AgentModel::Alias("sonnet".into()),
+            AgentModel::Explicit("sonnet".into()),
+        ] {
+            assert_eq!(
+                resolve_agent_model_with_context(
+                    &preference,
+                    "claude-sonnet-5",
+                    PermissionMode::Default,
+                    None,
+                    &context,
+                )
+                .unwrap(),
+                "sonnet"
+            );
+        }
+    }
+
+    #[test]
+    fn unscoped_relative_alias_uses_a_unique_host_catalog() {
+        let provider = |model: &str, profile: Option<&str>| {
+            if (model == "sonnet" && profile.is_none())
+                || (model == "configured-sonnet" && profile == Some("configured"))
+            {
+                let mut context = test_context("configured", model, ModelProviderKind::Other);
+                context.family_defaults.sonnet = Some("configured-sonnet".into());
+                return Ok(context);
+            }
+            Err(ModelResolutionError::RouteUnavailable {
+                model: model.into(),
+                profile: profile.map(str::to_owned),
+                reason: "model not available".into(),
+            })
+        };
+        let selection = resolve_user_model_selection(
+            "sonnet",
+            None,
+            &ModelResolutionContext::default(),
+            &provider,
+        )
+        .unwrap();
+        assert_eq!(selection.model, "configured-sonnet");
+        assert_eq!(selection.model_profile.as_deref(), Some("configured"));
+    }
+
+    #[test]
+    fn concrete_model_prefers_parent_route_and_can_switch_to_unique_other_route() {
+        let parent = test_context("a", "only-a", ModelProviderKind::Other);
+        let same =
+            resolve_user_model_selection("shared", None, &parent, &two_profile_provider).unwrap();
+        assert_eq!(same.model_profile.as_deref(), Some("a"));
+        let foreign =
+            resolve_user_model_selection("only-b", None, &parent, &two_profile_provider).unwrap();
+        assert_eq!(foreign.model, "only-b");
+        assert_eq!(foreign.model_profile.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn qualified_model_selects_its_profile_and_wire_model() {
+        let parent = test_context("a", "only-a", ModelProviderKind::Other);
+        let selection =
+            resolve_user_model_selection("b/shared", None, &parent, &two_profile_provider).unwrap();
+        assert_eq!(selection.model, "shared");
+        assert_eq!(selection.model_profile.as_deref(), Some("b"));
+        let pinned =
+            resolve_user_model_selection("shared", Some("b"), &parent, &two_profile_provider)
+                .unwrap();
+        assert_eq!(pinned.model_profile.as_deref(), Some("b"));
+        assert!(
+            resolve_user_model_selection("only-b", Some("a"), &parent, &two_profile_provider)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn native_slash_model_keeps_selected_profile_when_catalogs_overlap() {
+        let parent = test_context("a", "vendor/shared", ModelProviderKind::Other);
+        let provider = |model: &str, profile: Option<&str>| {
+            if model != "vendor/shared" {
+                return two_profile_provider(model, profile);
+            }
+            match profile {
+                Some(profile) => Ok(test_context(profile, model, ModelProviderKind::Other)),
+                None => Err(ModelResolutionError::AmbiguousRoute {
+                    model: model.into(),
+                    profiles: vec!["a".into(), "b".into()],
+                }),
+            }
+        };
+        let selected =
+            resolve_user_model_selection("vendor/shared", None, &parent, &provider).unwrap();
+        assert_eq!(selected.model, "vendor/shared");
+        assert_eq!(selected.model_profile.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn same_tier_spelling_requires_configured_family_alias() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = clear_subagent_env();
+        let context = ModelResolutionContext {
+            route: ModelRouteFacts {
+                model: "claude-sonnet-4-5".into(),
+                profile: Some("openai".into()),
+                provider: Some(ModelProviderKind::Other),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(matches!(
+            resolve_agent_model_with_context(
+                &AgentModel::Alias("sonnet".into()),
+                &context.route.model,
+                DEFAULT,
+                None,
+                &context
+            ),
+            Err(ModelResolutionError::MissingFamilyDefault { .. })
+        ));
+    }
+
+    #[test]
+    fn missing_relative_alias_does_not_select_another_profile() {
+        let mut parent = test_context("a", "only-a", ModelProviderKind::Other);
+        parent.family_defaults.sonnet = None;
+        assert!(matches!(
+            resolve_user_model_selection("sonnet", None, &parent, &two_profile_provider),
+            Err(ModelResolutionError::MissingFamilyDefault { .. })
+        ));
+        let no_profile = ModelResolutionContext::default();
+        assert!(matches!(
+            resolve_user_model_selection("shared", None, &no_profile, &two_profile_provider),
+            Err(ModelResolutionError::AmbiguousRoute { .. })
+        ));
+    }
 
     use std::collections::BTreeMap;
 
@@ -1655,7 +1832,7 @@ mod tests {
     fn clear_subagent_env() -> EnvGuard {
         let g = EnvGuard {
             key: "LINGXI_SUBAGENT_MODEL",
-            prev: std::env::var("LINGXI_SUBAGENT_MODEL").ok(),
+            prev: std::env::var(branding::SUBAGENT_MODEL_ENV).ok(),
         };
         std::env::remove_var("LINGXI_SUBAGENT_MODEL");
         g
@@ -1664,7 +1841,6 @@ mod tests {
     #[test]
     fn subagent_disallowed_model_inherits_parent_with_exact_warning() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
         let _s = clear_subagent_env();
         // Allowlist permits only opus; the request resolves to Sonnet (barred).
         let enf = active(&["opus"]);
@@ -1674,7 +1850,7 @@ mod tests {
             catalog: &cat,
         };
         let mut warns: Vec<String> = Vec::new();
-        let out = resolve_agent_model_restricted(
+        let out = resolve_test_model_restricted(
             &AgentModel::Alias("sonnet".to_string()),
             "claude-opus-4-8",
             DEFAULT,
@@ -1696,7 +1872,6 @@ mod tests {
     #[test]
     fn subagent_allowed_model_passes_through_no_warning() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
         let _s = clear_subagent_env();
         // Sonnet IS allowed → the request resolves normally with no warning.
         let enf = active(&["opus", "sonnet"]);
@@ -1706,7 +1881,7 @@ mod tests {
             catalog: &cat,
         };
         let mut warns: Vec<String> = Vec::new();
-        let out = resolve_agent_model_restricted(
+        let out = resolve_test_model_restricted(
             &AgentModel::Alias("sonnet".to_string()),
             "claude-opus-4-8",
             DEFAULT,
@@ -1721,7 +1896,6 @@ mod tests {
     #[test]
     fn subagent_env_override_disallowed_inherits_with_env_value_in_warning() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
         let _s = EnvGuard::set("LINGXI_SUBAGENT_MODEL", "sonnet");
         let enf = active(&["opus"]);
         let cat = catalog(&["claude-opus-4-8", "claude-sonnet-5"]);
@@ -1730,7 +1904,7 @@ mod tests {
             catalog: &cat,
         };
         let mut warns: Vec<String> = Vec::new();
-        let out = resolve_agent_model_restricted(
+        let out = resolve_test_model_restricted(
             &AgentModel::Inherit,
             "claude-opus-4-8",
             DEFAULT,
@@ -1752,7 +1926,6 @@ mod tests {
     #[test]
     fn inactive_restriction_is_a_no_op() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
         let _s = clear_subagent_env();
         let enf = ModelEnforcement::Inactive;
         let cat = catalog(&["claude-opus-4-8", "claude-sonnet-5"]);
@@ -1762,7 +1935,7 @@ mod tests {
         };
         let mut warns: Vec<String> = Vec::new();
         // Identical to the unrestricted resolution: Alias("sonnet") → default id.
-        let out = resolve_agent_model_restricted(
+        let out = resolve_test_model_restricted(
             &AgentModel::Alias("sonnet".to_string()),
             "claude-opus-4-8",
             DEFAULT,
@@ -1777,7 +1950,6 @@ mod tests {
     #[test]
     fn plan_opusplan_barred_uses_newest_permitted_opus() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
         let _s = clear_subagent_env();
         // The opus upgrade (claude-opus-4-8) is barred; 4-6 is permitted.
         let enf = active(&["opus-4-6"]);
@@ -1787,7 +1959,7 @@ mod tests {
             catalog: &cat,
         };
         let mut warns: Vec<String> = Vec::new();
-        let out = resolve_agent_model_restricted(
+        let out = resolve_test_model_restricted(
             &AgentModel::Inherit,
             "claude-sonnet-5",
             PermissionMode::Plan,
@@ -1805,7 +1977,6 @@ mod tests {
     #[test]
     fn plan_opusplan_barred_no_permitted_opus_uses_resting_model() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
         let _s = clear_subagent_env();
         // No opus is permitted at all → the resting model (opusplan → Sonnet).
         let enf = active(&["sonnet"]);
@@ -1815,7 +1986,7 @@ mod tests {
             catalog: &cat,
         };
         let mut warns: Vec<String> = Vec::new();
-        let out = resolve_agent_model_restricted(
+        let out = resolve_test_model_restricted(
             &AgentModel::Inherit,
             "claude-sonnet-5",
             PermissionMode::Plan,
@@ -1834,7 +2005,6 @@ mod tests {
     #[test]
     fn plan_haiku_barred_uses_newest_permitted_sonnet() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
         let _s = clear_subagent_env();
         // The haiku plan upgrade (Sonnet default claude-sonnet-5) is barred; an
         // older permitted sonnet exists.
@@ -1845,7 +2015,7 @@ mod tests {
             catalog: &cat,
         };
         let mut warns: Vec<String> = Vec::new();
-        let out = resolve_agent_model_restricted(
+        let out = resolve_test_model_restricted(
             &AgentModel::Inherit,
             "claude-opus-4-8",
             PermissionMode::Plan,
@@ -1863,7 +2033,6 @@ mod tests {
     #[test]
     fn plan_haiku_barred_no_permitted_sonnet_uses_resting_haiku() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
         let _s = clear_subagent_env();
         // No sonnet is permitted → the resting model for `haiku` = Haiku default.
         let enf = active(&["haiku"]);
@@ -1873,7 +2042,7 @@ mod tests {
             catalog: &cat,
         };
         let mut warns: Vec<String> = Vec::new();
-        let out = resolve_agent_model_restricted(
+        let out = resolve_test_model_restricted(
             &AgentModel::Inherit,
             "claude-opus-4-8",
             PermissionMode::Plan,
@@ -1891,7 +2060,6 @@ mod tests {
     #[test]
     fn plan_opusplan_permitted_upgrade_uses_opus_no_warning() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let _g = clear_provider_env();
         let _s = clear_subagent_env();
         // The opus upgrade IS permitted → no substitution, no warning.
         let enf = active(&["opus"]);
@@ -1901,7 +2069,7 @@ mod tests {
             catalog: &cat,
         };
         let mut warns: Vec<String> = Vec::new();
-        let out = resolve_agent_model_restricted(
+        let out = resolve_test_model_restricted(
             &AgentModel::Inherit,
             "claude-sonnet-5",
             PermissionMode::Plan,

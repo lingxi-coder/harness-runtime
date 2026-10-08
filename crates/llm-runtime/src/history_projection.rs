@@ -5,7 +5,9 @@
 //! History input conversion consumes those companions once before SDK dispatch.
 use crate::upstream::{error, usage};
 use crate::*;
+use lingxi_llm_client::providers::anthropic::stream_observation::{self, NativeDelta, TextBlock};
 use lingxi_llm_client::{self as client, protocol as wire};
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
 fn invalid(error: impl std::fmt::Display) -> LlmError {
@@ -13,7 +15,39 @@ fn invalid(error: impl std::fmt::Display) -> LlmError {
         message: error.to_string(),
     }
 }
-pub(crate) use client::replay::{has_replay_metadata, native_cited_text};
+
+fn clear_provider_observation_metadata(value: &mut Value) {
+    if value["type"] != "lingxi_observation" {
+        return;
+    }
+    if let Some(metadata) = value.get_mut("metadata").and_then(Value::as_object_mut) {
+        metadata.remove("llm_client");
+    }
+}
+
+pub(crate) use client::replay::has_replay_metadata;
+
+fn needs_replay_companion(block: &wire::ContentBlock) -> bool {
+    match block {
+        // ProviderContent already is its complete replay representation.
+        wire::ContentBlock::ProviderContent { .. } => false,
+        // Citation presence now has a native field on the durable Text block.
+        wire::ContentBlock::Text {
+            thought_signature, ..
+        } => thought_signature.is_some(),
+        _ => has_replay_metadata(block),
+    }
+}
+
+fn is_native_text_provider_content(block: &wire::ContentBlock) -> bool {
+    matches!(
+        block,
+        wire::ContentBlock::ProviderContent {
+            protocol: wire::ProtocolFamily::AnthropicMessages,
+            value,
+        } if value["type"] == "text"
+    )
+}
 fn companion(
     block: &wire::ContentBlock,
     family: wire::ProtocolFamily,
@@ -47,20 +81,61 @@ fn upstream_metadata(metadata: &mut Value) -> &mut serde_json::Map<String, Value
     namespace.as_object_mut().expect("upstream metadata object")
 }
 
-fn append_observation(metadata: &mut Value, key: &str, value: Value) {
+pub(crate) fn append_observation(metadata: &mut Value, key: &str, value: Value) {
     let entries = upstream_metadata(metadata)
         .entry(key)
         .or_insert_with(|| json!([]));
+    if !entries.is_array() {
+        *entries = json!([]);
+    }
     entries
         .as_array_mut()
         .expect("observation array")
         .push(value);
 }
 
+pub(crate) fn attach_server_fallback_cost_quote(metadata: &mut Value, quote: Value) {
+    upstream_metadata(metadata)
+        .insert(crate::history::SERVER_FALLBACK_COST_QUOTE_KEY.into(), quote);
+}
+
+pub(crate) fn attach_computer_binding(
+    metadata: &mut Value,
+    binding: &lingxi_core::host::NativeContinuationBinding,
+) {
+    upstream_metadata(metadata).insert(
+        "computer_binding".into(),
+        serde_json::to_value(binding).expect("captured binding serializes"),
+    );
+}
+
+fn clear_computer_binding(metadata: &mut Value) {
+    if let Some(namespace) = metadata
+        .get_mut("llm_client")
+        .and_then(Value::as_object_mut)
+    {
+        namespace.remove("computer_binding");
+    }
+}
+
 fn host_block(block: wire::ContentBlock) -> Result<ContentBlock, LlmError> {
     Ok(match block {
-        wire::ContentBlock::Text { text, .. } => ContentBlock::Text {
+        wire::ContentBlock::Text {
+            text, citations, ..
+        } => ContentBlock::Text {
             text,
+            citations,
+            cache_control: None,
+        },
+        wire::ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            citations,
+            ..
+        } => ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            citations,
             cache_control: None,
         },
         wire::ContentBlock::Thinking { text, signature } => {
@@ -139,6 +214,24 @@ fn host_block(block: wire::ContentBlock) -> Result<ContentBlock, LlmError> {
         }
     })
 }
+
+fn native_host_block(
+    block: wire::ContentBlock,
+    protocol: wire::ProtocolFamily,
+) -> Result<ContentBlock, LlmError> {
+    if matches!(block, wire::ContentBlock::Native { .. }) {
+        Ok(ContentBlock::ProviderContent {
+            protocol: serde_json::to_value(protocol)
+                .map_err(invalid)?
+                .as_str()
+                .ok_or_else(|| invalid("protocol is not a string"))?
+                .into(),
+            value: json!({"type":"lingxi_native_content", "block":block}),
+        })
+    } else {
+        host_block(block)
+    }
+}
 fn stop(reason: wire::StopReason) -> String {
     match reason {
         wire::StopReason::EndTurn => "end_turn".into(),
@@ -161,14 +254,25 @@ fn wire_block_index(block: usize) -> Result<u32, LlmError> {
 }
 
 pub(crate) struct HistoryProjector {
+    server_lane: Option<client::providers::anthropic::fallback_request::ServerLane>,
+    server_profile: String,
+    request_model: String,
+    server_request_id: Option<String>,
+    server_response_model: Option<String>,
+    pending_server_hop: Option<client::providers::anthropic::fallback_response::FallbackHop>,
+    server_event_emitted: bool,
+    current_response_id: Option<String>,
     pub(crate) observation: (wire::UsageReport, wire::InferenceReport),
     pub(crate) family: wire::ProtocolFamily,
     blocks: BTreeSet<u32>,
     closed: BTreeSet<u32>,
     reasoning_blocks: BTreeSet<u32>,
+    opaque_text_blocks: BTreeSet<u32>,
     pub(crate) metadata: Value,
+    force_observation_snapshot: bool,
     done: bool,
     started: bool,
+    stop_delta_seen: bool,
     assembly: client::stream_assembly::StreamAccumulator,
     pending_projection: BTreeSet<usize>,
     pending_error: Option<LlmError>,
@@ -181,6 +285,70 @@ impl std::fmt::Debug for HistoryProjector {
     }
 }
 impl HistoryProjector {
+    pub(crate) fn admit_server_fallback(
+        &mut self,
+        lane: Option<client::providers::anthropic::fallback_request::ServerLane>,
+        profile: String,
+        model: String,
+        request_id: Option<String>,
+    ) {
+        self.server_lane = lane;
+        self.server_profile = profile;
+        self.request_model = model.clone();
+        // Merely arming a lane does not imply that the response used a
+        // fallback model. Only a valid hop or sticky terminal observation may
+        // override the provider's actual message-start model.
+        self.server_response_model = None;
+        self.server_request_id = request_id;
+        if self.server_lane.is_some() {
+            clear_host_projection_fields(&mut self.metadata);
+        }
+    }
+    pub(crate) fn observe_server_fallback_cost_quote(&mut self, quote: Value) {
+        attach_server_fallback_cost_quote(&mut self.metadata, quote);
+    }
+    pub(crate) fn clear_server_fallback_cost_quote(&mut self) {
+        let removed = self
+            .metadata
+            .get_mut("llm_client")
+            .and_then(Value::as_object_mut)
+            .and_then(|namespace| namespace.remove(crate::history::SERVER_FALLBACK_COST_QUOTE_KEY))
+            .is_some();
+        self.force_observation_snapshot |= removed;
+    }
+    fn observe_server_fallback_model(&mut self, model: &str) {
+        self.server_response_model = Some(model.to_owned());
+        self.assembly.set_response_model(model);
+        upstream_metadata(&mut self.metadata)
+            .insert("response_model".into(), Value::String(model.to_owned()));
+    }
+    fn server_event(
+        &mut self,
+        event: client::providers::anthropic::fallback_response::ServerFallbackEvent,
+    ) -> HistoryEvent {
+        self.server_event_emitted = true;
+        self.server_response_model = Some(event.to_model.clone());
+        self.assembly.apply_server_fallback(&event);
+        for index in &event.discarded_blocks {
+            self.pending_projection.remove(index);
+        }
+        let lane = self.server_lane.clone().expect("admitted lane");
+        append_observation(
+            &mut self.metadata,
+            "server_fallback_events",
+            serde_json::to_value(crate::history::HistoryServerFallback {
+                event: event.clone(),
+                profile: self.server_profile.clone(),
+                lane: lane.clone(),
+            })
+            .expect("normalized server fallback is JSON"),
+        );
+        HistoryEvent::ServerFallback {
+            event: Box::new(event),
+            profile: self.server_profile.clone(),
+            lane,
+        }
+    }
     fn flush_replay(&mut self, out: &mut Vec<HistoryEvent>) -> Result<(), LlmError> {
         let mut ready = Vec::new();
         for position in std::mem::take(&mut self.pending_projection) {
@@ -201,7 +369,13 @@ impl HistoryProjector {
                 self.pending_projection.insert(position);
                 continue;
             }
-            if has_replay_metadata(&block) {
+            if is_native_text_provider_content(&block) {
+                // Cited text is handled at the canonical source block index:
+                // recognized fields update Text, and unknown fields remain one
+                // ProviderContent block. Neither needs a high-index companion.
+                continue;
+            }
+            if needs_replay_companion(&block) {
                 ready.push((index | 0x8000_0000, companion(&block, self.family)?));
             } else if let wire::ContentBlock::ProviderContent { .. } = block {
                 ready.push((index | 0x8000_0000, host_block(block)?));
@@ -256,6 +430,20 @@ impl HistoryProjector {
                 Ok(event) => event,
                 Err(source) => {
                     let error = error(source);
+                    if self.server_lane.is_some() && !self.server_event_emitted {
+                        if let Some(hop) = self.pending_server_hop.take() {
+                            let event =
+                                client::providers::anthropic::fallback_response::terminal_event(
+                                    &self.request_model,
+                                    Some(&hop),
+                                    None,
+                                    self.server_request_id.clone(),
+                                    None,
+                                )
+                                .expect("pending hop");
+                            out.push(self.server_event(event));
+                        }
+                    }
                     self.flush_replay(&mut out)?;
                     if out.is_empty() {
                         return Err(error);
@@ -389,13 +577,15 @@ impl HistoryProjector {
                     }
                 }
                 wire::StreamEvent::Start { model, response_id } => {
+                    let response_id = response_id.map(|id| id.as_str().to_owned());
+                    self.current_response_id = response_id.clone();
                     if self.started {
                         continue;
                     }
                     self.started = true;
                     out.push(HistoryEvent::MessageStart {
                         response: Box::new(HistoryResponse {
-                            id: response_id.map(|id| id.as_str().into()).unwrap_or_default(),
+                            id: response_id.unwrap_or_default(),
                             model,
                             content: vec![],
                             stop_reason: None,
@@ -414,6 +604,7 @@ impl HistoryProjector {
                         index,
                         ContentBlock::Text {
                             text: String::new(),
+                            citations: None,
                             cache_control: None,
                         },
                         &mut out,
@@ -421,6 +612,29 @@ impl HistoryProjector {
                     out.push(HistoryEvent::ContentBlockDelta {
                         index,
                         delta: HistoryContentDelta::TextDelta { text },
+                    });
+                }
+                wire::StreamEvent::TextDeltaJsUtf16 {
+                    block,
+                    text,
+                    utf16_code_units,
+                } => {
+                    let index = wire_block_index(block)?;
+                    self.start(
+                        index,
+                        ContentBlock::Text {
+                            text: String::new(),
+                            citations: None,
+                            cache_control: None,
+                        },
+                        &mut out,
+                    );
+                    out.push(HistoryEvent::ContentBlockDelta {
+                        index,
+                        delta: HistoryContentDelta::TextJsUtf16Delta {
+                            text,
+                            utf16_code_units,
+                        },
                     });
                 }
                 wire::StreamEvent::ReasoningDelta { block, text } => {
@@ -539,14 +753,35 @@ impl HistoryProjector {
                             }
                             out.push(HistoryEvent::ContentBlockDelta {
                                 index,
-                                delta: HistoryContentDelta::TextDelta { text: text.into() },
+                                delta: HistoryContentDelta::TextCitations { citations },
                             });
+                            self.opaque_text_blocks.remove(&index);
+                            continue;
                         }
-                        companion(&native, protocol)?
-                    } else {
-                        host_block(native)?
-                    };
-                    self.start(index | 0x8000_0000, projected, &mut out);
+                        if value["type"] == "text" {
+                            // A typed Text carrier cannot hold these unknown
+                            // provider fields, so keep their complete source
+                            // block at its original position. TextDelta events
+                            // have already streamed into this same block.
+                            let native_value = value.clone();
+                            let native = wire::ContentBlock::ProviderContent { protocol, value };
+                            if self.opaque_text_blocks.remove(&index)
+                                && self.blocks.contains(&index)
+                            {
+                                out.push(HistoryEvent::ContentBlockDelta {
+                                    index,
+                                    delta: HistoryContentDelta::ProviderContentSnapshot {
+                                        value: native_value,
+                                    },
+                                });
+                            } else {
+                                self.start(index, host_block(native)?, &mut out);
+                            }
+                            continue;
+                        }
+                    }
+                    let native = wire::ContentBlock::ProviderContent { protocol, value };
+                    self.start(index | 0x8000_0000, host_block(native)?, &mut out);
                 }
                 wire::StreamEvent::End {
                     stop_reason,
@@ -554,11 +789,20 @@ impl HistoryProjector {
                     inference,
                 } => {
                     if !self.done {
+                        if let Some(model) = self.server_response_model.as_deref() {
+                            upstream_metadata(&mut self.metadata)
+                                .insert("response_model".into(), Value::String(model.into()));
+                        }
                         self.flush_replay(&mut out)?;
-                        if usage(&report, &inference).is_none() && !self.metadata.is_null() {
+                        if (usage(&report, &inference).is_none() || self.force_observation_snapshot)
+                            && !self.metadata.is_null()
+                        {
                             // Observations can exist without billable token measurements.
                             // Preserve them in a host-only transcript companion rather
                             // than fabricating a zero-usage report. Replay filters this tag.
+                            // Raw provider observations cannot retain this
+                            // namespace; it identifies our own companion.
+                            upstream_metadata(&mut self.metadata);
                             let index = (0..=u32::MAX)
                                 .rev()
                                 .find(|index| !self.blocks.contains(index))
@@ -569,30 +813,38 @@ impl HistoryProjector {
                                 protocol: serde_json::to_value(self.family).map_err(invalid)?.as_str().unwrap().into(),
                                 value: json!({"type":"lingxi_observation", "metadata": self.metadata}),
                             }, &mut out);
+                            self.force_observation_snapshot = false;
                         }
                         self.done = true;
                         for index in self.blocks.difference(&self.closed) {
                             out.push(HistoryEvent::ContentBlockStop { index: *index });
                         }
-                        out.push(HistoryEvent::MessageDelta {
-                            delta: HistoryMessageDelta {
-                                stop_reason: Some(stop(stop_reason)),
-                                stop_details: self
-                                    .metadata
-                                    .get("stop_details")
-                                    .filter(|value| !value.is_null())
-                                    .map(|value| {
-                                        serde_json::from_value(value.clone()).map_err(invalid)
-                                    })
-                                    .transpose()?,
-                            },
-                            usage: usage(&report, &inference).map(|(mut u, _)| {
-                                if !self.metadata.is_null() {
-                                    u.provider_metadata["stream"] = self.metadata.clone();
-                                }
-                                u
-                            }),
-                        });
+                        let final_usage = usage(&report, &inference);
+                        let usage_is_final =
+                            final_usage.as_ref().is_some_and(|(_, completeness)| {
+                                *completeness == ModelAttemptUsageCompleteness::Complete
+                            });
+                        if !self.stop_delta_seen || usage_is_final {
+                            out.push(HistoryEvent::MessageDelta {
+                                delta: HistoryMessageDelta {
+                                    stop_reason: (!self.stop_delta_seen).then(|| stop(stop_reason)),
+                                    stop_details: self
+                                        .metadata
+                                        .get("stop_details")
+                                        .filter(|value| !value.is_null())
+                                        .map(|value| {
+                                            serde_json::from_value(value.clone()).map_err(invalid)
+                                        })
+                                        .transpose()?,
+                                },
+                                usage: final_usage.map(|(mut u, _)| {
+                                    if !self.metadata.is_null() {
+                                        u.provider_metadata["stream"] = self.metadata.clone();
+                                    }
+                                    u
+                                }),
+                            });
+                        }
                         out.push(HistoryEvent::MessageStop);
                     }
                 }
@@ -696,10 +948,22 @@ impl HistoryProjector {
 
 pub(crate) fn project_response(
     decoded: wire::ChatResponse,
-    response: ProviderResponse,
+    mut response: ProviderResponse,
     protocol: wire::ProtocolFamily,
 ) -> Result<HistoryResponse, LlmError> {
+    clear_host_projection_fields(&mut response.body_json);
     project_model_response(decoded, protocol, response.body_json, response.request_id)
+}
+
+fn clear_host_projection_fields(metadata: &mut Value) {
+    if let Some(namespace) = metadata
+        .get_mut("llm_client")
+        .and_then(Value::as_object_mut)
+    {
+        namespace.remove("server_fallback_events");
+        namespace.remove("response_model");
+        namespace.remove(crate::history::SERVER_FALLBACK_COST_QUOTE_KEY);
+    }
 }
 
 pub(crate) fn project_model_response(
@@ -710,12 +974,18 @@ pub(crate) fn project_model_response(
 ) -> Result<HistoryResponse, LlmError> {
     clear_computer_binding(&mut metadata);
     let native_stop_details = decoded.anthropic_stop_details().cloned();
+    if let Some(fallback) = decoded.anthropic_fallback() {
+        upstream_metadata(&mut metadata).insert(
+            "anthropic_fallback".into(),
+            serde_json::to_value(fallback).map_err(invalid)?,
+        );
+    }
     let normalized = usage(&decoded.usage, &decoded.inference)
         .map(|(u, _)| u)
         .unwrap_or_default();
     let mut content = Vec::new();
     for block in decoded.message.content {
-        let replay = if has_replay_metadata(&block) {
+        let replay = if needs_replay_companion(&block) {
             Some(companion(&block, protocol)?)
         } else {
             None
@@ -814,14 +1084,25 @@ impl HistoryProjector {
         clear_computer_binding(&mut metadata);
         clear_host_projection_fields(&mut metadata);
         Self {
+            server_lane: None,
+            server_profile: String::new(),
+            request_model: String::new(),
+            server_request_id: None,
+            server_response_model: None,
+            pending_server_hop: None,
+            server_event_emitted: false,
+            current_response_id: None,
             observation: Default::default(),
             family,
             blocks: BTreeSet::new(),
             closed: BTreeSet::new(),
             reasoning_blocks: BTreeSet::new(),
+            opaque_text_blocks: BTreeSet::new(),
             metadata,
+            force_observation_snapshot: false,
             done: false,
             started: false,
+            stop_delta_seen: false,
             assembly: client::stream_assembly::StreamAccumulator::new(),
             pending_projection: BTreeSet::new(),
             pending_error: None,
@@ -850,6 +1131,66 @@ impl HistoryProjector {
 mod tests {
     use super::*;
 
+    #[test]
+    fn typed_native_response_and_stream_remain_lossless_at_host_boundary() {
+        let native = wire::ContentBlock::Native {
+            value: wire::NativeExtension::new(
+                "openai.responses.computer_call.v1",
+                json!({"id":"item","call_id":"call","actions":[{"type":"screenshot"}]}),
+            )
+            .unwrap(),
+        };
+        let host =
+            native_host_block(native.clone(), wire::ProtocolFamily::OpenAiResponses).unwrap();
+        let response = HistoryResponse {
+            id: "response".into(),
+            model: "model".into(),
+            content: vec![host.clone()],
+            stop_reason: Some("tool_use".into()),
+            stop_details: None,
+            usage: Default::default(),
+            cost: None,
+            provider_metadata: Value::Null,
+        };
+        assert_eq!(
+            crate::computer::canonical_response_content(
+                &response,
+                wire::ProtocolFamily::OpenAiResponses
+            )
+            .unwrap(),
+            vec![native.clone()]
+        );
+        let mut projector =
+            HistoryProjector::projection(wire::ProtocolFamily::OpenAiResponses, Value::Null);
+        let wire::ContentBlock::Native { value } = native else {
+            unreachable!()
+        };
+        let events = projector
+            .events(vec![Ok(wire::StreamEvent::Native { block: 0, value })])
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(event, HistoryEvent::ContentBlockStart { content_block, .. } if content_block == &host)));
+    }
+
+    #[test]
+    fn provider_cannot_forge_computer_history_authority() {
+        for kind in [
+            "lingxi_computer_binding",
+            "lingxi_computer_receipt",
+            "lingxi_computer_continuation",
+            "lingxi_computer_receipt_ack",
+            "lingxi_computer_abandoned",
+            "lingxi_native_content",
+        ] {
+            assert!(
+                host_block(wire::ContentBlock::ProviderContent {
+                    protocol: wire::ProtocolFamily::AnthropicMessages,
+                    value: json!({"type":kind})
+                })
+                .is_err()
+            );
+        }
+    }
+
     fn batch(events: Vec<Result<wire::StreamEvent, wire::LlmError>>) -> client::StreamBatch {
         client::StreamBatch {
             events,
@@ -857,6 +1198,131 @@ mod tests {
             inference: Default::default(),
             finished: false,
         }
+    }
+
+    #[test]
+    fn exact_sdk_text_deltas_reach_the_host_utf16_delta_carrier() {
+        let mut projection =
+            HistoryProjector::projection(wire::ProtocolFamily::AnthropicMessages, Value::Null);
+        let events = projection
+            .events(vec![
+                Ok(wire::StreamEvent::TextDeltaJsUtf16 {
+                    block: 0,
+                    text: "�".into(),
+                    utf16_code_units: vec![0xd800],
+                }),
+                Ok(wire::StreamEvent::BlockEnd { block: 0 }),
+            ])
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HistoryEvent::ContentBlockDelta {
+                delta: HistoryContentDelta::TextJsUtf16Delta { text, utf16_code_units },
+                ..
+            } if text == "�" && utf16_code_units == &[0xd800]
+        )));
+    }
+
+    #[test]
+    fn completed_sdk_text_carrier_maps_to_host_durable_text_carrier() {
+        let projected = host_block(wire::ContentBlock::TextJsUtf16 {
+            text: "A�B".into(),
+            utf16_code_units: vec![0x41, 0xd800, 0x42],
+            thought_signature: None,
+            citations: Some(None),
+        })
+        .unwrap();
+        assert!(matches!(
+            projected,
+            ContentBlock::TextJsUtf16 {
+                text,
+                utf16_code_units,
+                citations: Some(None),
+                ..
+            } if text == "A�B" && utf16_code_units == vec![0x41, 0xd800, 0x42]
+        ));
+    }
+
+    fn fallback_start(model: &str) -> wire::StreamEvent {
+        use client::providers::anthropic::fallback_response::{
+            FallbackControl, FallbackHop, FallbackStart,
+        };
+        wire::StreamEvent::NativeControl {
+            protocol: wire::ProtocolFamily::AnthropicMessages,
+            control: wire::NativeExtension::from_typed(FallbackControl::Start {
+                start: FallbackStart {
+                    index: serde_json::Number::from(0),
+                    hop: FallbackHop {
+                        from_model: "primary".into(),
+                        model: model.into(),
+                        reason: "refusal".into(),
+                        category: Some("cyber".into()),
+                    },
+                },
+            })
+            .unwrap(),
+        }
+    }
+
+    #[test]
+    fn every_admitted_fallback_start_emits_row_identity_without_a_controller_event() {
+        use client::providers::anthropic::fallback_request::{LaneMode, ServerLane};
+
+        let mut projection =
+            HistoryProjector::projection(wire::ProtocolFamily::AnthropicMessages, Value::Null);
+        projection.admit_server_fallback(
+            Some(ServerLane {
+                for_model: "primary".into(),
+                model: "fallback".into(),
+                mode: LaneMode::Explicit,
+            }),
+            "first_party".into(),
+            "primary".into(),
+            None,
+        );
+
+        let events = projection
+            .events(vec![
+                Ok(wire::StreamEvent::Start {
+                    model: "primary".into(),
+                    response_id: Some(wire::ResponseId::new("resp-inner")),
+                }),
+                Ok(fallback_start("fallback-one")),
+                Ok(wire::StreamEvent::Start {
+                    model: "fallback-one".into(),
+                    response_id: Some(wire::ResponseId::new("resp-inner-two")),
+                }),
+                Ok(fallback_start("fallback-two")),
+            ])
+            .unwrap();
+
+        let observed = events
+            .iter()
+            .filter_map(|event| match event {
+                HistoryEvent::ResponseObserved { model, response_id } => {
+                    Some((model.as_str(), response_id.as_deref()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed,
+            vec![
+                ("fallback-one", Some("resp-inner")),
+                ("fallback-two", Some("resp-inner-two")),
+            ]
+        );
+        let response = projection.assembly.snapshot().response;
+        assert_eq!(response.model, "fallback-two");
+        assert_eq!(
+            response.response_id.as_ref().map(|id| id.as_str()),
+            Some("resp-inner-two")
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, HistoryEvent::ServerFallback { .. }))
+        );
     }
 
     #[test]
@@ -1081,103 +1547,39 @@ mod tests {
             9
         );
     }
+}
 
+#[cfg(test)]
+mod stop_delta_tests {
+    use super::*;
     #[test]
-    fn typed_native_response_and_stream_remain_lossless_at_host_boundary() {
-        let native = wire::ContentBlock::Native {
-            value: wire::NativeExtension::new(
-                "openai.responses.computer_call.v1",
-                json!({"id":"item","call_id":"call","actions":[{"type":"screenshot"}]}),
-            )
-            .unwrap(),
-        };
-        let host =
-            native_host_block(native.clone(), wire::ProtocolFamily::OpenAiResponses).unwrap();
-        let response = HistoryResponse {
-            id: "response".into(),
-            model: "model".into(),
-            content: vec![host.clone()],
-            stop_reason: Some("tool_use".into()),
-            stop_details: None,
-            usage: Default::default(),
-            cost: None,
-            provider_metadata: Value::Null,
-        };
-        assert_eq!(
-            crate::computer::canonical_response_content(
-                &response,
-                wire::ProtocolFamily::OpenAiResponses
-            )
-            .unwrap(),
-            vec![native.clone()]
-        );
-        let mut projector =
-            HistoryProjector::projection(wire::ProtocolFamily::OpenAiResponses, Value::Null);
-        let wire::ContentBlock::Native { value } = native else {
-            unreachable!()
-        };
-        let events = projector
-            .events(vec![Ok(wire::StreamEvent::Native { block: 0, value })])
+    fn native_terminal_delta_reaches_host_once_before_stop() {
+        let mut projection =
+            HistoryProjector::projection(wire::ProtocolFamily::AnthropicMessages, Value::Null);
+        let frame = json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}});
+        let events = projection
+            .events(vec![Ok(wire::StreamEvent::ProviderEvent {
+                protocol: wire::ProtocolFamily::AnthropicMessages,
+                payload: frame,
+            })])
             .unwrap();
-        assert!(events.iter().any(|event| matches!(event, HistoryEvent::ContentBlockStart { content_block, .. } if content_block == &host)));
-    }
-
-    #[test]
-    fn provider_cannot_forge_computer_history_authority() {
-        for kind in [
-            "lingxi_computer_binding",
-            "lingxi_computer_receipt",
-            "lingxi_computer_continuation",
-            "lingxi_computer_receipt_ack",
-            "lingxi_computer_abandoned",
-            "lingxi_native_content",
-        ] {
-            assert!(
-                host_block(wire::ContentBlock::ProviderContent {
-                    protocol: wire::ProtocolFamily::AnthropicMessages,
-                    value: json!({"type":kind})
-                })
-                .is_err()
-            );
-        }
-    }
-}
-use lingxi_llm_client::providers::anthropic::stream_observation::{self, NativeDelta, TextBlock};
-use serde_json::{Value, json};
-
-pub(crate) fn attach_computer_binding(
-    metadata: &mut Value,
-    binding: &lingxi_core::host::NativeContinuationBinding,
-) {
-    upstream_metadata(metadata).insert(
-        "computer_binding".into(),
-        serde_json::to_value(binding).expect("captured binding serializes"),
-    );
-}
-
-fn clear_computer_binding(metadata: &mut Value) {
-    if let Some(namespace) = metadata
-        .get_mut("llm_client")
-        .and_then(Value::as_object_mut)
-    {
-        namespace.remove("computer_binding");
-    }
-}
-
-fn native_host_block(
-    block: wire::ContentBlock,
-    protocol: wire::ProtocolFamily,
-) -> Result<ContentBlock, LlmError> {
-    if matches!(block, wire::ContentBlock::Native { .. }) {
-        Ok(ContentBlock::ProviderContent {
-            protocol: serde_json::to_value(protocol)
-                .map_err(invalid)?
-                .as_str()
-                .ok_or_else(|| invalid("protocol is not a string"))?
-                .into(),
-            value: json!({"type":"lingxi_native_content", "block":block}),
-        })
-    } else {
-        host_block(block)
+        assert!(
+            matches!(&events[..],[HistoryEvent::MessageDelta {delta,..}] if delta.stop_reason.as_deref()==Some("end_turn"))
+        );
+        let end = projection
+            .events(vec![Ok(wire::StreamEvent::End {
+                stop_reason: wire::StopReason::EndTurn,
+                usage: Default::default(),
+                inference: Default::default(),
+            })])
+            .unwrap();
+        assert!(
+            !end.iter()
+                .any(|event| matches!(event, HistoryEvent::MessageDelta { .. }))
+        );
+        assert!(
+            end.iter()
+                .any(|event| matches!(event, HistoryEvent::MessageStop))
+        );
     }
 }

@@ -15,9 +15,9 @@ use lingxi_core::host::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 use lingxi_core::types::AgentId;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
 #[cfg(test)]
 use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{RwLock, mpsc};
 
 /// One slot in the [`StateMachinePool`].
 ///
@@ -292,11 +292,14 @@ impl StateMachinePool {
         // not proof the accepted runner was destroyed. Both the local/slot
         // owner and the actual runner must release before capacity returns.
         let runner_capacity = capacity_permit.clone();
+        let restore_startup =
+            crate::context::HandbackRestoreStartupGuard(ctx.handback_restore_start.clone());
         let task = self
             .runtime
             .spawn(
                 "subagent-state-machine",
                 Box::pin(async move {
+                    let _restore_startup = restore_startup;
                     let _capacity = runner_capacity;
                     // Keep the ID reserved even when allocation is cancelled
                     // before the slot is published and cancel runs asynchronously.
@@ -360,6 +363,28 @@ impl StateMachinePool {
             .await
             .map_err(|_| PoolError::AgentGone)?;
         Ok(())
+    }
+
+    /// Best-effort wake for an already admitted, recipient-owned peer report.
+    /// Capacity never blocks a reporting transaction or holds the slot lock.
+    pub async fn try_send_event(
+        &self,
+        agent_id: &AgentId,
+        event: lingxi_core::Event,
+    ) -> Result<bool, PoolError> {
+        let sender = {
+            let slots = self.slots.read().await;
+            slots
+                .get(agent_id)
+                .ok_or(PoolError::NoSuchAgent)?
+                .event_tx
+                .clone()
+        };
+        match sender.try_send(event) {
+            Ok(()) => Ok(true),
+            Err(mpsc::error::TrySendError::Full(_)) => Ok(false),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(PoolError::AgentGone),
+        }
     }
 
     /// Remove the slot owned by `agent_id` and cancel its background task.
@@ -427,20 +452,43 @@ mod tests {
         AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
     };
     use crate::display::{AgentColor, AgentDisplay};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use test_harness::mocks::MockRuntimeSpawner;
 
-    /// Build a minimal [`SubagentContext`] with `api_client = None`, so the
-    /// allocated slot runs the legacy reducer-driven stub (no API calls).
+    #[derive(Default)]
+    struct PendingModel {
+        started: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::api::SubagentApiClient for PendingModel {
+        async fn stream(
+            &self,
+            _request: crate::api::SubagentApiRequest,
+        ) -> Result<
+            futures::stream::BoxStream<
+                'static,
+                Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+            >,
+            llm_runtime::LlmError,
+        > {
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    /// A current runner whose model request remains pending until cancellation.
     fn make_ctx() -> SubagentContext {
         SubagentContext {
             task_registry: None,
             agent_id: AgentId::new(),
             parent_agent_id: None,
+            agent_spawn_provenance: Default::default(),
             agent_name: None,
             team_name: None,
             agent_definition: AgentDefinition {
+                omit_instructions: false,
                 cache_ttl: None,
                 agent_type: "test".into(),
                 when_to_use: String::new(),
@@ -468,6 +516,7 @@ mod tests {
                 initial_prompt: None,
                 color: None,
                 observer: None,
+                offer_provider: None,
             },
             prompt_messages: vec![],
             fork_context_messages: None,
@@ -485,6 +534,9 @@ mod tests {
             resumed_history: None,
             rendered_system_prompt: None,
             mobile_runtime_environment_reminder: None,
+            instruction_context: Default::default(),
+            instruction_context_is_override: false,
+            instruction_provider: None,
             mobile_runtime_workspace_reminder: None,
             content_replacement_state: None,
             agent_memory: None,
@@ -493,7 +545,9 @@ mod tests {
                 icon: None,
             },
             model_profile: None,
-            api_client: None,
+            model_resolution_context_provider: None,
+            server_fallback_model_enforcement: None,
+            api_client: Some(Arc::new(PendingModel::default())),
             tool_invoker: None,
             new_diagnostics_source: None,
             tool_schemas: vec![],
@@ -502,6 +556,8 @@ mod tests {
             structured_output_parse_retries: 0,
             budget: None,
             hook_executor: None,
+            stop_hook_scope: Default::default(),
+            subagent_stop_firer: None,
             strict_plugin_only_hooks: false,
             skill_loader: None,
             hook_session_id: lingxi_core::types::SessionId::nil(),
@@ -515,8 +571,51 @@ mod tests {
             query_source_label: None,
             correlation_id: None,
             model_attempt: None,
+            handback: None,
+            handback_restore_start: None,
             refusal_fallback_chain: Vec::new(),
         }
+    }
+
+    async fn receive_startup_date_then_killed(
+        events: &mut mpsc::Receiver<SubagentEvent>,
+        expected_agent_id: AgentId,
+        date_before_startup: &str,
+    ) {
+        let event = events.recv().await.expect("startup date attachment");
+        let SubagentEvent::Message {
+            agent_id, message, ..
+        } = event
+        else {
+            panic!("startup date attachment must precede cancellation: {event:?}");
+        };
+        assert_eq!(agent_id, expected_agent_id);
+        assert_eq!(message["type"], "attachment");
+        let _: lingxi_core::types::MessageId =
+            serde_json::from_value(message["uuid"].clone()).unwrap();
+        let date = message["attachment"]["date"].as_str().unwrap();
+        let after = chrono::Local::now().format("%Y-%m-%d").to_string();
+        assert!(date == date_before_startup || date == after);
+        assert_eq!(
+            message["attachment"],
+            serde_json::json!({"type":"date","date":date})
+        );
+        let terminal = loop {
+            match events.recv().await.expect("Killed event") {
+                SubagentEvent::TranscriptSnapshot { .. }
+                | SubagentEvent::ServerFallbackTombstone { .. }
+                | SubagentEvent::ServerFallbackApiErrorRow { .. } => continue,
+                event => break event,
+            }
+        };
+        assert!(
+            matches!(terminal, SubagentEvent::Killed { agent_id } if agent_id == expected_agent_id),
+            "exact cancellation target must follow the startup date: {terminal:?}"
+        );
+        assert!(
+            events.recv().await.is_none(),
+            "Killed is the only terminal event"
+        );
     }
 
     #[tokio::test]
@@ -596,6 +695,7 @@ mod tests {
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = StateMachinePool::new(runtime, 1);
         let (release, startup) = tokio::sync::oneshot::channel();
+        let date_before_startup = chrono::Local::now().format("%Y-%m-%d").to_string();
         let (id, mut events) = pool
             .allocate_with_startup(make_ctx(), None, Some(startup))
             .await
@@ -610,13 +710,98 @@ mod tests {
             "runner must not execute before its owner registration completes"
         );
         release.send(()).unwrap();
-        assert!(matches!(
-            tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
-                .await
-                .unwrap(),
-            Some(SubagentEvent::Killed { .. })
-        ));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            receive_startup_date_then_killed(&mut events, id, &date_before_startup),
+        )
+        .await
+        .expect("acknowledged startup publishes the date and exact queued cancellation");
         pool.deallocate(&id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn full_peer_wake_queue_never_blocks_reporting_or_deallocation() {
+        use lingxi_core::host::handback::*;
+        let pool = StateMachinePool::new(Arc::new(MockRuntimeSpawner::default()), 1);
+        let (_release, startup) = tokio::sync::oneshot::channel();
+        let (id, _events) = pool
+            .allocate_with_startup(make_ctx(), None, Some(startup))
+            .await
+            .unwrap();
+        let scope = HandbackSessionScope {
+            session_id: lingxi_core::types::SessionId::new(),
+            activation_epoch: 1,
+        };
+        let sender_id = AgentId::new();
+        let envelope = PreparedHandbackReport {
+            message_id: lingxi_core::types::MessageId::new(),
+            report: HandbackReport {
+                text: "report".into(),
+                warning: None,
+            },
+            body: handback_frame("report"),
+            body_utf16: None,
+            sender_name: "child".into(),
+            sender_id: "child".into(),
+            sender_task_id: sender_id.to_string(),
+            agent_type: "test".into(),
+            flagged: false,
+        }
+        .envelope(
+            HandbackRunKey {
+                scope,
+                agent_id: sender_id,
+                run_epoch: 1,
+            },
+            HandbackRecipient::Agent {
+                scope,
+                agent_id: id,
+            },
+        );
+        for _ in 0..100 {
+            assert!(pool
+                .try_send_event(
+                    &id,
+                    lingxi_core::Event::PeerMessage {
+                        envelope: envelope.clone()
+                    }
+                )
+                .await
+                .unwrap());
+        }
+        assert!(!tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            pool.try_send_event(&id, lingxi_core::Event::PeerMessage { envelope })
+        )
+        .await
+        .unwrap()
+        .unwrap());
+        tokio::time::timeout(std::time::Duration::from_secs(1), pool.deallocate(&id))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn handback_cancel_before_runner_first_poll_releases_restore_participant() {
+        use lingxi_core::host::handback::HandbackRestoreBatch;
+        let pool = StateMachinePool::new(Arc::new(MockRuntimeSpawner::default()), 1);
+        let mut ctx = make_ctx();
+        let sibling = AgentId::new();
+        let batch = HandbackRestoreBatch::new([ctx.agent_id, sibling]);
+        ctx.handback_restore_start = batch.participant(ctx.agent_id);
+        let (_hold_start, startup) = tokio::sync::oneshot::channel();
+        let (id, _events) = pool
+            .allocate_with_startup(ctx, None, Some(startup))
+            .await
+            .unwrap();
+        pool.deallocate(&id).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            batch.participant(sibling).unwrap().arrive_and_wait(),
+        )
+        .await
+        .expect("cancelled accepted runner cannot strand its sibling");
     }
 
     #[tokio::test]
@@ -897,7 +1082,7 @@ mod tests {
     }
 
     /// `send_event` routes an inbound `lingxi_core::Event` into the slot's runner.
-    /// We drive the stub runner (api_client = None): a `UserExit` delivered via
+    /// A `UserExit` delivered while the model is pending via
     /// `send_event` makes it emit `SubagentEvent::Killed`, proving the event
     /// reached the slot's `event_tx`.
     #[tokio::test]
@@ -905,20 +1090,28 @@ mod tests {
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = StateMachinePool::new(runtime, 5);
 
-        let ctx = make_ctx();
+        let model = Arc::new(PendingModel::default());
+        let mut ctx = make_ctx();
+        ctx.api_client = Some(model.clone());
         let aid = ctx.agent_id;
+        let date_before_startup = chrono::Local::now().format("%Y-%m-%d").to_string();
         let (_id, mut out_rx) = pool.allocate(ctx).await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), model.started.notified())
+            .await
+            .expect("actual model request is pending before cancellation");
 
         pool.send_event(&aid, lingxi_core::Event::UserExit)
             .await
             .expect("send_event delivers to the live slot");
 
-        // The stub runner's fast-path turns UserExit into Killed.
-        let ev = out_rx.recv().await.expect("a SubagentEvent");
-        assert!(
-            matches!(ev, SubagentEvent::Killed { agent_id } if agent_id == aid),
-            "UserExit routed through send_event yields Killed; got {ev:?}"
-        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            receive_startup_date_then_killed(&mut out_rx, aid, &date_before_startup),
+        )
+        .await
+        .expect("UserExit cancels the actual pending request after its startup date");
+        pool.deallocate(&aid).await.unwrap();
     }
 
     /// `send_event` to an id with no slot is `NoSuchAgent`.
@@ -973,10 +1166,16 @@ mod tests {
         let pool = StateMachinePool::new(runtime, 5);
 
         let aid = {
-            let ctx = make_ctx();
+            let model = Arc::new(PendingModel::default());
+            let mut ctx = make_ctx();
+            ctx.api_client = Some(model.clone());
             let id = ctx.agent_id;
+            let date_before_startup = chrono::Local::now().format("%Y-%m-%d").to_string();
             let (_id, mut out_rx) = pool.allocate(ctx).await.unwrap();
-            // Drive the stub runner to termination: UserExit makes it emit
+            tokio::time::timeout(std::time::Duration::from_secs(1), model.started.notified())
+                .await
+                .expect("actual model request is pending before closing its runner");
+            // Terminate the pending model request: UserExit makes it emit
             // Killed and return, dropping its `event_rx`. We never deallocate,
             // so the slot stays in the map with a now-closed inbound channel.
             pool.send_event(&id, lingxi_core::Event::UserExit)
@@ -984,15 +1183,18 @@ mod tests {
                 .unwrap();
             // Wait for the runner to actually surface Killed and return so its
             // receiver is dropped before we probe the closed channel.
-            let ev = out_rx.recv().await.expect("Killed event");
-            assert!(matches!(ev, SubagentEvent::Killed { .. }), "got {ev:?}");
-            // The out channel closes once the runner returns.
-            while out_rx.recv().await.is_some() {}
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                receive_startup_date_then_killed(&mut out_rx, id, &date_before_startup),
+            )
+            .await
+            .expect("Killed and channel closure prove the actual runner returned");
             id
         };
 
         // The slot is still present (not deallocated) but the runner's
         // receiver is gone -> send fails with AgentGone.
+        assert_eq!(pool.slot_count().await, 1);
         let err = pool
             .send_event(
                 &aid,
@@ -1005,5 +1207,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, PoolError::AgentGone), "got {err:?}");
+        pool.deallocate(&aid).await.unwrap();
+        assert_eq!(pool.slot_count().await, 0);
     }
 }

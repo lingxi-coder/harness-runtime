@@ -2,9 +2,9 @@ use lingxi_core::host::CredentialStoragePolicy;
 use orchestrator::{QUERY_SOURCE_REPL_MAIN_THREAD, QUERY_SOURCE_SDK};
 use permission::gate::PermissionGate;
 #[cfg(windows)]
-use platform_windows::process::supervisor as shell_supervisor;
-#[cfg(windows)]
 use platform_windows::WindowsMcpTransport;
+#[cfg(windows)]
+use platform_windows::process::supervisor as shell_supervisor;
 use std::sync::Arc;
 
 use super::{DesktopAudio, RecentModelRef};
@@ -154,16 +154,21 @@ pub fn model_deprecation_warning(model_id: Option<&str>) -> Option<String> {
 /// full `build()` entrypoint into the composition root.
 #[derive(Clone, Debug)]
 pub struct DesktopEngineConfig {
-    /// Model id the desktop build defaults to when argv omits `--model`.
+    /// Model reference the desktop build defaults to when argv omits `--model`.
     pub default_model: String,
 }
 
 impl Default for DesktopEngineConfig {
     fn default() -> Self {
         Self {
-            // 2.1.198: Sonnet 5 is the default first-party model (alias table
-            // sonnet.default = "claude-sonnet-5").
-            default_model: "claude-sonnet-5".to_string(),
+            // The catalog owns both parts of its automatic boot selection.
+            // Shared model ids on other providers must not make that declared
+            // default ambiguous; explicit user choices keep their own routing.
+            default_model: lingxi_core::host::qualified_model_ref(
+                lingxi_core::host::provider_default_model("anthropic")
+                    .expect("the catalog defines the Anthropic boot default"),
+                Some("anthropic"),
+            ),
         }
     }
 }
@@ -217,7 +222,7 @@ impl Default for DesktopEngineConfig {
 ///     anthropic_key_fd_present: false,
 ///     cwd: PathBuf::from("/tmp/project"),
 ///     lingxi_home: PathBuf::from("/tmp/home/.lingxi"),
-///     default_model: "claude-sonnet-5".to_string(),
+///     default_model: harness_runtime::desktop::DesktopEngineConfig::default().default_model,
 ///     default_model_explicit: false,
 ///     recent_models: Vec::new(),
 ///     fallback_model: None,
@@ -282,6 +287,7 @@ impl Default for DesktopEngineConfig {
 ///     ask_user_question_tx: None,
 ///     // `None` ⟶ `request_access` uses the fail-closed DenyAllResolver.
 ///     computer_access_tx: None,
+///     verified_computer_profiles: Vec::new(),
 ///     session_agent_observer: None,
 ///     // `None` ⟶ no device audio: the `voice`/`speech` tools are not
 ///     // registered at all (see `register_desktop_tools`).
@@ -295,6 +301,10 @@ impl Default for DesktopEngineConfig {
 /// ```
 #[derive(Clone)]
 pub struct DesktopConfig {
+    /// Explicit host identity, independent of the available permission transport.
+    pub composition: Option<DesktopSessionComposition>,
+    /// Restore the mounted session before the host fires startup lifecycle hooks.
+    pub defer_session_start: bool,
     /// Host package identity used by `/version`.
     pub build_info: command_api::builtins::BuildInfo,
     /// Whether this runtime owns versioned automation dispatch. CLI defaults to
@@ -303,6 +313,8 @@ pub struct DesktopConfig {
     /// Explicit trust decision from the host for this workspace. `None` keeps
     /// CLI trust resolution; `Some(false)` must override any persisted grant.
     pub host_workspace_trusted: Option<bool>,
+    /// The live client surface attached to this session, if one is known.
+    pub mod_render_surface: Option<orchestrator::config::ModRenderSurface>,
     /// API base URL (default `https://api.anthropic.com`); env override
     /// `LINGXI_API_BASE_URL` is resolved by the host *before* it fills this.
     pub api_base: String,
@@ -310,6 +322,9 @@ pub struct DesktopConfig {
     /// successfully and only fails at `run_turn` with a 401, so slash-command
     /// dispatch still works with no key configured.
     pub api_key: String,
+    /// Redacted origin of the explicitly supplied API key. Hosts provide this
+    /// alongside the value rather than inferring it from ambient environment.
+    pub api_key_source: llm_runtime::CredentialSource,
     /// Inherit NO ambient credentials from the machine.
     ///
     /// The native backends are keyed by OS USER, not by [`Self::lingxi_home`],
@@ -362,7 +377,8 @@ pub struct DesktopConfig {
     /// The `~/.claude` root the hook / agents / global-MCP / settings loaders
     /// walk. Explicit so a host can redirect it to a sandbox.
     pub lingxi_home: std::path::PathBuf,
-    /// Model id the build defaults to (`OrchestratorConfig.model`).
+    /// Initial model reference; a `profile/model` qualifier is resolved before
+    /// the provider-local id is passed to `OrchestratorConfig.model`.
     pub default_model: String,
     /// `true` when [`Self::default_model`] is an EXPLICIT per-session choice
     /// (`--model` flag) rather than the built-in default or the persisted
@@ -538,6 +554,10 @@ pub struct DesktopConfig {
     /// loader (which share the registry `Arc`) observe zero commands/skills.
     /// `false` (the default) keeps the full command set.
     pub disable_slash_commands: bool,
+    /// Optional host-owned names the model may load through `Skill`. `None`
+    /// offers all eligible skills; an empty list offers none. Also inherited by
+    /// subagents through the shared session command catalog.
+    pub session_skill_allowlist: Option<Vec<String>>,
     /// CLI `--add-dir <directories...>` (claude-code "Additional directories to
     /// allow tool access to"). Unioned into the permission policy's
     /// working-directory set exactly like a settings-tier
@@ -576,7 +596,7 @@ pub struct DesktopConfig {
     /// additionalDirectories): skip the user tier when `!include_user`, skip the
     /// project + local tiers when `!include_project`. This mirrors the
     /// `Settings::load_scoped` gating the CLI already applies to provider /
-    /// routing / claudeMdExcludes loaders, so `--setting-sources project` no
+    /// routing / lingxiMdExcludes loaders, so `--setting-sources project` no
     /// longer loads user-level hooks or permission rules. `(true, true)` (the
     /// default, also the absent-flag case) ⟶ all tiers load, byte-identical to
     /// before this field.
@@ -700,6 +720,9 @@ pub struct DesktopConfig {
     /// `request_access` on the fail-closed `DenyAllResolver` default.
     pub computer_access_tx:
         Option<tokio::sync::mpsc::Sender<permission::computer_access::ComputerAccessExchange>>,
+    /// Native Computer profiles accepted against a real provider and desktop.
+    /// The host supplies evidence; an empty list uses the ordinary `computer` tool.
+    pub verified_computer_profiles: Vec<orchestrator::native_computer::VerifiedComputerProfile>,
     /// Optional connection-scoped observer for real subagent lifecycle and
     /// message events. The bridge supplies this after it creates its outbound
     /// event sink; CLI/TUI hosts leave it unset so their behavior is unchanged.
@@ -884,12 +907,15 @@ impl std::fmt::Debug for DesktopConfig {
         // only as presence/count markers so `{cfg:?}` remains safe for host
         // diagnostics. Trait objects use the same presence-only convention.
         f.debug_struct("DesktopConfig")
+            .field("composition", &self.composition)
+            .field("defer_session_start", &self.defer_session_start)
             .field("build_info", &self.build_info)
             .field(
                 "enable_automation_scheduler",
                 &self.enable_automation_scheduler,
             )
             .field("host_workspace_trusted", &self.host_workspace_trusted)
+            .field("mod_render_surface", &self.mod_render_surface)
             .field(
                 "api_base",
                 &if self.api_base.is_empty() {
@@ -993,6 +1019,7 @@ impl std::fmt::Debug for DesktopConfig {
                 "computer_access_tx",
                 &self.computer_access_tx.as_ref().map(|_| "<configured>"),
             )
+            .field("verified_computer_profiles", &self.verified_computer_profiles)
             .field(
                 "session_agent_observer",
                 &self.session_agent_observer.as_ref().map(|_| "<configured>"),
@@ -1038,9 +1065,13 @@ impl Default for DesktopConfig {
         Self {
             build_info: command_api::builtins::BuildInfo::default(),
             enable_automation_scheduler: true,
+            composition: None,
+            defer_session_start: false,
             host_workspace_trusted: None,
+            mod_render_surface: None,
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
+            api_key_source: llm_runtime::CredentialSource::Configured,
             // Production reads the real keychain; only isolated hosts opt out.
             isolated_credential_storage: false,
             credential_storage_policy: CredentialStoragePolicy::NativePreferred,
@@ -1085,6 +1116,7 @@ impl Default for DesktopConfig {
             session_writer_lease: None,
             parent_session_id: None,
             disable_slash_commands: false,
+            session_skill_allowlist: None,
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
             // Default: no `--strict-mcp-config` (ambient MCP configs load).
@@ -1116,6 +1148,7 @@ impl Default for DesktopConfig {
             bg_session_forker: None,
             ask_user_question_tx: None,
             computer_access_tx: None,
+            verified_computer_profiles: Vec::new(),
             session_agent_observer: None,
             // Default: no device audio ⟶ the `voice`/`speech` tools are not
             // registered (only the bridge composition root wires an AudioBridge).
@@ -1134,6 +1167,9 @@ impl DesktopConfig {
     /// needing non-interactive session semantics.
     #[must_use]
     pub fn session_composition(&self) -> DesktopSessionComposition {
+        if let Some(composition) = self.composition {
+            return composition;
+        }
         if !self.use_noop_permission_gate {
             return DesktopSessionComposition::Transport;
         }

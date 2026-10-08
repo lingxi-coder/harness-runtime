@@ -114,29 +114,64 @@ pub fn managed_settings_dir() -> PathBuf {
 /// (and flag, if any) tiers so policy wins.
 #[must_use]
 pub async fn managed_settings_raw_tiers() -> Vec<String> {
-    let managed = managed_settings_dir();
-    let mut out = Vec::new();
-    if let Ok(raw) = tokio::fs::read_to_string(managed.join("managed-settings.json")).await {
-        out.push(raw);
+    read_managed_settings_snapshot(&managed_settings_dir())
+        .await
+        .raw_tiers
+}
+
+/// The model-policy gate also needs failures that a best-effort settings
+/// consumer can skip. Missing files/directories remain an absent policy.
+#[derive(Debug, Default)]
+pub(super) struct ManagedSettingsSnapshot {
+    pub raw_tiers: Vec<String>,
+    pub read_failed: bool,
+}
+
+pub(super) async fn managed_settings_snapshot() -> ManagedSettingsSnapshot {
+    read_managed_settings_snapshot(&managed_settings_dir()).await
+}
+
+pub(super) async fn read_managed_settings_snapshot(managed: &Path) -> ManagedSettingsSnapshot {
+    use std::io::ErrorKind;
+    let absent = |error: &std::io::Error| {
+        matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory)
+    };
+    let mut snapshot = ManagedSettingsSnapshot::default();
+    match tokio::fs::read_to_string(managed.join("managed-settings.json")).await {
+        Ok(raw) => snapshot.raw_tiers.push(raw),
+        Err(error) => snapshot.read_failed |= !absent(&error),
     }
     let drop_in = managed.join("managed-settings.d");
-    if let Ok(mut rd) = tokio::fs::read_dir(&drop_in).await {
-        let mut names: Vec<std::ffi::OsString> = Vec::new();
-        while let Ok(Some(entry)) = rd.next_entry().await {
-            let name = entry.file_name();
-            let n = name.to_string_lossy();
-            if n.ends_with(".json") && !n.starts_with('.') {
-                names.push(name);
+    match tokio::fs::read_dir(&drop_in).await {
+        Ok(mut rd) => {
+            let mut names: Vec<std::ffi::OsString> = Vec::new();
+            loop {
+                match rd.next_entry().await {
+                    Ok(Some(entry)) => {
+                        let name = entry.file_name();
+                        let n = name.to_string_lossy();
+                        if n.ends_with(".json") && !n.starts_with('.') {
+                            names.push(name);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        snapshot.read_failed = true;
+                        break;
+                    }
+                }
+            }
+            names.sort();
+            for name in names {
+                match tokio::fs::read_to_string(drop_in.join(name)).await {
+                    Ok(raw) => snapshot.raw_tiers.push(raw),
+                    Err(error) => snapshot.read_failed |= !absent(&error),
+                }
             }
         }
-        names.sort(); // alphabetical, matching TS `.sort()`
-        for name in names {
-            if let Ok(raw) = tokio::fs::read_to_string(drop_in.join(name)).await {
-                out.push(raw);
-            }
-        }
+        Err(error) => snapshot.read_failed |= !absent(&error),
     }
-    out
+    snapshot
 }
 
 /// Fold the currently loaded managed policy tiers into the one live setting
@@ -556,9 +591,10 @@ mod tests {
         let weak = Arc::downgrade(&owner);
         let guard = BarrierGuard(barrier.clone());
         let task = tokio::spawn(async move {
-            let _owner = owner;
+            let retained_owner = owner;
             let _guard = guard;
             std::future::pending::<()>().await;
+            drop(retained_owner);
         });
         let handle = SettingsWatcherHandle::from_tasks(vec![task]);
         let first_handle = handle.clone();

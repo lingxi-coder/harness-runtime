@@ -48,20 +48,37 @@ pub mod hook_prompt_runner;
 pub mod image_input;
 pub mod loop_permission_classifier;
 pub mod mcp_hook_dispatcher;
+pub mod native_computer;
+pub mod mod_prompt_origin;
+pub mod mod_surface_roster;
+pub mod mod_turn_step;
 pub mod model;
 pub mod prompt;
 pub mod provider_adapter;
 pub use lingxi_core::host::refusal_cascade;
 pub mod turn_span;
 pub use lingxi_core::host::refusal_notice;
+pub(crate) mod autonomous_tool_scheduler;
+#[cfg(test)]
+mod fallback_request_288_tests;
+#[cfg(test)]
+#[path = "../../llm-runtime/tests/common/thinking_display_fixture.rs"]
+mod messages_288_fixture;
+mod query_model;
+#[cfg(test)]
+mod refusal_resume_288_tests;
 pub mod resume;
 mod scheduled_turn;
 pub(crate) mod schema_validation;
+mod server_fallback;
+#[cfg(test)]
+mod server_fallback_288_tests;
 pub mod sse;
 pub mod stop_hook_snapshot;
 pub(crate) mod streaming_executor;
 pub mod streaming_loop;
 pub mod structured_output;
+mod subagent_stop_hook_firer;
 pub mod task_completed_firer;
 pub mod task_created_firer;
 pub mod task_lifecycle_hook_firer;
@@ -70,6 +87,7 @@ pub mod teammate_idle_firer;
 pub mod todo_reminder_tasks_provider;
 pub mod token_budget;
 pub mod tool_result_persistence;
+mod tool_result_text;
 pub mod transcript_paths;
 pub mod turn_loop;
 mod vision_model_call;
@@ -93,8 +111,9 @@ pub use config::{
     QUERY_SOURCE_SDK,
 };
 pub use conversation::{
-    AppAgentPromptProfile, ConversationOrchestrator, ConversationOutcome, OrchestratorApiClient,
-    SessionMemoryHandle, StreamingApiClient, TurnOutcome,
+    AppAgentPromptProfile, ConversationOrchestrator, ConversationOutcome, HookPromptRequest,
+    OrchestratorApiClient, OrchestratorApiRequest, SessionMemoryHandle, StreamingApiClient,
+    TurnOutcome,
 };
 pub use conversation::{QueuedPromptInput, ScheduledLoopFire};
 pub use cwd_changed_firer::OrchestratorCwdChangedFirer;
@@ -122,5 +141,3 @@ pub use task_lifecycle_hook_firer::OrchestratorTaskLifecycleHookFirer;
 pub use task_notifications_provider::RegistryTaskNotifications;
 pub use teammate_idle_firer::OrchestratorTeammateIdleFirer;
 pub use todo_reminder_tasks_provider::TodoStoreReminderTasks;
-pub mod native_computer;
-mod subagent_stop_hook_firer;

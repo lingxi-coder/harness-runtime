@@ -149,7 +149,7 @@ fn orch_with_tools(names: &[&'static str]) -> ConversationOrchestrator {
 /// The set of `name` fields the wire tool array advertises.
 async fn wire_tool_names(orch: &ConversationOrchestrator) -> Vec<String> {
     orch.build_wire_tools()
-        .await
+        .await.0
         .into_iter()
         .filter_map(|t| {
             t.get("name")
@@ -252,6 +252,8 @@ async fn large_memory_warnings_are_recomputed_from_the_live_memory_set() {
     // against the floor would have made this pass for the wrong reason.
     let big = "x".repeat(250_000);
     let file = crate::prompt::MemoryFile {
+        parent: None,
+        source_content: None,
         path: std::path::PathBuf::from("/work/repo/LINGXI.md"),
         body: big,
         is_local_override: false,
@@ -492,14 +494,14 @@ async fn lifecycle_hook_ctx_uses_trimmed_last_assistant_text() {
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![
                     lingxi_core::types::ContentBlock::Text {
-                        text: " first line ".to_string(),
+                        text: " first line ".to_string(), citations: None,
                     },
                     lingxi_core::types::ContentBlock::Thinking {
                         thinking: "hidden".to_string(),
                         signature: None,
                     },
                     lingxi_core::types::ContentBlock::Text {
-                        text: "second line ".to_string(),
+                        text: "second line ".to_string(), citations: None,
                     },
                 ],
                 stop_reason: Some("end_turn".to_string()),
@@ -531,7 +533,7 @@ async fn lifecycle_hook_ctx_uses_trimmed_last_assistant_text() {
         .push(lingxi_core::types::ConversationMessage::Assistant {
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
-                text: "   ".to_string(),
+                text: "   ".to_string(), citations: None,
             }],
             stop_reason: Some("end_turn".to_string()),
         });
@@ -645,15 +647,15 @@ async fn mobile_runtime_reminder_is_stable_across_agent_tool_filters() {
     assert!(!after.contains("available to this agent"));
 }
 
-/// A resolved `--agent` model (`Some(resolved_id)`) replaces the session
+/// A resolved `--agent` model and profile replace the session route
 /// model (claude `jb(Zo(y.model))`); the caller has already gated it on
-/// `!userSpecifiedModel` and resolved the alias to a wire id. The profile is
-/// cleared (agent frontmatter carries a bare id).
+/// `!userSpecifiedModel` and resolved the alias against the selected profile.
 #[tokio::test]
 async fn main_thread_agent_model_override_replaces_session_model() {
     let mut config = OrchestratorConfig::default();
     config.model = "base-model".to_string();
     let orch = orch_with_config(config);
+    orch.session().lock().await.model_profile = Some("previous-profile".into());
     assert_eq!(orch.session().lock().await.model, "base-model");
 
     orch.set_main_thread_agent(
@@ -661,13 +663,287 @@ async fn main_thread_agent_model_override_replaces_session_model() {
         None,
         keep_all_tools(),
         Vec::new(),
-        Some("claude-agent-model".to_string()),
+        Some((
+            "claude-agent-model".to_string(),
+            Some("selected-profile".into()),
+        )),
     )
     .await;
     let session = orch.session();
     let s = session.lock().await;
     assert_eq!(s.model, "claude-agent-model");
-    assert_eq!(s.model_profile, None);
+    assert_eq!(s.model_profile.as_deref(), Some("selected-profile"));
+}
+
+#[tokio::test]
+async fn main_thread_agent_model_override_distinguishes_empty_and_missing_profile() {
+    for selected_profile in [Some(String::new()), None] {
+        let mut config = OrchestratorConfig::default();
+        config.model = "shared-wire-id".into();
+        let orch = orch_with_config(config);
+        orch.session().lock().await.model_profile = Some("previous-profile".into());
+        orch.set_main_thread_agent(
+            "selected-agent".into(),
+            None,
+            keep_all_tools(),
+            Vec::new(),
+            Some(("shared-wire-id".into(), selected_profile.clone())),
+        )
+        .await;
+        let session = orch.session();
+        let session = session.lock().await;
+        assert_eq!(session.model, "shared-wire-id");
+        assert_eq!(session.model_profile, selected_profile);
+    }
+}
+
+fn resumed_agent_with_model(model: agent::AgentModel) -> agent::AgentDefinition {
+    agent::AgentDefinition {
+        agent_type: "resumed-agent".into(),
+        when_to_use: "resume fixture".into(),
+        tools: keep_all_tools(),
+        max_turns: 4,
+        model,
+        permission_mode: agent::AgentPermissionMode::Default,
+        source: agent::AgentSource::Flag,
+        offer_provider: None,
+        base_dir: PathBuf::from("/work/repo"),
+        system_prompt: Some("resumed prompt".into()),
+        mcp_servers: Vec::new(),
+        frontmatter_hooks: Vec::new(),
+        icon: None,
+        allowed_tools: Vec::new(),
+        worktree_requirement: None,
+        disallowed_tools: Vec::new(),
+        skills: Vec::new(),
+        required_mcp_servers: Vec::new(),
+        background: false,
+        omit_instructions: false,
+        isolation: None,
+        memory: None,
+        effort: None,
+        initial_prompt: None,
+        color: None,
+        observer: None,
+        cache_ttl: None,
+    }
+}
+
+#[tokio::test]
+async fn resumed_concrete_agent_model_recovers_a_retired_saved_model() {
+    use agent::model_resolution::{ModelResolutionContext, ModelResolutionError, ModelRouteFacts};
+
+    for (spec, expected_profile) in [
+        ("current-model", "profile-a"),
+        ("profile-b/current-model", "profile-b"),
+    ] {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = calls.clone();
+        let orch = orch_with_config(OrchestratorConfig {
+            model: "live-model".into(),
+            apply_resumed_agent_model: true,
+            ..Default::default()
+        })
+        .with_model_resolution_context_provider(Arc::new(
+            move |model: &str, profile: Option<&str>| {
+                captured
+                    .lock()
+                    .unwrap()
+                    .push((model.to_owned(), profile.map(str::to_owned)));
+                let unavailable = || ModelResolutionError::RouteUnavailable {
+                    model: model.to_owned(),
+                    profile: profile.map(str::to_owned),
+                    reason: "model is unavailable on this profile".into(),
+                };
+                let (model, profile) = match (model, profile) {
+                    ("live-model", _) => ("live-model", "live-profile"),
+                    ("current-model", Some(profile @ ("profile-a" | "profile-b"))) => {
+                        ("current-model", profile)
+                    }
+                    ("profile-b/current-model", None | Some("profile-b")) => {
+                        ("current-model", "profile-b")
+                    }
+                    _ => return Err(unavailable()),
+                };
+                Ok(ModelResolutionContext {
+                    route: ModelRouteFacts {
+                        model: model.to_owned(),
+                        profile: Some(profile.to_owned()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+            },
+        ));
+        orch.session.lock().await.model_profile = Some("live-profile".into());
+        calls.lock().unwrap().clear();
+        let definition = resumed_agent_with_model(agent::AgentModel::Explicit(spec.into()));
+        let resumed_session = lingxi_core::types::SessionId::new();
+
+        lingxi_core::host::OrchestratorHandle::resume_session(
+            &orch,
+            resumed_session,
+            Vec::new(),
+            None,
+            None,
+            lingxi_core::host::ResumeRuntimeSnapshot {
+                model: "retired-model".into(),
+                model_profile: Some("profile-a".into()),
+                main_thread_agent_type: Some(definition.agent_type.clone()),
+                main_thread_agent_definition: Some(serde_json::to_value(definition).unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("the agent's configured model can replace the retired saved model");
+
+        let session = orch.session.lock().await;
+        assert_eq!(session.session_id, resumed_session);
+        assert_eq!(session.model, "current-model");
+        assert_eq!(session.model_profile.as_deref(), Some(expected_profile));
+        assert_eq!(
+            orch.tools.main_loop_model().as_deref(),
+            Some("current-model")
+        );
+        assert!(calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(model, _)| model != "retired-model"));
+    }
+}
+
+#[tokio::test]
+async fn resumed_relative_agent_alias_uses_the_saved_profiles_catalog() {
+    use agent::model_resolution::{
+        FamilyModelDefaults, ModelProviderKind, ModelResolutionContext, ModelResolutionError,
+        ModelRouteFacts,
+    };
+
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = calls.clone();
+    let orch = orch_with_config(OrchestratorConfig {
+        model: "live-model".into(),
+        apply_resumed_agent_model: true,
+        ..Default::default()
+    })
+    .with_model_resolution_context_provider(Arc::new(
+        move |model: &str, profile: Option<&str>| {
+            captured
+                .lock()
+                .unwrap()
+                .push((model.to_owned(), profile.map(str::to_owned)));
+            let (model, profile) = match (model, profile) {
+                ("live-model", _) => ("live-model", "profile-b"),
+                ("sonnet", Some("profile-a")) => ("sonnet", "profile-a"),
+                ("profile-a-sonnet", Some("profile-a")) => ("profile-a-sonnet", "profile-a"),
+                _ => {
+                    return Err(ModelResolutionError::RouteUnavailable {
+                        model: model.to_owned(),
+                        profile: profile.map(str::to_owned),
+                        reason: "model is unavailable on this profile".into(),
+                    });
+                }
+            };
+            Ok(ModelResolutionContext {
+                route: ModelRouteFacts {
+                    model: model.to_owned(),
+                    profile: Some(profile.to_owned()),
+                    provider: Some(ModelProviderKind::Other),
+                    ..Default::default()
+                },
+                family_defaults: FamilyModelDefaults {
+                    sonnet: Some(format!("{profile}-sonnet")),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        },
+    ));
+    orch.session.lock().await.model_profile = Some("profile-b".into());
+    calls.lock().unwrap().clear();
+    let definition = resumed_agent_with_model(agent::AgentModel::Alias("sonnet".into()));
+
+    lingxi_core::host::OrchestratorHandle::resume_session(
+        &orch,
+        lingxi_core::types::SessionId::new(),
+        Vec::new(),
+        None,
+        None,
+        lingxi_core::host::ResumeRuntimeSnapshot {
+            model: "retired-model".into(),
+            model_profile: Some("profile-a".into()),
+            main_thread_agent_type: Some(definition.agent_type.clone()),
+            main_thread_agent_definition: Some(serde_json::to_value(definition).unwrap()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("a relative alias resolves from the resumed profile without the retired model");
+
+    let session = orch.session.lock().await;
+    assert_eq!(session.model, "profile-a-sonnet");
+    assert_eq!(session.model_profile.as_deref(), Some("profile-a"));
+    assert_eq!(
+        orch.tools.main_loop_model().as_deref(),
+        Some("profile-a-sonnet")
+    );
+    let calls = calls.lock().unwrap();
+    assert!(calls.contains(&("sonnet".into(), Some("profile-a".into()))));
+    assert!(calls
+        .iter()
+        .all(|(model, profile)| model != "sonnet" || profile.as_deref() == Some("profile-a")));
+    assert!(calls.iter().all(|(model, _)| model != "retired-model"));
+}
+
+#[tokio::test]
+async fn initial_model_gate_refreshes_with_route_authority_before_wire_tool_assembly() {
+    let mut config = OrchestratorConfig::default();
+    config.model = "opus".into();
+    let calls = Arc::new(std::sync::Mutex::new(Vec::<Option<String>>::new()));
+    let captured = calls.clone();
+    let orch = orch_with_config(config).with_model_resolution_context_provider(Arc::new(
+        move |model: &str, profile: Option<&str>| {
+            captured.lock().unwrap().push(profile.map(str::to_owned));
+            Ok(agent::model_resolution::ModelResolutionContext {
+                route: agent::model_resolution::ModelRouteFacts {
+                    model: model.to_owned(),
+                    profile: profile.map(str::to_owned),
+                    ..Default::default()
+                },
+                family_defaults: agent::model_resolution::FamilyModelDefaults {
+                    opus: Some(format!("wire-opus-{}", profile.unwrap_or("unqualified"))),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        },
+    ));
+    assert_eq!(
+        orch.tools.main_loop_model().as_deref(),
+        Some("wire-opus-unqualified")
+    );
+    for profile in ["provider-a", "provider-b", ""] {
+        orch.seed_initial_model_profile("opus", profile).await;
+        assert_eq!(
+            orch.tools.main_loop_model(),
+            Some(format!("wire-opus-{profile}")),
+            "the reminder gate must see the seeded route before tools are assembled"
+        );
+        assert_eq!(
+            orch.session.lock().await.model_profile.as_deref(),
+            Some(profile)
+        );
+    }
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![
+            None,
+            Some("provider-a".into()),
+            Some("provider-b".into()),
+            Some(String::new())
+        ]
+    );
 }
 
 /// `model_override == None` (agent `model: inherit`, or the user passed

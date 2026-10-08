@@ -1,0 +1,1117 @@
+{
+  "version": "2.1.287",
+  "native_sha256": "6eab8333fe2121553100d8f40bfada384a3e989b94f947e18ba6677a6fcb41ea",
+  "helper_runtime": "Bun 1.3.11",
+  "sourceByteRanges": [
+    {
+      "start": 184844122,
+      "end": 184872169,
+      "startMarker": "function Lw()",
+      "endMarker": "class _d{",
+      "sha256": "3adcda7282def0e175da80e78b8df5999acd4dab6de9d19364347bff76174353"
+    },
+    {
+      "start": 181980903,
+      "end": 181980962,
+      "startMarker": "function Ww(",
+      "endMarker": "function jE(",
+      "sha256": "d3e9ef9467bfae46f07d9d9902ef5ab3fe765254dccf1ac6eea35821ab49db65"
+    },
+    {
+      "start": 181983661,
+      "end": 181984246,
+      "startMarker": "function DH(",
+      "endMarker": "function z(",
+      "sha256": "0fdf8553632c259791a4708c1b4f7e1af186930238a22ab05bb584ec85c1c125"
+    },
+    {
+      "start": 181985170,
+      "end": 181986914,
+      "startMarker": "var gQ=",
+      "endMarker": "function dht(",
+      "sha256": "122e2f3cea5b79c323ecd75e3f39183845251c76372a4ba2a7fde501263c6727"
+    },
+    {
+      "start": 181986914,
+      "end": 181987891,
+      "startMarker": "function dht(",
+      "endMarker": "function oXn(",
+      "sha256": "195a2861cbeee39fa87e9419a6da6bdeb50a8d9c7299911d45929874fbfa64c0"
+    },
+    {
+      "start": 186421808,
+      "end": 186422615,
+      "startMarker": "var h0n=",
+      "endMarker": "function zI(",
+      "sha256": "beb40709f5bc065070d914d2d52e9ffd5507372cb2264f75c6402c8f64c3f66d"
+    },
+    {
+      "start": 186422648,
+      "end": 186423389,
+      "startMarker": "function y0n(",
+      "endMarker": "function xTo(",
+      "sha256": "f0201c942f59827a8b19a3eef7bf6e8fd256a0ae395ac6db2d7015b60ee6c698"
+    },
+    {
+      "start": 186413531,
+      "end": 186413791,
+      "startMarker": "function cEe(",
+      "endMarker": "var dat=",
+      "sha256": "4524bf2d67fa60130b1166899cb2653e323c93a2bc53ffd96d79549570d10c44"
+    },
+    {
+      "start": 186425510,
+      "end": 186426282,
+      "startMarker": "function v0n(",
+      "endMarker": "var T0n=",
+      "sha256": "1e0951ddd29276ba33c7a66392a3894e5719df3735041142f4a196dff75a0a41"
+    },
+    {
+      "start": 186427462,
+      "end": 186428198,
+      "startMarker": "function _at(",
+      "endMarker": "async function $Ne(",
+      "sha256": "7901b1d80f79f508f567cc4c87d29f3216524ae1ad29be2e4549ded1669badf3"
+    },
+    {
+      "start": 186428198,
+      "end": 186430351,
+      "startMarker": "async function $Ne(",
+      "endMarker": "function C0n(",
+      "sha256": "c250db75c660f3a8dc481252473b36372d3d3a939e2195d4fc39f1ce9e11b86d"
+    },
+    {
+      "start": 186424883,
+      "end": 186425510,
+      "startMarker": "async function mat(",
+      "endMarker": "function v0n(",
+      "sha256": "e1901555d24ba08d5adefdb78280ed5e779152c024e4b68c9e89a0302630e8af"
+    },
+    {
+      "start": 186423928,
+      "end": 186424344,
+      "startMarker": "function b0n(",
+      "endMarker": "async function w0n(",
+      "sha256": "417d575ecee3d08b988c544fced291b6b3f6446c3488617a56b1ca260d471944"
+    },
+    {
+      "start": 186439642,
+      "end": 186439827,
+      "startMarker": "function xJ(",
+      "endMarker": "async function Eat(",
+      "sha256": "630fa38fc130fab2be3a5fce97697810a071d3ac12de69be35166840281683f4"
+    },
+    {
+      "start": 185899449,
+      "end": 185899543,
+      "startMarker": "function iAo(",
+      "endMarker": "function g9e(",
+      "sha256": "9fbbb0eccd763aa1b5baaa25b6b3623c2e352dded42a25cfd017f3624b7a1f4d"
+    },
+    {
+      "start": 186433579,
+      "end": 186437961,
+      "startMarker": "async function M0n(",
+      "endMarker": "function TEe(",
+      "sha256": "86f1b716a6b4b7498b890906c576f5fa2ad935be00aa2d18dbf04bde070c7df4"
+    },
+    {
+      "start": 186437961,
+      "end": 186438177,
+      "startMarker": "function TEe(",
+      "endMarker": "function TA(",
+      "sha256": "1b34c2740bd66aae25ecd01601462ed6869f87bd83c29205ceed912c0e75c9cd"
+    },
+    {
+      "start": 181344126,
+      "end": 181344923,
+      "startMarker": "var ws=",
+      "endMarker": "function Ye(",
+      "sha256": "f52a4276d0a03974b10ec2b934eb7737737fde4f807f22243c8c19ffa3949f94"
+    }
+  ],
+  "scope": "Actual native Hs/DH/Bun.YAML, marked lexer, y0n/uat/g7/$Ne, xJ/L0n/CPe/iAo and complete M0n/TEe/I0n eager producer bodies unchanged. File reads/Dirents, canonical/external policy, settings, cache snapshots, feature state, hook dispatcher and telemetry are controlled. Local Bun helper execution, not the native CLI; quoteLossyValues, AutoMem, virtual-policy hook exclusion and host error/health acceptance are not covered.",
+  "cases": [
+    {
+      "name": "named-whitespace-only",
+      "input": {
+        "name": "named-whitespace-only",
+        "raw": " \t\r\n\n",
+        "origin": "named"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": " \t\r\n\n",
+            "contentDiffersFromDisk": false
+          },
+          "includePaths": []
+        },
+        "acquired": [],
+        "descriptors": [],
+        "rendered": "",
+        "reads": [
+          "/repo/LINGXI.md"
+        ],
+        "reports": [],
+        "contentTruthy": [],
+        "processed": [
+          "/repo/LINGXI.md"
+        ]
+      }
+    },
+    {
+      "name": "named-frontmatter-only",
+      "input": {
+        "name": "named-frontmatter-only",
+        "raw": "---\npaths: src/**\n---\n",
+        "origin": "named"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "",
+            "globs": [
+              "src"
+            ],
+            "contentDiffersFromDisk": true,
+            "rawContent": "---\npaths: src/**\n---\n"
+          },
+          "includePaths": []
+        },
+        "acquired": [],
+        "descriptors": [],
+        "rendered": "",
+        "reads": [
+          "/repo/LINGXI.md"
+        ],
+        "reports": [],
+        "contentTruthy": [],
+        "processed": [
+          "/repo/LINGXI.md"
+        ]
+      }
+    },
+    {
+      "name": "named-frontmatter-whitespace-body",
+      "input": {
+        "name": "named-frontmatter-whitespace-body",
+        "raw": "---\npaths: src/**\n---\n \t\r\n\n",
+        "origin": "named"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "",
+            "globs": [
+              "src"
+            ],
+            "contentDiffersFromDisk": true,
+            "rawContent": "---\npaths: src/**\n---\n \t\r\n\n"
+          },
+          "includePaths": []
+        },
+        "acquired": [],
+        "descriptors": [],
+        "rendered": "",
+        "reads": [
+          "/repo/LINGXI.md"
+        ],
+        "reports": [],
+        "contentTruthy": [],
+        "processed": [
+          "/repo/LINGXI.md"
+        ]
+      }
+    },
+    {
+      "name": "named-with-globs-renders-eagerly",
+      "input": {
+        "name": "named-with-globs-renders-eagerly",
+        "raw": "---\npaths: src/**\n---\n  Named guide\n",
+        "origin": "named"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "Named guide\n",
+            "globs": [
+              "src"
+            ],
+            "contentDiffersFromDisk": true,
+            "rawContent": "---\npaths: src/**\n---\n  Named guide\n"
+          },
+          "includePaths": []
+        },
+        "acquired": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "Named guide\n",
+            "globs": [
+              "src"
+            ],
+            "contentDiffersFromDisk": true,
+            "rawContent": "---\npaths: src/**\n---\n  Named guide\n"
+          }
+        ],
+        "descriptors": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "Named guide"
+          }
+        ],
+        "rendered": "Codebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /repo/LINGXI.md (project instructions, checked into the codebase):\n\nNamed guide",
+        "reads": [
+          "/repo/LINGXI.md"
+        ],
+        "reports": [],
+        "contentTruthy": [
+          true
+        ],
+        "processed": [
+          "/repo/LINGXI.md"
+        ]
+      }
+    },
+    {
+      "name": "conditional-rule-keeps-unconditional-import",
+      "input": {
+        "name": "conditional-rule-keeps-unconditional-import",
+        "raw": "---\npaths: src/**\n---\n@../../imported.md\n",
+        "childRaw": "  Imported guide\n",
+        "origin": "rules"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/.lingxi/rules/scoped.md",
+            "type": "Project",
+            "content": "@../../imported.md\n",
+            "globs": [
+              "src"
+            ],
+            "contentDiffersFromDisk": true,
+            "rawContent": "---\npaths: src/**\n---\n@../../imported.md\n"
+          },
+          "includePaths": [
+            "/repo/imported.md"
+          ]
+        },
+        "acquired": [
+          {
+            "path": "/repo/imported.md",
+            "type": "Project",
+            "content": "  Imported guide\n",
+            "contentDiffersFromDisk": false,
+            "parent": "/repo/.lingxi/rules/scoped.md"
+          }
+        ],
+        "descriptors": [
+          {
+            "path": "/repo/imported.md",
+            "type": "Project",
+            "content": "Imported guide"
+          }
+        ],
+        "rendered": "Codebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /repo/imported.md (project instructions, checked into the codebase):\n\nImported guide",
+        "reads": [
+          "/repo/.lingxi/rules/scoped.md",
+          "/repo/imported.md"
+        ],
+        "reports": [],
+        "contentTruthy": [
+          true
+        ],
+        "processed": [
+          "/repo/.lingxi/rules/scoped.md",
+          "/repo/imported.md"
+        ]
+      }
+    },
+    {
+      "name": "named-import-keeps-globbed-child",
+      "input": {
+        "name": "named-import-keeps-globbed-child",
+        "raw": "Named guide\n@./imported.md\n",
+        "childRaw": "---\npaths: src/**\n---\n  Imported guide\n",
+        "origin": "named"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "Named guide\n@./imported.md\n",
+            "contentDiffersFromDisk": false
+          },
+          "includePaths": [
+            "/repo/imported.md"
+          ]
+        },
+        "acquired": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "Named guide\n@./imported.md\n",
+            "contentDiffersFromDisk": false
+          },
+          {
+            "path": "/repo/imported.md",
+            "type": "Project",
+            "content": "Imported guide\n",
+            "globs": [
+              "src"
+            ],
+            "contentDiffersFromDisk": true,
+            "rawContent": "---\npaths: src/**\n---\n  Imported guide\n",
+            "parent": "/repo/LINGXI.md"
+          }
+        ],
+        "descriptors": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "Named guide\n@./imported.md"
+          },
+          {
+            "path": "/repo/imported.md",
+            "type": "Project",
+            "content": "Imported guide"
+          }
+        ],
+        "rendered": "Codebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /repo/LINGXI.md (project instructions, checked into the codebase):\n\nNamed guide\n@./imported.md\n\nContents of /repo/imported.md (project instructions, checked into the codebase):\n\nImported guide",
+        "reads": [
+          "/repo/LINGXI.md",
+          "/repo/imported.md"
+        ],
+        "reports": [],
+        "contentTruthy": [
+          true,
+          true
+        ],
+        "processed": [
+          "/repo/LINGXI.md",
+          "/repo/imported.md"
+        ]
+      }
+    },
+    {
+      "name": "named-bom-without-frontmatter-preserves-body",
+      "input": {
+        "name": "named-bom-without-frontmatter-preserves-body",
+        "raw": "﻿  Named guide\n",
+        "origin": "named"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "﻿  Named guide\n",
+            "contentDiffersFromDisk": false
+          },
+          "includePaths": []
+        },
+        "acquired": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "﻿  Named guide\n",
+            "contentDiffersFromDisk": false
+          }
+        ],
+        "descriptors": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "Named guide"
+          }
+        ],
+        "rendered": "Codebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /repo/LINGXI.md (project instructions, checked into the codebase):\n\nNamed guide",
+        "reads": [
+          "/repo/LINGXI.md"
+        ],
+        "reports": [],
+        "contentTruthy": [
+          true
+        ],
+        "processed": [
+          "/repo/LINGXI.md"
+        ]
+      }
+    },
+    {
+      "name": "named-bom-frontmatter-detects-paths",
+      "input": {
+        "name": "named-bom-frontmatter-detects-paths",
+        "raw": "﻿---\npaths: src/**\n---\n  Named guide\n",
+        "origin": "named"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "Named guide\n",
+            "globs": [
+              "src"
+            ],
+            "contentDiffersFromDisk": true,
+            "rawContent": "﻿---\npaths: src/**\n---\n  Named guide\n"
+          },
+          "includePaths": []
+        },
+        "acquired": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "Named guide\n",
+            "globs": [
+              "src"
+            ],
+            "contentDiffersFromDisk": true,
+            "rawContent": "﻿---\npaths: src/**\n---\n  Named guide\n"
+          }
+        ],
+        "descriptors": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "Named guide"
+          }
+        ],
+        "rendered": "Codebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /repo/LINGXI.md (project instructions, checked into the codebase):\n\nNamed guide",
+        "reads": [
+          "/repo/LINGXI.md"
+        ],
+        "reports": [],
+        "contentTruthy": [
+          true
+        ],
+        "processed": [
+          "/repo/LINGXI.md"
+        ]
+      }
+    },
+    {
+      "name": "import-crlf-body-keeps-native-disk-content",
+      "input": {
+        "name": "import-crlf-body-keeps-native-disk-content",
+        "raw": " \nparent guidance\n@imported.md\n\t",
+        "childRaw": "\r\n imported guidance \t\n",
+        "origin": "named"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": " \nparent guidance\n@imported.md\n\t",
+            "contentDiffersFromDisk": false
+          },
+          "includePaths": [
+            "/repo/imported.md"
+          ]
+        },
+        "acquired": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": " \nparent guidance\n@imported.md\n\t",
+            "contentDiffersFromDisk": false
+          },
+          {
+            "path": "/repo/imported.md",
+            "type": "Project",
+            "content": "\r\n imported guidance \t\n",
+            "contentDiffersFromDisk": false,
+            "parent": "/repo/LINGXI.md"
+          }
+        ],
+        "descriptors": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "parent guidance\n@imported.md"
+          },
+          {
+            "path": "/repo/imported.md",
+            "type": "Project",
+            "content": "imported guidance"
+          }
+        ],
+        "rendered": "Codebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /repo/LINGXI.md (project instructions, checked into the codebase):\n\nparent guidance\n@imported.md\n\nContents of /repo/imported.md (project instructions, checked into the codebase):\n\nimported guidance",
+        "reads": [
+          "/repo/LINGXI.md",
+          "/repo/imported.md"
+        ],
+        "reports": [],
+        "contentTruthy": [
+          true,
+          true
+        ],
+        "processed": [
+          "/repo/LINGXI.md",
+          "/repo/imported.md"
+        ]
+      }
+    },
+    {
+      "name": "import-crlf-comment-body-uses-marked-sanitization",
+      "input": {
+        "name": "import-crlf-comment-body-uses-marked-sanitization",
+        "raw": " \nparent guidance\n@imported.md\n\t",
+        "childRaw": "\r\n<!-- hidden -->\r\n imported guidance \t\n",
+        "origin": "named"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": " \nparent guidance\n@imported.md\n\t",
+            "contentDiffersFromDisk": false
+          },
+          "includePaths": [
+            "/repo/imported.md"
+          ]
+        },
+        "acquired": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": " \nparent guidance\n@imported.md\n\t",
+            "contentDiffersFromDisk": false
+          },
+          {
+            "path": "/repo/imported.md",
+            "type": "Project",
+            "content": "\n imported guidance \t\n",
+            "contentDiffersFromDisk": true,
+            "rawContent": "\r\n<!-- hidden -->\r\n imported guidance \t\n",
+            "parent": "/repo/LINGXI.md"
+          }
+        ],
+        "descriptors": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "parent guidance\n@imported.md"
+          },
+          {
+            "path": "/repo/imported.md",
+            "type": "Project",
+            "content": "imported guidance"
+          }
+        ],
+        "rendered": "Codebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /repo/LINGXI.md (project instructions, checked into the codebase):\n\nparent guidance\n@imported.md\n\nContents of /repo/imported.md (project instructions, checked into the codebase):\n\nimported guidance",
+        "reads": [
+          "/repo/LINGXI.md",
+          "/repo/imported.md"
+        ],
+        "reports": [],
+        "contentTruthy": [
+          true,
+          true
+        ],
+        "processed": [
+          "/repo/LINGXI.md",
+          "/repo/imported.md"
+        ]
+      }
+    },
+    {
+      "name": "path-gated-body-keeps-trailing-newline",
+      "input": {
+        "name": "path-gated-body-keeps-trailing-newline",
+        "raw": "---\npaths: src/**\n---\nnew src body\n",
+        "origin": "named"
+      },
+      "expected": {
+        "parsed": {
+          "info": {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "new src body\n",
+            "globs": [
+              "src"
+            ],
+            "contentDiffersFromDisk": true,
+            "rawContent": "---\npaths: src/**\n---\nnew src body\n"
+          },
+          "includePaths": []
+        },
+        "acquired": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "new src body\n",
+            "globs": [
+              "src"
+            ],
+            "contentDiffersFromDisk": true,
+            "rawContent": "---\npaths: src/**\n---\nnew src body\n"
+          }
+        ],
+        "descriptors": [
+          {
+            "path": "/repo/LINGXI.md",
+            "type": "Project",
+            "content": "new src body"
+          }
+        ],
+        "rendered": "Codebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of /repo/LINGXI.md (project instructions, checked into the codebase):\n\nnew src body",
+        "reads": [
+          "/repo/LINGXI.md"
+        ],
+        "reports": [],
+        "contentTruthy": [
+          true
+        ],
+        "processed": [
+          "/repo/LINGXI.md"
+        ]
+      }
+    },
+    {
+      "name": "virtual-managed-whitespace-is-truthy",
+      "input": {
+        "name": "virtual-managed-whitespace-is-truthy",
+        "virtual": {
+          "path": "<policy>",
+          "type": "Managed",
+          "content": " \t\n",
+          "globs": [],
+          "contentDiffersFromDisk": true,
+          "rawContent": " \t\n"
+        }
+      },
+      "expected": {
+        "parsed": null,
+        "acquired": [
+          {
+            "path": "<policy>",
+            "type": "Managed",
+            "content": " \t\n",
+            "globs": [],
+            "contentDiffersFromDisk": true,
+            "rawContent": " \t\n"
+          }
+        ],
+        "descriptors": [
+          {
+            "path": "<policy>",
+            "type": "Managed",
+            "content": ""
+          }
+        ],
+        "rendered": "Codebase and user instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.\n\nContents of <policy> (organization-managed policy instructions):\n\n",
+        "reads": [],
+        "reports": [],
+        "contentTruthy": [
+          true
+        ],
+        "processed": []
+      }
+    }
+  ],
+  "hookCases": [
+    {
+      "name": "named-whitespace-only",
+      "input": {
+        "name": "named-whitespace-only",
+        "raw": " \t\r\n\n",
+        "origin": "named"
+      },
+      "expected": {
+        "acquired": [],
+        "hooks": [],
+        "state": {
+          "walkEpoch": 1,
+          "hasLoggedInitialLoad": true,
+          "shouldFireHook": false,
+          "nextEagerLoadReason": "session_start"
+        },
+        "reports": []
+      }
+    },
+    {
+      "name": "named-frontmatter-only",
+      "input": {
+        "name": "named-frontmatter-only",
+        "raw": "---\npaths: src/**\n---\n",
+        "origin": "named"
+      },
+      "expected": {
+        "acquired": [],
+        "hooks": [],
+        "state": {
+          "walkEpoch": 1,
+          "hasLoggedInitialLoad": true,
+          "shouldFireHook": false,
+          "nextEagerLoadReason": "session_start"
+        },
+        "reports": []
+      }
+    },
+    {
+      "name": "named-frontmatter-whitespace-body",
+      "input": {
+        "name": "named-frontmatter-whitespace-body",
+        "raw": "---\npaths: src/**\n---\n \t\r\n\n",
+        "origin": "named"
+      },
+      "expected": {
+        "acquired": [],
+        "hooks": [],
+        "state": {
+          "walkEpoch": 1,
+          "hasLoggedInitialLoad": true,
+          "shouldFireHook": false,
+          "nextEagerLoadReason": "session_start"
+        },
+        "reports": []
+      }
+    },
+    {
+      "name": "named-with-globs-renders-eagerly",
+      "input": {
+        "name": "named-with-globs-renders-eagerly",
+        "raw": "---\npaths: src/**\n---\n  Named guide\n",
+        "origin": "named"
+      },
+      "expected": {
+        "acquired": [
+          {
+            "path": "/repo/CLAUDE.md",
+            "type": "Project",
+            "content": "Named guide\n",
+            "globs": [
+              "src"
+            ],
+            "contentDiffersFromDisk": true,
+            "rawContent": "---\npaths: src/**\n---\n  Named guide\n"
+          }
+        ],
+        "hooks": [
+          {
+            "file_path": "/repo/CLAUDE.md",
+            "memory_type": "Project",
+            "load_reason": "session_start",
+            "globs": [
+              "src"
+            ]
+          }
+        ],
+        "state": {
+          "walkEpoch": 1,
+          "hasLoggedInitialLoad": true,
+          "shouldFireHook": false,
+          "nextEagerLoadReason": "session_start"
+        },
+        "reports": []
+      }
+    },
+    {
+      "name": "conditional-rule-keeps-unconditional-import",
+      "input": {
+        "name": "conditional-rule-keeps-unconditional-import",
+        "raw": "---\npaths: src/**\n---\n@../../imported.md\n",
+        "childRaw": "  Imported guide\n",
+        "origin": "rules"
+      },
+      "expected": {
+        "acquired": [
+          {
+            "path": "/repo/imported.md",
+            "type": "Project",
+            "content": "  Imported guide\n",
+            "contentDiffersFromDisk": false,
+            "parent": "/repo/.claude/rules/scoped.md"
+          }
+        ],
+        "hooks": [
+          {
+            "file_path": "/repo/imported.md",
+            "memory_type": "Project",
+            "load_reason": "include",
+            "parent_file_path": "/repo/.claude/rules/scoped.md"
+          }
+        ],
+        "state": {
+          "walkEpoch": 1,
+          "hasLoggedInitialLoad": true,
+          "shouldFireHook": false,
+          "nextEagerLoadReason": "session_start"
+        },
+        "reports": []
+      }
+    },
+    {
+      "name": "named-import-keeps-globbed-child",
+      "input": {
+        "name": "named-import-keeps-globbed-child",
+        "raw": "Named guide\n@./imported.md\n",
+        "childRaw": "---\npaths: src/**\n---\n  Imported guide\n",
+        "origin": "named"
+      },
+      "expected": {
+        "acquired": [
+          {
+            "path": "/repo/CLAUDE.md",
+            "type": "Project",
+            "content": "Named guide\n@./imported.md\n",
+            "contentDiffersFromDisk": false
+          },
+          {
+            "path": "/repo/imported.md",
+            "type": "Project",
+            "content": "Imported guide\n",
+            "globs": [
+              "src"
+            ],
+            "contentDiffersFromDisk": true,
+            "rawContent": "---\npaths: src/**\n---\n  Imported guide\n",
+            "parent": "/repo/CLAUDE.md"
+          }
+        ],
+        "hooks": [
+          {
+            "file_path": "/repo/CLAUDE.md",
+            "memory_type": "Project",
+            "load_reason": "session_start"
+          },
+          {
+            "file_path": "/repo/imported.md",
+            "memory_type": "Project",
+            "load_reason": "include",
+            "globs": [
+              "src"
+            ],
+            "parent_file_path": "/repo/CLAUDE.md"
+          }
+        ],
+        "state": {
+          "walkEpoch": 1,
+          "hasLoggedInitialLoad": true,
+          "shouldFireHook": false,
+          "nextEagerLoadReason": "session_start"
+        },
+        "reports": []
+      }
+    },
+    {
+      "name": "named-bom-without-frontmatter-preserves-body",
+      "input": {
+        "name": "named-bom-without-frontmatter-preserves-body",
+        "raw": "﻿  Named guide\n",
+        "origin": "named"
+      },
+      "expected": {
+        "acquired": [
+          {
+            "path": "/repo/CLAUDE.md",
+            "type": "Project",
+            "content": "﻿  Named guide\n",
+            "contentDiffersFromDisk": false
+          }
+        ],
+        "hooks": [
+          {
+            "file_path": "/repo/CLAUDE.md",
+            "memory_type": "Project",
+            "load_reason": "session_start"
+          }
+        ],
+        "state": {
+          "walkEpoch": 1,
+          "hasLoggedInitialLoad": true,
+          "shouldFireHook": false,
+          "nextEagerLoadReason": "session_start"
+        },
+        "reports": []
+      }
+    },
+    {
+      "name": "named-bom-frontmatter-detects-paths",
+      "input": {
+        "name": "named-bom-frontmatter-detects-paths",
+        "raw": "﻿---\npaths: src/**\n---\n  Named guide\n",
+        "origin": "named"
+      },
+      "expected": {
+        "acquired": [
+          {
+            "path": "/repo/CLAUDE.md",
+            "type": "Project",
+            "content": "Named guide\n",
+            "globs": [
+              "src"
+            ],
+            "contentDiffersFromDisk": true,
+            "rawContent": "﻿---\npaths: src/**\n---\n  Named guide\n"
+          }
+        ],
+        "hooks": [
+          {
+            "file_path": "/repo/CLAUDE.md",
+            "memory_type": "Project",
+            "load_reason": "session_start",
+            "globs": [
+              "src"
+            ]
+          }
+        ],
+        "state": {
+          "walkEpoch": 1,
+          "hasLoggedInitialLoad": true,
+          "shouldFireHook": false,
+          "nextEagerLoadReason": "session_start"
+        },
+        "reports": []
+      }
+    },
+    {
+      "name": "import-crlf-body-keeps-native-disk-content",
+      "input": {
+        "name": "import-crlf-body-keeps-native-disk-content",
+        "raw": " \nparent guidance\n@imported.md\n\t",
+        "childRaw": "\r\n imported guidance \t\n",
+        "origin": "named"
+      },
+      "expected": {
+        "acquired": [
+          {
+            "path": "/repo/CLAUDE.md",
+            "type": "Project",
+            "content": " \nparent guidance\n@imported.md\n\t",
+            "contentDiffersFromDisk": false
+          },
+          {
+            "path": "/repo/imported.md",
+            "type": "Project",
+            "content": "\r\n imported guidance \t\n",
+            "contentDiffersFromDisk": false,
+            "parent": "/repo/CLAUDE.md"
+          }
+        ],
+        "hooks": [
+          {
+            "file_path": "/repo/CLAUDE.md",
+            "memory_type": "Project",
+            "load_reason": "session_start"
+          },
+          {
+            "file_path": "/repo/imported.md",
+            "memory_type": "Project",
+            "load_reason": "include",
+            "parent_file_path": "/repo/CLAUDE.md"
+          }
+        ],
+        "state": {
+          "walkEpoch": 1,
+          "hasLoggedInitialLoad": true,
+          "shouldFireHook": false,
+          "nextEagerLoadReason": "session_start"
+        },
+        "reports": []
+      }
+    },
+    {
+      "name": "import-crlf-comment-body-uses-marked-sanitization",
+      "input": {
+        "name": "import-crlf-comment-body-uses-marked-sanitization",
+        "raw": " \nparent guidance\n@imported.md\n\t",
+        "childRaw": "\r\n<!-- hidden -->\r\n imported guidance \t\n",
+        "origin": "named"
+      },
+      "expected": {
+        "acquired": [
+          {
+            "path": "/repo/CLAUDE.md",
+            "type": "Project",
+            "content": " \nparent guidance\n@imported.md\n\t",
+            "contentDiffersFromDisk": false
+          },
+          {
+            "path": "/repo/imported.md",
+            "type": "Project",
+            "content": "\n imported guidance \t\n",
+            "contentDiffersFromDisk": true,
+            "rawContent": "\r\n<!-- hidden -->\r\n imported guidance \t\n",
+            "parent": "/repo/CLAUDE.md"
+          }
+        ],
+        "hooks": [
+          {
+            "file_path": "/repo/CLAUDE.md",
+            "memory_type": "Project",
+            "load_reason": "session_start"
+          },
+          {
+            "file_path": "/repo/imported.md",
+            "memory_type": "Project",
+            "load_reason": "include",
+            "parent_file_path": "/repo/CLAUDE.md"
+          }
+        ],
+        "state": {
+          "walkEpoch": 1,
+          "hasLoggedInitialLoad": true,
+          "shouldFireHook": false,
+          "nextEagerLoadReason": "session_start"
+        },
+        "reports": []
+      }
+    },
+    {
+      "name": "path-gated-body-keeps-trailing-newline",
+      "input": {
+        "name": "path-gated-body-keeps-trailing-newline",
+        "raw": "---\npaths: src/**\n---\nnew src body\n",
+        "origin": "named"
+      },
+      "expected": {
+        "acquired": [
+          {
+            "path": "/repo/CLAUDE.md",
+            "type": "Project",
+            "content": "new src body\n",
+            "globs": [
+              "src"
+            ],
+            "contentDiffersFromDisk": true,
+            "rawContent": "---\npaths: src/**\n---\nnew src body\n"
+          }
+        ],
+        "hooks": [
+          {
+            "file_path": "/repo/CLAUDE.md",
+            "memory_type": "Project",
+            "load_reason": "session_start",
+            "globs": [
+              "src"
+            ]
+          }
+        ],
+        "state": {
+          "walkEpoch": 1,
+          "hasLoggedInitialLoad": true,
+          "shouldFireHook": false,
+          "nextEagerLoadReason": "session_start"
+        },
+        "reports": []
+      }
+    }
+  ]
+}

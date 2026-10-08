@@ -1,0 +1,218 @@
+{
+  "version": "2.1.288",
+  "native_sha256": "bbe93063f7a0879a1021b2891e5c9354e5b3b98433e32efe6750f7710afed750",
+  "sourceByteRanges": [
+    {
+      "label": "native main query classification",
+      "start": 195111227,
+      "end": 195111273,
+      "sha256": "257bc71f3a3adc6033591ecdcfb771c49da13c66eb96881e62c6129fcb83f88e"
+    },
+    {
+      "label": "native session and local notice scope",
+      "start": 195114054,
+      "end": 195114104,
+      "sha256": "022733ee88bf0c028b7d728ad4367b97e457b4954d6e33155a2c16af1e61f445"
+    },
+    {
+      "label": "native model identity",
+      "start": 179326720,
+      "end": 179326771,
+      "sha256": "a4d795f092297c1da48837e8342f8a6b308a4fc1b4cd8b34f2ed7bbcdd775ac3"
+    },
+    {
+      "label": "native received model selection",
+      "start": 188774585,
+      "end": 188774640,
+      "sha256": "b3dcbb17cf27fd634e7eb6986ae5d2b642b492b1d8fa24388017ea6533fea742"
+    },
+    {
+      "label": "native allowlist and unconditional accepted session mutation",
+      "start": 195139387,
+      "end": 195141663,
+      "sha256": "aa83fe4616101db3b2be54832b0ebeed3111ee6bc1ffec35a9d5643116ded760"
+    }
+  ],
+  "scope": "Actual native query-source/fork-origin predicates and accepted model mutation. Model policy is supplied as allowed; effort, fast mode, app-state getter/setter, and latch storage are supplied dependencies. This proves acceptance snapshots the current app model without a request-ownership gate, and preserves query-local notice identity. It does not prove production UI live model picking, provider selection, dynamic allowlist, or effort acquisition.",
+  "scopeCases": [
+    {
+      "querySource": "repl_main_thread",
+      "forkOrigin": null,
+      "expected": {
+        "isMainThread": true,
+        "emitsLocalScope": false
+      }
+    },
+    {
+      "querySource": "repl_main_thread:scheduled",
+      "forkOrigin": null,
+      "expected": {
+        "isMainThread": true,
+        "emitsLocalScope": false
+      }
+    },
+    {
+      "querySource": "sdk",
+      "forkOrigin": null,
+      "expected": {
+        "isMainThread": true,
+        "emitsLocalScope": false
+      }
+    },
+    {
+      "querySource": "agent:custom:reviewer",
+      "forkOrigin": null,
+      "expected": {
+        "isMainThread": false,
+        "emitsLocalScope": false
+      }
+    },
+    {
+      "querySource": "agent:custom:reviewer",
+      "forkOrigin": "btw",
+      "expected": {
+        "isMainThread": false,
+        "emitsLocalScope": true
+      }
+    },
+    {
+      "querySource": "side_question",
+      "forkOrigin": null,
+      "expected": {
+        "isMainThread": false,
+        "emitsLocalScope": true
+      }
+    },
+    {
+      "querySource": "",
+      "forkOrigin": null,
+      "expected": {
+        "isMainThread": false,
+        "emitsLocalScope": false
+      }
+    },
+    {
+      "querySource": "",
+      "forkOrigin": "btw",
+      "expected": {
+        "isMainThread": false,
+        "emitsLocalScope": true
+      }
+    },
+    {
+      "querySource": "SDK",
+      "forkOrigin": null,
+      "expected": {
+        "isMainThread": false,
+        "emitsLocalScope": false
+      }
+    }
+  ],
+  "acceptedCases": [
+    {
+      "input": {
+        "queryModel": "A",
+        "appModel": "user-pick",
+        "declaredModel": "B",
+        "toModel": "B",
+        "reason": "sticky",
+        "category": null,
+        "swapSession": true
+      },
+      "expected": {
+        "fromModel": "A",
+        "toModel": "B",
+        "sameModel": false,
+        "queryModel": "B",
+        "appModel": "B",
+        "previousAppModel": "user-pick",
+        "armed": false,
+        "count": 1
+      }
+    },
+    {
+      "input": {
+        "queryModel": "B",
+        "appModel": "user-pick",
+        "declaredModel": "C",
+        "toModel": "C",
+        "reason": "refusal",
+        "category": "cyber",
+        "swapSession": true
+      },
+      "expected": {
+        "fromModel": "B",
+        "toModel": "C",
+        "sameModel": false,
+        "queryModel": "C",
+        "appModel": "C",
+        "previousAppModel": "user-pick",
+        "armed": true,
+        "count": 1
+      }
+    },
+    {
+      "input": {
+        "queryModel": "A",
+        "appModel": "A",
+        "declaredModel": "B",
+        "toModel": "B",
+        "reason": "sticky",
+        "category": "cyber",
+        "swapSession": true
+      },
+      "expected": {
+        "fromModel": "A",
+        "toModel": "B",
+        "sameModel": false,
+        "queryModel": "B",
+        "appModel": "B",
+        "previousAppModel": "A",
+        "armed": false,
+        "count": 1
+      }
+    },
+    {
+      "input": {
+        "queryModel": "A",
+        "appModel": "A",
+        "declaredModel": "B",
+        "toModel": "B",
+        "reason": "refusal",
+        "category": "cyber",
+        "swapSession": false
+      },
+      "expected": {
+        "fromModel": "A",
+        "toModel": "B",
+        "sameModel": false,
+        "queryModel": "B",
+        "appModel": "A",
+        "previousAppModel": null,
+        "armed": false,
+        "count": 1
+      }
+    },
+    {
+      "input": {
+        "queryModel": "B[1m]",
+        "appModel": "different-app",
+        "declaredModel": "B[1m]",
+        "toModel": "B",
+        "reason": "sticky",
+        "category": null,
+        "swapSession": true
+      },
+      "expected": {
+        "fromModel": "B[1m]",
+        "toModel": "B[1m]",
+        "sameModel": true,
+        "queryModel": "B[1m]",
+        "appModel": "B[1m]",
+        "previousAppModel": "different-app",
+        "armed": false,
+        "count": 1
+      }
+    }
+  ]
+}

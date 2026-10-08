@@ -30,6 +30,7 @@ branding.workspace = true
 hooks = { path = "../hooks" }
 serde.workspace = true
 serde_json.workspace = true
+ryu-js = "1.0.3"
 serde_yaml = "0.9"
 thiserror.workspace = true
 async-trait.workspace = true

@@ -1,15 +1,24 @@
-//! Faithful port of claude-code's `StreamingToolExecutor`
-//! (`services/tools/StreamingToolExecutor.ts`). Schedules tool execution as
-//! `tool_use` blocks stream in, under concurrency control, buffering results
-//! for emission in *received* order. Single-task: all tool futures borrow
-//! `&ConversationOrchestrator` and are polled on one `FuturesUnordered`, so no
-//! `'static`/spawn is required.
+//! Faithful port of claude-code StreamingToolExecutor.
+//! Schedules streamed tool_use blocks under concurrency control and buffers
+//! results in received order. One actor owns dispatch tasks, queue promotion,
+//! and generation cancellation in production and tests.
 
+use crate::autonomous_tool_scheduler::{
+    CompletedDispatch, OwnedToolCall, ReadyToolMeta, SchedulerStopped, Status as SchedulerStatus,
+    ToolDispatch, ToolDispatchPayload, ToolOutcome, ToolScheduler,
+};
 use crate::conversation::ConversationOrchestrator;
-use futures::{stream::FuturesUnordered, StreamExt};
+use lingxi_core::host::tool_invoker::ToolInvocationContextModifier;
+use lingxi_core::host::tool_use_lifecycle::{
+    ToolUseLifecycleTracker, ToolUseRemoval, ToolUseRemovalReason, max_tool_use_concurrency,
+};
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
-use tool_api::tool_trait::ToolStaticContext;
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tool_api::ContextModifier;
+use tool_api::context::ToolUseContext;
+use tool_api::tool_trait::ToolStaticContext;
 
 /// claude-code `REJECT_MESSAGE` (utils/messages.ts:212). The user-interrupted
 /// synthetic result is this BARE text (NOT `<tool_use_error>`-wrapped, unlike
@@ -30,6 +39,7 @@ type DispatchOutcome = Result<
         Vec<(ConversationMessage, ToolUseId)>,
         Vec<ContextModifier>,
         Vec<hooks::events::PostToolBatchCall>,
+        Vec<crate::turn_loop::ToolResultPublication>,
     ),
     crate::error::OrchestratorError,
 >;
@@ -104,7 +114,7 @@ fn synthetic_error_block_for_tool(
     ContentBlock::ToolResult {
         tool_use_id,
         content,
-        is_error: true,
+        is_error: Some(true),
         provider_tool_use_id: None,
         content_blocks: None,
     }
@@ -130,6 +140,8 @@ pub(crate) struct TrackedTool {
     pub(crate) input: serde_json::Value,
     pub(crate) provider_id: Option<String>,
     pub(crate) assistant_id: MessageId,
+    /// Admission-time handle reused by abort policy and autonomous W1 dispatch.
+    pub(crate) resolved_tool: Option<Arc<dyn tool_api::tool_trait::Tool>>,
     pub(crate) status: ToolStatus,
     pub(crate) is_concurrency_safe: bool,
     /// The result block once `Completed` (the unknown-tool case fills it
@@ -144,10 +156,14 @@ pub(crate) struct TrackedTool {
     /// This tool's resolved-call entry, deferred so the streaming driver can
     /// fire one `PostToolBatch` for the complete model-response batch.
     pub(crate) post_tool_batch_calls: Vec<hooks::events::PostToolBatchCall>,
+    pub(crate) publications: Vec<crate::turn_loop::ToolResultPublication>,
+    /// Immutable request/row facts captured when this live streamed row
+    /// completed. Queued tools must not reread a later session snapshot.
+    pub(crate) dispatch_facts: Option<crate::turn_loop::ToolUseDispatchFacts>,
 }
 
 // ============================================================================
-// Task 7: concurrency gate + ordered process_queue
+// Task 7: concurrency admission predicate
 // ============================================================================
 
 /// TS `canExecuteTool` (line 129-135): a tool may start if nothing is
@@ -160,57 +176,20 @@ pub(crate) fn can_execute(executing_safe_flags: &[bool], candidate_safe: bool) -
     executing_safe_flags.is_empty() || (candidate_safe && executing_safe_flags.iter().all(|&s| s))
 }
 
-/// Default maximum number of concurrency-safe tools to execute simultaneously.
-/// Byte-locked to the v2.1.183 binary's `r1p` getter:
-/// ```js
-/// function r1p() {
-///   let e = parseInt(process.env.LINGXI_MAX_TOOL_USE_CONCURRENCY || "", 10);
-///   return e > 0 ? e : 10;
-/// }
-/// ```
-pub(crate) const DEFAULT_MAX_TOOL_USE_CONCURRENCY: usize = 10;
-
-/// Resolve the maximum number of concurrency-safe tools to run at once,
-/// mirroring the binary's `r1p()`. Reads `LINGXI_MAX_TOOL_USE_CONCURRENCY`
-/// and uses it only when it parses to a value `> 0`; otherwise the default of
-/// [`DEFAULT_MAX_TOOL_USE_CONCURRENCY`] (10).
-///
-/// Injectable form for tests: [`max_tool_use_concurrency_from`].
-pub(crate) fn max_tool_use_concurrency() -> usize {
-    max_tool_use_concurrency_from(
-        std::env::var("LINGXI_MAX_TOOL_USE_CONCURRENCY")
-            .ok()
-            .as_deref(),
-    )
+fn scheduler_stopped(operation: &str) -> crate::error::OrchestratorError {
+    crate::error::OrchestratorError::StreamingProtocol(format!(
+        "autonomous streaming scheduler stopped while {operation}"
+    ))
 }
 
-/// Pure resolver for [`max_tool_use_concurrency`] — `parseInt(v, 10) > 0 ? v : 10`.
-/// `parseInt` semantics: leading numeric prefix is parsed (e.g. `"5x"` → 5),
-/// non-numeric / absent / `<= 0` → the default.
-pub(crate) fn max_tool_use_concurrency_from(raw: Option<&str>) -> usize {
-    // Mirror JS `parseInt(s, 10)`: take the leading (optionally signed) integer
-    // prefix. Anything else (NaN) falls through to the default.
-    let parsed: Option<i64> = raw.and_then(|s| {
-        let t = s.trim_start();
-        let bytes = t.as_bytes();
-        let mut end = 0;
-        if matches!(bytes.first(), Some(b'+' | b'-')) {
-            end = 1;
+fn scheduler_error(error: SchedulerStopped, operation: &str) -> crate::error::OrchestratorError {
+    match error {
+        SchedulerStopped::Unavailable => scheduler_stopped(operation),
+        SchedulerStopped::ModelResolution(reason) => {
+            crate::error::OrchestratorError::StreamingProtocol(format!(
+                "tool model preference could not be resolved: {reason}"
+            ))
         }
-        while end < bytes.len() && bytes[end].is_ascii_digit() {
-            end += 1;
-        }
-        // Need at least one digit after the optional sign.
-        let has_digit = bytes[..end].iter().any(u8::is_ascii_digit);
-        if has_digit {
-            t[..end].parse::<i64>().ok()
-        } else {
-            None
-        }
-    });
-    match parsed {
-        Some(n) if n > 0 => n as usize,
-        _ => DEFAULT_MAX_TOOL_USE_CONCURRENCY,
     }
 }
 
@@ -226,120 +205,237 @@ pub(crate) fn max_tool_use_concurrency_from(raw: Option<&str>) -> usize {
 pub(crate) struct StreamingToolExecutor<'a> {
     orch: &'a ConversationOrchestrator,
     pub(crate) tools: Vec<TrackedTool>,
-    /// Set when the turn is discarded (streaming fallback); all queued tools
-    /// are cancelled with `AbortReason::StreamingFallback` (Task 8).
-    discarded: bool,
-    /// In-flight tool futures keyed by their index in `tools`. Polled on the
-    /// current task (no spawn); each borrows `&'a orch`. `+ Send` so the whole
-    /// executor (held across `.await` in the live streaming turn) stays `Send`,
-    /// matching the `Send` turn future required by the handle traits.
-    inflight: FuturesUnordered<
-        std::pin::Pin<Box<dyn std::future::Future<Output = (usize, DispatchOutcome)> + Send + 'a>>,
-    >,
-    /// Parent cancellation token carrying cancellation into in-flight tools.
-    /// Each dispatched tool receives a `child_token()` of this, threaded into
-    /// its `ToolUseContext::cancel`. It fires when the turn is **discarded**
-    /// (streaming fallback) and — being a child of `user_cancel` when one is
-    /// supplied — when the **user interrupts**. On either, an in-flight tool
-    /// observing the token returns early (a Bash SIGKILLs its subprocess via
-    /// `kill_on_drop` and returns `Aborted`), whose real outcome `drain_one`
-    /// then substitutes with the synthetic abort block.
-    tool_abort: tokio_util::sync::CancellationToken,
-    /// DEFERRED-3: the turn's USER-interrupt token (ESC / new message), mirroring
-    /// claude-code's `toolUseContext.abortController` with reason 'interrupt'.
-    /// `None` outside the live streaming turn (executor unit tests + the test-only
-    /// `run_to_completion` path), so those are byte-identical to before. When
-    /// `Some` and fired, `abort_reason_for` substitutes `UserInterrupted` for
-    /// every tool whose `interrupt_behavior()==Cancel` (queued via
-    /// `apply_abort_to_pending`, in-flight via `drain_one`). To also deliver the
-    /// token into each in-flight tool's `ctx.cancel` (so a Cancel-behavior tool
-    /// observes it and returns early), `tool_abort` is parented to this token
-    /// in `new_with_user_cancel` — a child token fires when its parent fires.
+    /// The actor owns dispatch tasks and advances the eligible queue on every
+    /// admission/completion, independently of provider events and Tn polling.
+    scheduler: ToolScheduler,
+    /// Current actor generation for accepted rows and PostToolBatch output.
+    publication_fence: crate::autonomous_tool_scheduler::ToolDispatchPublicationFence,
+    /// Local indices returned by the actor's Tn-ready scan, already in Native
+    /// registration/barrier order. The actor, not this facade, decides which
+    /// completed records cross the event boundary.
+    actor_ready_indices: VecDeque<usize>,
+    /// Completed-only suffix yielded by the terminal Tn(false) drain.
+    actor_terminal_ready_indices: VecDeque<usize>,
+    scheduler_failed: AtomicBool,
+    /// User-interrupt token. The actor cancels only Cancel-behavior calls and
+    /// synthesizes queued Cancel results; Block calls keep running.
     user_cancel: Option<tokio_util::sync::CancellationToken>,
+    /// Outstanding ids survive completion until the result is handed to the
+    /// driver, and are removed explicitly when the host sweeps this executor.
+    tool_use_lifecycle: ToolUseLifecycleTracker,
+    #[cfg(test)]
+    next_dispatch_finished_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl<'a> StreamingToolExecutor<'a> {
-    /// Construct a fresh executor borrowing the given orchestrator for the
-    /// duration of the streaming turn.
-    pub(crate) fn new(orch: &'a ConversationOrchestrator) -> Self {
-        Self {
-            orch,
-            tools: Vec::new(),
-            discarded: false,
-            inflight: FuturesUnordered::new(),
-            tool_abort: tokio_util::sync::CancellationToken::new(),
-            user_cancel: None,
-        }
-    }
-
-    /// DEFERRED-3: construct with the turn's USER-interrupt token (ESC / new
-    /// message). `tool_abort` is made a CHILD of `user_cancel`, so firing the
-    /// user token also cancels every per-tool child (an in-flight Cancel-behavior
-    /// tool observes its `ctx.cancel` and returns early); `abort_reason_for` then
-    /// substitutes the bare `REJECT_MESSAGE` for Cancel-behavior tools.
-    /// Mirrors claude-code's `createChildAbortController` where the user abort
-    /// lives on the parent `toolUseContext.abortController`.
-    pub(crate) fn new_with_user_cancel(
+    /// Build the actor-backed scheduler. Runtime construction fails closed unless the finalized
+    /// composition root bound this exact orchestrator Arc.
+    pub(crate) async fn try_new(
         orch: &'a ConversationOrchestrator,
-        user_cancel: tokio_util::sync::CancellationToken,
-    ) -> Self {
-        let tool_abort = user_cancel.child_token();
-        Self {
-            orch,
-            tools: Vec::new(),
-            discarded: false,
-            inflight: FuturesUnordered::new(),
-            tool_abort,
-            user_cancel: Some(user_cancel),
-        }
+        query_history: Vec<ConversationMessage>,
+    ) -> Result<Self, crate::error::OrchestratorError> {
+        Self::try_new_inner(orch, query_history, None).await
     }
 
-    /// Register one `tool_use` block received from the stream.
-    ///
-    /// - If the tool is **not in the registry**, a `TrackedTool` already
-    ///   `Completed` is pushed with an unknown-tool error block (short-circuit,
-    ///   mirrors TS `addTool` lines 76-85).
-    /// - If the tool **is known**, classify `is_concurrency_safe` via the tool's
-    ///   own method and push a `Queued` entry (mirrors TS lines 86-124).
-    pub(crate) fn add_tool(
+    pub(crate) async fn try_new_with_user_cancel(
+        orch: &'a ConversationOrchestrator,
+        query_history: Vec<ConversationMessage>,
+        user_cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Self, crate::error::OrchestratorError> {
+        Self::try_new_inner(orch, query_history, Some(user_cancel)).await
+    }
+
+    async fn try_new_inner(
+        orch: &'a ConversationOrchestrator,
+        query_history: Vec<ConversationMessage>,
+        user_cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<Self, crate::error::OrchestratorError> {
+        let owner = orch
+            .upgrade_streaming_tool_dispatch_owner()
+            .ok_or_else(|| {
+                crate::error::OrchestratorError::StreamingProtocol(
+                    "streaming tool scheduler has no finalized orchestrator owner".into(),
+                )
+            })?;
+        if !std::ptr::eq(owner.as_ref(), orch) {
+            return Err(crate::error::OrchestratorError::StreamingProtocol(
+                "streaming tool scheduler owner does not match the turn orchestrator".into(),
+            ));
+        }
+        let dispatch_owner = Arc::clone(&owner);
+        let dispatch: ToolDispatch = Arc::new(move |mut call| {
+            let orch = Arc::clone(&dispatch_owner);
+            Box::pin(async move {
+                let tool_use = (
+                    call.id.clone(),
+                    call.presented_name.clone(),
+                    call.input.clone(),
+                    call.provider_id.clone(),
+                );
+                let dispatch_started = call.dispatch_started_tx.take();
+                let publication_fence = call
+                    .publication_fence
+                    .take()
+                    .expect("actor attaches the generation publication fence before dispatch");
+                let inherited_context = call
+                    .tool_context_state
+                    .as_ref()
+                    .and_then(|state| state.downcast_arc::<ToolUseContext>().ok())
+                    .map(|context| context.as_ref().clone());
+                let mut dispatched = crate::turn_loop::dispatch_streaming_tool_use_owned(
+                    &orch,
+                    &tool_use,
+                    Some(call.cancellation.clone()),
+                    call.assistant_id,
+                    call.facts,
+                    Arc::clone(&call.resolved_tool),
+                    inherited_context,
+                    dispatch_started,
+                    publication_fence,
+                )
+                .await?;
+                // ToolApi's FnOnce is moved into Core's opaque one-shot wrapper
+                // exactly once. The old DeferredToolDispatch field is emptied,
+                // so the final model fold cannot apply this closure a second time.
+                let context_modifiers: Vec<ToolInvocationContextModifier> =
+                    std::mem::take(&mut dispatched.context_modifiers)
+                        .into_iter()
+                        .map(ToolInvocationContextModifier::new::<ToolUseContext, _>)
+                        .collect();
+                Ok(ToolDispatchPayload {
+                    dispatch: dispatched,
+                    tool_context_state: None,
+                    context_modifiers,
+                })
+            })
+        });
+        let shared_context =
+            crate::turn_loop::streaming_tool_context_base(orch, query_history).await;
+        let (session_root, publication_commit_lock) = orch
+            .lifecycle_runtime
+            .session_tool_hook_generation
+            .current();
+        let model_provider = orch.model_resolution_context_provider.clone();
+        let model_context_resolver: crate::autonomous_tool_scheduler::ModelContextResolver =
+            Arc::new(move |previous, updated| {
+                crate::turn_loop::resolve_model_context_modifier(
+                    previous,
+                    updated,
+                    model_provider.as_deref(),
+                )
+            });
+        let scheduler = ToolScheduler::spawn(
+            dispatch,
+            max_tool_use_concurrency(),
+            user_cancel.clone(),
+            Some(
+                lingxi_core::host::tool_invoker::ToolInvocationContextState::new(Arc::new(
+                    shared_context,
+                )),
+            ),
+            session_root,
+            publication_commit_lock,
+            Some(model_context_resolver),
+        );
+        let publication_fence = scheduler.current_publication_fence();
+        Ok(Self {
+            orch,
+            tools: Vec::new(),
+            scheduler,
+            publication_fence,
+            actor_ready_indices: VecDeque::new(),
+            actor_terminal_ready_indices: VecDeque::new(),
+            scheduler_failed: AtomicBool::new(false),
+            user_cancel,
+            tool_use_lifecycle: ToolUseLifecycleTracker::default(),
+            #[cfg(test)]
+            next_dispatch_finished_tx: None,
+        })
+    }
+
+    /// Admit a completed streamed ToolUse into the owned scheduler. Known
+    /// handles are resolved exactly once here and carried into every core/Mod
+    /// dispatch path; unknown tools enter the same actor registration order as
+    /// immediately-ready results.
+    pub(crate) async fn add_tool_with_context_owned(
         &mut self,
         id: ToolUseId,
         name: String,
         input: serde_json::Value,
         provider_id: Option<String>,
         assistant_id: MessageId,
-    ) {
-        match self.orch.find_tool_for_dispatch(&name) {
+        dispatch_facts: crate::turn_loop::ToolUseDispatchFacts,
+    ) -> Result<(), crate::error::OrchestratorError> {
+        let scheduler = &mut self.scheduler;
+        let tool = self.orch.find_tool_for_dispatch(&name);
+        let is_agent = tool.as_ref().is_some_and(|tool| tool.name() == "Agent");
+        self.tool_use_lifecycle
+            .observe_assistant_row([(id.clone(), is_agent)]);
+        match tool {
             None => {
                 let suffix = unknown_tool_suffix_for(&name, self.orch);
                 let block = synthetic_unknown_tool(id.clone(), &name, provider_id.clone(), &suffix);
+                let meta = ReadyToolMeta {
+                    id: id.clone(),
+                    presented_name: name.clone(),
+                    canonical_name: None,
+                    input: input.clone(),
+                    provider_id: provider_id.clone(),
+                    assistant_id,
+                    facts: Some(dispatch_facts.clone()),
+                    resolved_tool: None,
+                    concurrency_safe: true,
+                    is_agent: false,
+                };
                 let post_tool_batch_calls =
                     vec![post_tool_batch_call_for_result(&id, &name, &input, &block)];
                 self.tools.push(TrackedTool {
-                    id,
-                    name,
-                    input,
-                    provider_id,
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                    provider_id: provider_id.clone(),
                     assistant_id,
+                    resolved_tool: None,
                     status: ToolStatus::Completed,
                     is_concurrency_safe: true,
-                    result: Some(block),
+                    result: Some(block.clone()),
                     prevent_continuation: false,
                     injected: Vec::new(),
                     modifiers: Vec::new(),
-                    post_tool_batch_calls,
+                    post_tool_batch_calls: post_tool_batch_calls.clone(),
+                    publications: Vec::new(),
+                    dispatch_facts: Some(dispatch_facts),
                 });
+                let publication = unknown_tool_publication(self.orch, &id, &name, &block);
+                let outcome = Ok(ToolDispatchPayload {
+                    dispatch: crate::turn_loop::DeferredToolDispatch {
+                        results: vec![block],
+                        prevent_continuation: false,
+                        injected_messages: Vec::new(),
+                        context_modifiers: Vec::new(),
+                        post_tool_batch_calls,
+                        publications: vec![publication],
+                    },
+                    tool_context_state: None,
+                    context_modifiers: Vec::new(),
+                });
+                scheduler.add_ready(meta, outcome).await.map_err(|error| {
+                    scheduler_error(error, "registering an unknown streamed tool")
+                })?;
             }
-            Some(tool) => {
-                let safe = crate::schema_validation::validate_tool_schema(tool.as_ref(), &input)
-                    .is_ok()
-                    && tool.is_concurrency_safe(&input);
+            Some(resolved_tool) => {
+                let safe =
+                    crate::schema_validation::validate_tool_schema(resolved_tool.as_ref(), &input)
+                        .is_ok()
+                        && resolved_tool.is_concurrency_safe(&input);
+                let canonical_name = resolved_tool.name().to_owned();
                 self.tools.push(TrackedTool {
-                    id,
-                    name,
-                    input,
-                    provider_id,
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                    provider_id: provider_id.clone(),
                     assistant_id,
+                    resolved_tool: Some(Arc::clone(&resolved_tool)),
                     status: ToolStatus::Queued,
                     is_concurrency_safe: safe,
                     result: None,
@@ -347,178 +443,345 @@ impl<'a> StreamingToolExecutor<'a> {
                     injected: Vec::new(),
                     modifiers: Vec::new(),
                     post_tool_batch_calls: Vec::new(),
+                    publications: Vec::new(),
+                    dispatch_facts: Some(dispatch_facts.clone()),
                 });
+                let (dispatch_started_tx, dispatch_started_rx) = tokio::sync::oneshot::channel();
+                let started = scheduler
+                    .add(OwnedToolCall {
+                        id,
+                        presented_name: name,
+                        canonical_name,
+                        input,
+                        provider_id,
+                        assistant_id,
+                        facts: dispatch_facts,
+                        resolved_tool,
+                        concurrency_safe: safe,
+                        cancellation: tokio_util::sync::CancellationToken::new(),
+                        publication_fence: None,
+                        dispatch_started_tx: Some(dispatch_started_tx),
+                        dispatch_started_rx: Some(dispatch_started_rx),
+                        #[cfg(test)]
+                        dispatch_finished_tx: self.next_dispatch_finished_tx.take(),
+                        tool_context_state: None,
+                    })
+                    .await
+                    .map_err(|error| scheduler_error(error, "admitting a streamed tool"))?;
+                if started {
+                    if let Some(tool) = self.tools.last_mut() {
+                        tool.status = ToolStatus::Executing;
+                    }
+                }
             }
         }
+        Ok(())
     }
 
-    /// TS `processQueue` (line 140-151): walk the queue IN ORDER; start each
-    /// queued tool whose concurrency conditions are met; STOP at the first
-    /// queued non-concurrency-safe tool that cannot start yet (preserves
-    /// exclusive-tool ordering). After each start the executing set changes, so
-    /// we re-evaluate from scratch.
-    ///
-    /// ## Concurrency cap (parity binary `r1p` / `i1p`)
-    ///
-    /// The v2.1.183 binary runs a contiguous concurrency-safe group through
-    /// `i1p`, which merges the per-tool generators with a bounded window of
-    /// `r1p()` (`LINGXI_MAX_TOOL_USE_CONCURRENCY`, default 10). So no more
-    /// than N concurrency-safe tools execute simultaneously; the rest of the
-    /// group waits for a slot. We enforce the same bound here: a queued safe
-    /// tool may only start when the number of currently-`Executing`
-    /// concurrency-safe tools is below the cap. When the cap is reached no
-    /// further safe tool starts this pass (and an unsafe tool is barriered by
-    /// the executing safe tools), so the queue stalls until a completion frees
-    /// a slot — at which point the streaming loop re-invokes `process_queue`.
-    // Index loop + per-pass rebuild are forced by the borrow checker: `start_tool`
-    // takes `&mut self`, so we can't hold an iterator borrow over `self.tools`
-    // across a start. N is small (tools per turn), so the rebuild is negligible.
-    #[allow(clippy::needless_range_loop)]
-    pub(crate) fn process_queue(&mut self) {
-        // Resolve the cap once per call (env-driven; `r1p()`).
-        let max_safe = max_tool_use_concurrency();
-        loop {
-            let executing_flags: Vec<bool> = self
-                .tools
-                .iter()
-                .filter(|t| t.status == ToolStatus::Executing)
-                .map(|t| t.is_concurrency_safe)
-                .collect();
-            // Count concurrency-safe tools already in flight (all executing
-            // tools are safe whenever a safe candidate could start, but count
-            // explicitly so the bound is correct regardless).
-            let executing_safe_count = executing_flags.iter().filter(|&&s| s).count();
+    #[cfg(test)]
+    pub(crate) async fn add_tool_observed_dispatch(
+        &mut self,
+        id: ToolUseId,
+        name: String,
+        input: serde_json::Value,
+        provider_id: Option<String>,
+        assistant_id: MessageId,
+    ) -> tokio::sync::oneshot::Receiver<()> {
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        assert!(self.next_dispatch_finished_tx.is_none());
+        self.next_dispatch_finished_tx = Some(finished_tx);
+        self.add_tool(id, name, input, provider_id, assistant_id)
+            .await;
+        finished_rx
+    }
 
-            let mut started_any = false;
-            for i in 0..self.tools.len() {
-                if self.tools[i].status != ToolStatus::Queued {
-                    continue;
-                }
-                let safe = self.tools[i].is_concurrency_safe;
-                // Concurrency cap: do not start an (N+1)th simultaneous safe
-                // tool — keep it queued. An unsafe tool is unbounded (it runs
-                // alone behind the barrier), so the cap applies only to safe.
-                if safe && executing_safe_count >= max_safe {
-                    // At the safe-concurrency ceiling: this safe tool waits.
-                    // Keep scanning in case a later unsafe tool barriers, but it
-                    // can't start either while safe tools execute — so the pass
-                    // ends without starting anything once we hit the cap.
-                    continue;
-                }
-                if can_execute(&executing_flags, safe) {
-                    self.start_tool(i);
-                    started_any = true;
-                    break; // re-evaluate the executing set after each start
-                } else if !safe {
-                    // An exclusive (non-safe) tool can't start yet → barrier.
-                    return;
-                }
-                // A safe tool that can't start (unsafe tool executing) —
-                // keep scanning; TS continues the loop in this case.
-            }
-            if !started_any {
+    #[cfg(test)]
+    pub(crate) async fn add_tool(
+        &mut self,
+        id: ToolUseId,
+        name: String,
+        input: serde_json::Value,
+        provider_id: Option<String>,
+        assistant_id: MessageId,
+    ) {
+        let facts = crate::turn_loop::ToolUseDispatchFacts {
+            query_history: Vec::new(),
+            assistant_message: ConversationMessage::Assistant {
+                id: assistant_id,
+                content: vec![ContentBlock::ToolUse {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                    provider_id: provider_id.clone(),
+                }],
+                stop_reason: None,
+            },
+            same_turn_tool_uses: Vec::new(),
+        };
+        self.add_tool_with_context_owned(id, name, input, provider_id, assistant_id, facts)
+            .await
+            .expect("test tool admission reaches the owned scheduler");
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn add_tool_with_context(
+        &mut self,
+        id: ToolUseId,
+        name: String,
+        input: serde_json::Value,
+        provider_id: Option<String>,
+        assistant_id: MessageId,
+        dispatch_facts: crate::turn_loop::ToolUseDispatchFacts,
+    ) {
+        self.add_tool_with_context_owned(
+            id,
+            name,
+            input,
+            provider_id,
+            assistant_id,
+            dispatch_facts,
+        )
+        .await
+        .expect("test tool admission reaches the owned scheduler");
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inflight_is_empty(&self) -> bool {
+        !self
+            .tools
+            .iter()
+            .any(|tool| tool.status == ToolStatus::Executing)
+    }
+
+    async fn sync_statuses(&mut self) {
+        let statuses = match self.scheduler.statuses().await {
+            Ok(statuses) => statuses,
+            Err(_) => {
+                self.scheduler_failed.store(true, Ordering::Release);
                 return;
             }
-        }
-    }
-
-    /// Dispatch tool `i` as an in-flight future on `self.inflight`. The future
-    /// borrows `&'a orch` and is polled on the current task (no spawn). It
-    /// routes through the existing per-tool pipeline
-    /// [`crate::turn_loop::dispatch_tool_uses_tracked`] (one tool at a time) so
-    /// the hook→permission→registry ordering stays byte-locked.
-    fn start_tool(&mut self, i: usize) {
-        self.tools[i].status = ToolStatus::Executing;
-        let id = self.tools[i].id.clone();
-        let name = self.tools[i].name.clone();
-        let input = self.tools[i].input.clone();
-        let provider_id = self.tools[i].provider_id.clone();
-        let assistant_id = self.tools[i].assistant_id;
-        let orch = self.orch;
-        // Hand this tool a child of the executor's `tool_abort` token. When the
-        // turn is discarded (or the user interrupts, via the parented
-        // `user_cancel`), `tool_abort` fires and this child fires too — an
-        // in-flight Bash kills its subprocess.
-        let child = self.tool_abort.child_token();
-        let fut = async move {
-            let single = vec![(id, name, input, provider_id)];
-            let outcome: DispatchOutcome =
-                match crate::turn_loop::dispatch_tool_uses_tracked_deferred(
-                    orch,
-                    &single,
-                    Some(child),
-                    Some(assistant_id),
-                )
-                .await
-                {
-                    // `single` has one element, so `pop()` == the only result.
-                    Ok(mut dispatched) => dispatched
-                        .results
-                        .pop()
-                        .map(|block| {
-                            (
-                                block,
-                                dispatched.prevent_continuation,
-                                dispatched.injected_messages,
-                                dispatched.context_modifiers,
-                                dispatched.post_tool_batch_calls,
-                            )
-                        })
-                        .ok_or_else(|| {
-                            crate::error::OrchestratorError::StreamingProtocol(format!(
-                                "dispatch returned empty for tool index {i}"
-                            ))
-                        }),
-                    Err(e) => Err(e),
-                };
-            (i, outcome)
         };
-        self.inflight.push(Box::pin(fut));
-    }
-
-    /// `true` when no tool futures are currently in flight. Accessor for the
-    /// live loop (which cannot reach the private `inflight` field across module
-    /// boundaries).
-    pub(crate) fn inflight_is_empty(&self) -> bool {
-        self.inflight.is_empty()
-    }
-
-    /// TS `getAbortReason` (StreamingToolExecutor.ts:210-231): why tool `i` should
-    /// be cancelled, computed from PRIOR state. Precedence is faithful:
-    /// `discarded` → `StreamingFallback`, then a fired USER-interrupt token →
-    /// `UserInterrupted` ONLY when this tool's `interrupt_behavior()==Cancel`
-    /// (Block-behavior tools are NOT interrupted; TS returns `null` for them).
-    /// Unlike `discarded` — which applies to the whole batch — the user-interrupt
-    /// branch is PER-TOOL, so it must be evaluated by index here rather than
-    /// precomputed once.
-    fn abort_reason_for(&self, i: usize) -> Option<AbortReason> {
-        if self.discarded {
-            return Some(AbortReason::StreamingFallback);
+        for (id, status) in statuses {
+            let Some(tool) = self.tools.iter_mut().find(|tool| tool.id == id) else {
+                continue;
+            };
+            if tool.status == ToolStatus::Yielded {
+                continue;
+            }
+            tool.status = match status {
+                SchedulerStatus::Queued => ToolStatus::Queued,
+                SchedulerStatus::Executing => ToolStatus::Executing,
+                // The status snapshot does not transfer the completion payload.
+                // Keep the local state until Tn folds that payload exactly once.
+                SchedulerStatus::Completed | SchedulerStatus::Yielded => tool.status,
+            };
         }
-        if let Some(token) = &self.user_cancel {
-            if token.is_cancelled() {
-                // TS `getToolInterruptBehavior`: default Block when the tool is not
-                // in the registry; only `Cancel` tools are user-interrupted.
-                let is_cancel = matches!(
-                    self.orch
-                        .tools
-                        .find_by_name(&self.tools[i].name)
-                        .map(|t| t.interrupt_behavior(&self.tools[i].input)),
-                    Some(tool_api::tool_trait::InterruptBehavior::Cancel)
-                );
-                if is_cancel {
-                    return Some(AbortReason::UserInterrupted);
+    }
+
+    pub(crate) fn orchestrator(&self) -> &'a ConversationOrchestrator {
+        self.orch
+    }
+
+    pub(crate) async fn is_current_generation_idle(&mut self) -> bool {
+        match self.scheduler.is_current_generation_idle().await {
+            Ok(idle) => idle,
+            Err(_) => {
+                self.scheduler_failed.store(true, Ordering::Release);
+                true
+            }
+        }
+    }
+
+    /// Apply the actor's already-folded context after the normal final drain.
+    /// Per-event Tn only sees the context snapshot carried by its ready rows.
+    pub(crate) async fn finish_context_layers(
+        &mut self,
+    ) -> Result<(), crate::error::OrchestratorError> {
+        if self.scheduler_failed.load(Ordering::Acquire) {
+            return Err(scheduler_stopped(
+                "finishing context layers after an actor failure",
+            ));
+        }
+        let state = self
+            .scheduler
+            .finish_normal()
+            .await
+            .map_err(|error| scheduler_error(error, "finishing context layers"))?;
+        if let Some(state) = state {
+            crate::turn_loop::apply_model_context_state(self.orch, state).await?;
+        }
+        Ok(())
+    }
+
+    /// Apply append-through to the canonical row at its stop-time boundary.
+    /// Query/W1 and persistence consume the accepted content; the source
+    /// ToolUse identity/input remain the separately registered dispatch facts.
+    pub(crate) async fn append_assistant_row(
+        &mut self,
+        row: &mut crate::streaming_loop::CompletedAssistantRow,
+    ) {
+        self.orch
+            .append_completed_assistant_row(row, Some(Arc::new(self.publication_fence.clone())))
+            .await;
+    }
+
+    pub(crate) fn publication_fence(
+        &self,
+    ) -> crate::autonomous_tool_scheduler::ToolDispatchPublicationFence {
+        self.publication_fence.clone()
+    }
+
+    /// `getAbortReason` for user interruption. Streaming fallback and host
+    /// abandonment reset the whole scheduler generation instead of
+    /// manufacturing per-call completions.
+    fn abort_reason_for(&self, i: usize) -> Option<AbortReason> {
+        let token = self.user_cancel.as_ref()?;
+        if !token.is_cancelled() {
+            return None;
+        }
+        let behavior = self.tools[i]
+            .resolved_tool
+            .as_ref()
+            .map(Arc::clone)
+            .or_else(|| self.orch.tools.find_by_name(&self.tools[i].name))
+            .map(|tool| tool.interrupt_behavior(&self.tools[i].input));
+        matches!(
+            behavior,
+            Some(tool_api::tool_trait::InterruptBehavior::Cancel)
+        )
+        .then_some(AbortReason::UserInterrupted)
+    }
+
+    /// Wait for autonomous task progress until Native Tn has ready data or the
+    /// generation becomes idle. Queue promotion is owned by the actor and does
+    /// not depend on this provider-loop poll.
+    pub(crate) async fn drain_one(&mut self) -> Option<usize> {
+        loop {
+            if self.scheduler.wait_for_progress().await.is_err() {
+                self.scheduler_failed.store(true, Ordering::Release);
+                return None;
+            }
+            let drained = self.drain_ready().await;
+            if drained > 0 {
+                return self.actor_ready_indices.back().copied();
+            }
+            match self.scheduler.is_current_generation_idle().await {
+                Ok(true) => return None,
+                Ok(false) => {}
+                Err(_) => {
+                    self.scheduler_failed.store(true, Ordering::Release);
+                    return None;
                 }
             }
         }
-        None
     }
 
-    /// Await one in-flight tool future and record its result. Returns the
-    /// completed tool index, or `None` if no futures are in flight.
-    /// (TS `executeTool`/`collectResults` completion path.)
-    pub(crate) async fn drain_one(&mut self) -> Option<usize> {
-        let (i, outcome) = self.inflight.next().await?;
+    /// Nonblocking Native Tn scan. The owned actor has already collected any
+    /// W1 completion and advanced its queue without requiring this event poll.
+    pub(crate) async fn drain_ready(&mut self) -> usize {
+        let ready = match self.scheduler.take_ready().await {
+            Ok(ready) => ready,
+            Err(_) => {
+                self.scheduler_failed.store(true, Ordering::Release);
+                tracing::error!("autonomous streaming scheduler stopped before Tn");
+                return 0;
+            }
+        };
+        let count = self.ingest_owned_dispatches(ready).await;
+        self.sync_statuses().await;
+        count
+    }
+
+    /// Ready-only terminal Tn(false) followed by the completed-only suffix.
+    /// Neither actor scan schedules a newly queued call.
+    pub(crate) async fn drain_ready_without_queue(&mut self) -> usize {
+        if self.scheduler.stop_scheduling().await.is_err() {
+            self.scheduler_failed.store(true, Ordering::Release);
+            tracing::error!("autonomous scheduler stopped before terminal scheduling barrier");
+            return 0;
+        }
+        let first = match self.scheduler.take_ready().await {
+            Ok(ready) => ready,
+            Err(_) => {
+                self.scheduler_failed.store(true, Ordering::Release);
+                tracing::error!("autonomous streaming scheduler stopped before terminal Tn");
+                return 0;
+            }
+        };
+        let mut completed = self.ingest_owned_dispatches(first).await;
+        let rest = match self.scheduler.take_all_ready().await {
+            Ok(ready) => ready,
+            Err(_) => {
+                self.scheduler_failed.store(true, Ordering::Release);
+                tracing::error!("autonomous streaming scheduler stopped before terminal drain");
+                return completed;
+            }
+        };
+        completed += self.ingest_owned_dispatches_to_terminal(rest).await;
+        self.sync_statuses().await;
+        completed
+    }
+
+    async fn ingest_owned_dispatches(&mut self, ready: Vec<CompletedDispatch>) -> usize {
+        self.ingest_owned_dispatches_into(ready, false).await
+    }
+
+    async fn ingest_owned_dispatches_to_terminal(
+        &mut self,
+        ready: Vec<CompletedDispatch>,
+    ) -> usize {
+        self.ingest_owned_dispatches_into(ready, true).await
+    }
+
+    async fn ingest_owned_dispatches_into(
+        &mut self,
+        ready: Vec<CompletedDispatch>,
+        terminal: bool,
+    ) -> usize {
+        let mut count = 0;
+        for completed in ready {
+            let Some(index) = self
+                .tools
+                .iter()
+                .position(|tool| tool.id == completed.meta.id)
+            else {
+                tracing::error!(tool_use_id = %completed.meta.id, "scheduler returned an unregistered tool");
+                continue;
+            };
+            let outcome = match completed.outcome {
+                Ok(payload) => {
+                    let dispatch = payload.dispatch;
+                    let mut results = dispatch.results.into_iter();
+                    match (results.next(), results.next()) {
+                        (Some(block), None) => Ok((
+                            block,
+                            dispatch.prevent_continuation,
+                            dispatch.injected_messages,
+                            dispatch.context_modifiers,
+                            dispatch.post_tool_batch_calls,
+                            dispatch.publications,
+                        )),
+                        _ => Err(crate::error::OrchestratorError::StreamingProtocol(
+                            "autonomous scheduler dispatch returned an invalid result count".into(),
+                        )),
+                    }
+                }
+                Err(error) => Err(error),
+            };
+            // The actor transfers each outcome once. Fold it even when an
+            // earlier status observation or unknown-tool fast path is complete.
+            self.record_completion(index, outcome).await;
+            if terminal {
+                self.actor_terminal_ready_indices.push_back(index);
+            } else {
+                self.actor_ready_indices.push_back(index);
+            }
+            count += 1;
+        }
+        count
+    }
+
+    async fn record_completion(&mut self, i: usize, outcome: DispatchOutcome) {
         // Compute the abort reason from PRIOR state (discard / user-interrupt). A
         // cancelled in-flight tool's real outcome is discarded for the synthetic.
         let abort_reason = self.abort_reason_for(i);
@@ -540,41 +803,39 @@ impl<'a> StreamingToolExecutor<'a> {
             // `toolDenialKind:"user-rejected"` to the `user_interrupted`
             // synthetic (@232972524) and NO kind to `streaming_fallback` /
             // `conversation_ended`, so follow the block that actually survives.
-            let is_mcp = self
-                .orch
-                .tools
-                .find_by_name(&self.tools[i].name)
-                .is_some_and(|tool| tool.is_mcp());
-            match reason {
-                AbortReason::UserInterrupted => {
-                    self.orch
-                        .record_tool_denial_kind(
-                            &self.tools[i].id,
-                            if is_mcp {
-                                "interrupted"
-                            } else {
-                                "user-rejected"
-                            },
-                        )
-                        .await;
-                }
-                AbortReason::StreamingFallback => {
-                    self.orch.remove_tool_denial_kind(&self.tools[i].id).await;
-                }
-            }
-            // O1: the discarded real outcome may already have recorded a
-            // `toolUseResult`; the synthetic that survives carries claude's own
-            // literal instead. `record_tool_use_result` overwrites, so this both
-            // corrects the value and prevents a stale entry.
-            self.orch
-                .record_tool_use_result(
-                    &self.tools[i].id,
-                    synthetic_tool_use_result_for_tool(reason, is_mcp),
+            let is_mcp = self.tools[i]
+                .resolved_tool
+                .as_ref()
+                .map_or_else(
+                    || self.orch.tools.find_by_name(&self.tools[i].name),
+                    |tool| Some(Arc::clone(tool)),
                 )
-                .await;
+                .is_some_and(|tool| tool.is_mcp());
+            let denial_kind = match reason {
+                AbortReason::UserInterrupted => Some(if is_mcp {
+                    "interrupted".to_owned()
+                } else {
+                    "user-rejected".to_owned()
+                }),
+                AbortReason::StreamingFallback => None,
+            };
+            let tool_use_result = synthetic_tool_use_result_for_tool(reason, is_mcp);
             let mut block =
                 synthetic_error_block_for_tool(self.tools[i].id.clone(), reason, is_mcp);
             set_provider_id(&mut block, self.tools[i].provider_id.clone());
+            let content = match &block {
+                ContentBlock::ToolResult { content, .. } => content.clone(),
+                _ => unreachable!("synthetic abort result is a ToolResult"),
+            };
+            let mut publication = crate::turn_loop::ToolResultPublication::frame_only(
+                &self.tools[i].id,
+                &self.tools[i].name,
+                &content,
+                serde_json::json!({ "error": content }),
+            );
+            publication.tool_use_result = Some(tool_use_result);
+            publication.denial_kind = denial_kind;
+            self.tools[i].publications = vec![publication];
             let post_tool_batch_call = post_tool_batch_call_for_result(
                 &self.tools[i].id,
                 &self.tools[i].name,
@@ -585,11 +846,11 @@ impl<'a> StreamingToolExecutor<'a> {
             self.tools[i].result = Some(block);
             // A cancelled tool yields ONLY the synthetic — its injected msgs/modifiers are dropped.
             self.tools[i].status = ToolStatus::Completed;
-            return Some(i);
+            return;
         }
         // Otherwise record the real outcome (existing handling).
         match outcome {
-            Ok((mut block, prevent, injected, modifiers, post_tool_batch_calls)) => {
+            Ok((mut block, prevent, injected, modifiers, post_tool_batch_calls, publications)) => {
                 // Copy the provider id onto the result for egress replay.
                 set_provider_id(&mut block, self.tools[i].provider_id.clone());
                 self.tools[i].result = Some(block);
@@ -597,6 +858,7 @@ impl<'a> StreamingToolExecutor<'a> {
                 self.tools[i].injected = injected;
                 self.tools[i].modifiers = modifiers;
                 self.tools[i].post_tool_batch_calls = post_tool_batch_calls;
+                self.tools[i].publications = publications;
                 self.tools[i].status = ToolStatus::Completed;
             }
             Err(e) => {
@@ -610,7 +872,7 @@ impl<'a> StreamingToolExecutor<'a> {
                     content: format!(
                         "<tool_use_error>Error calling tool ({name}): {e}</tool_use_error>"
                     ),
-                    is_error: true,
+                    is_error: Some(true),
                     provider_tool_use_id: self.tools[i].provider_id.clone(),
                     content_blocks: None,
                 };
@@ -625,115 +887,215 @@ impl<'a> StreamingToolExecutor<'a> {
                 self.tools[i].status = ToolStatus::Completed;
             }
         }
-        Some(i)
     }
 
-    /// Convert still-`Queued` tools to a synthetic-cancel result once
-    /// `discarded` is set / the user interrupts (TS `getAbortReason` on next
-    /// poll). This handles ONLY the `Queued` siblings; in-flight (`Executing`)
-    /// siblings are substituted with the synthetic in [`Self::drain_one`] on
-    /// their next completion (mirroring `collectResults` 335-345). The two are
-    /// complementary: queued tools never enter `inflight`, so `drain_one` never
-    /// sees them, and an executing tool is never `Queued` here.
-    ///
-    /// RETURNS every substituted id WITH its reason, so the async caller can
-    /// stamp the transcript side-tables:
-    /// * [`AbortReason::UserInterrupted`] ⇒ `toolDenialKind:"user-rejected"` —
-    ///   the synthetic claude-code builds here (`createSyntheticErrorMessage`,
-    ///   2.1.220 @232972360) carries it (@232972524) exactly as the in-flight
-    ///   substitution in [`Self::drain_one`] does. `StreamingFallback` carries
-    ///   NO kind, and a queued tool never reached dispatch, so there is no
-    ///   prior entry to clear.
-    /// * BOTH reasons ⇒ a `toolUseResult` literal
-    ///   ([`synthetic_tool_use_result`]).
-    ///
-    /// Recording cannot happen inline because this method is sync and the
-    /// recorders take the orchestrator's async mutexes.
-    ///
-    /// NOT `#[must_use]`: `streaming_executor_test.rs` calls this as a bare
-    /// statement to assert only the synthetic block, and that file is owned by
-    /// a concurrent session.
-    pub(crate) fn apply_abort_to_pending(&mut self) -> Vec<(ToolUseId, AbortReason, bool)> {
-        let mut substituted = Vec::new();
-        for i in 0..self.tools.len() {
-            if !matches!(self.tools[i].status, ToolStatus::Queued) || self.tools[i].result.is_some()
-            {
-                continue;
-            }
-            // Per-tool: the user-interrupt branch in `abort_reason_for` gates on
-            // `interrupt_behavior()`, so a Queued Block-behavior tool under a pure
-            // user-interrupt gets `None` here and still runs (faithful: Block tools
-            // are not interrupted). `discarded` applies to all.
-            let Some(reason) = self.abort_reason_for(i) else {
-                continue;
-            };
-            let is_mcp = self
-                .orch
-                .tools
-                .find_by_name(&self.tools[i].name)
-                .is_some_and(|tool| tool.is_mcp());
-            substituted.push((self.tools[i].id.clone(), reason, is_mcp));
-            let mut block =
-                synthetic_error_block_for_tool(self.tools[i].id.clone(), reason, is_mcp);
-            set_provider_id(&mut block, self.tools[i].provider_id.clone());
-            let post_tool_batch_call = post_tool_batch_call_for_result(
-                &self.tools[i].id,
-                &self.tools[i].name,
-                &self.tools[i].input,
-                &block,
-            );
-            self.tools[i].post_tool_batch_calls = vec![post_tool_batch_call];
-            self.tools[i].result = Some(block);
-            self.tools[i].status = ToolStatus::Completed;
+    /// Reconcile user cancellation in the autonomous actor. The actor cancels
+    /// only executing `InterruptBehavior::Cancel` calls and converts queued
+    /// Cancel calls to completed records; Block calls keep running/queued.
+    pub(crate) async fn apply_abort_to_pending_owned(&mut self) {
+        if self.scheduler.apply_user_interrupt().await.is_err() {
+            self.scheduler_failed.store(true, Ordering::Release);
+            tracing::error!("autonomous scheduler stopped while applying user interruption");
         }
-        substituted
     }
 
-    /// Mark the turn discarded (streaming fallback). Pending tools get a
-    /// `StreamingFallback` synthetic result on the next `apply_abort_to_pending`.
-    // Still only exercised by the Task-11 fallback test path / Phase 2; the live
-    // loop does not yet discard.
-    #[allow(dead_code)]
-    fn discard(&mut self) {
-        self.discarded = true;
-        // Streaming-fallback also aborts in-flight work — fire `tool_abort` so
-        // any in-flight Bash kills its subprocess.
-        self.tool_abort.cancel();
+    /// Reset the owned actor generation after accepted fallback handling. The
+    /// scheduler synchronously cancels its generation root before acknowledging
+    /// the reset, so late old-generation modifiers cannot reach the queue.
+    pub(crate) async fn reset_after_server_fallback_owned(
+        &mut self,
+        reason: Option<ToolUseRemovalReason>,
+    ) -> Result<ToolUseRemoval, crate::error::OrchestratorError> {
+        let removal = self
+            .scheduler
+            .reset_after_server_fallback(reason)
+            .await
+            .map_err(|_| {
+                self.scheduler_failed.store(true, Ordering::Release);
+                scheduler_stopped("resetting after server fallback")
+            })?;
+        self.publication_fence = self.scheduler.current_publication_fence();
+        self.tools.clear();
+        self.actor_ready_indices.clear();
+        self.actor_terminal_ready_indices.clear();
+        self.tool_use_lifecycle.apply_removal(&removal);
+        Ok(removal)
+    }
+
+    /// Drain every already-completed result and discard all remaining tool
+    /// work after a provider error. Queued calls are never started, running
+    /// calls receive the shared abort signal and their generation is fenced,
+    /// and each unmatched tool use receives Native's terminal-error synthetic.
+    pub(crate) async fn abandon_after_model_error(
+        &mut self,
+        error: &str,
+    ) -> (Vec<DrainedResult>, ToolUseRemoval) {
+        if self.scheduler.stop_scheduling().await.is_err() {
+            tracing::error!("autonomous scheduler stopped while entering model-error drain");
+        }
+        self.sync_statuses().await;
+        let mut unmatched = Vec::new();
+        let unmatched_facts = self
+            .tools
+            .iter()
+            .filter(|tool| matches!(tool.status, ToolStatus::Queued | ToolStatus::Executing))
+            .map(|tool| {
+                (
+                    tool.id.clone(),
+                    tool.provider_id.clone(),
+                    tool.assistant_id,
+                    tool.name.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (id, provider_id, assistant_id, name) in unmatched_facts {
+            self.orch.clear_discarded_tool_result_metadata(&id).await;
+            let result_text = terminal_error_tool_result(error);
+            let block = ContentBlock::ToolResult {
+                tool_use_id: id,
+                content: result_text.clone(),
+                is_error: Some(true),
+                provider_tool_use_id: provider_id,
+                content_blocks: None,
+            };
+            unmatched.push(DrainedResult {
+                assistant_id,
+                publication_guard: Some(Arc::new(self.publication_fence.clone())),
+                tool: name,
+                block,
+                prevent_continuation: false,
+                injected: Vec::new(),
+                modifiers: Vec::new(),
+                post_tool_batch_calls: Vec::new(),
+                publications: Vec::new(),
+                tool_use_result: Some(serde_json::Value::String(result_text)),
+            });
+        }
+
+        let removal = ToolUseRemoval {
+            ids: self.tools.iter().map(|tool| tool.id.clone()).collect(),
+            reason: None,
+        };
+        match self.scheduler.reset_after_server_fallback(None).await {
+            Ok(actor_removal) => {
+                self.tool_use_lifecycle.apply_removal(&actor_removal);
+            }
+            Err(_) => {
+                tracing::error!("autonomous scheduler stopped while abandoning model-error work")
+            }
+        }
+        self.tools.clear();
+        self.actor_ready_indices.clear();
+        self.actor_terminal_ready_indices.clear();
+        (unmatched, removal)
+    }
+
+    /// Cancel and drop the rest of a failed/abandoned attempt without creating
+    /// user-facing tool-result synthetics. Used for host failures and chain
+    /// advancement, whose Native paths discard the attempt instead.
+    pub(crate) async fn abandon_without_synthetics(&mut self) -> ToolUseRemoval {
+        if self.scheduler.stop_scheduling().await.is_err() {
+            tracing::error!("autonomous scheduler stopped while abandoning tool work");
+        }
+        let removal = ToolUseRemoval {
+            ids: self.tools.iter().map(|tool| tool.id.clone()).collect(),
+            reason: None,
+        };
+        let discarded_ids = self
+            .tools
+            .iter()
+            .filter(|tool| matches!(tool.status, ToolStatus::Queued | ToolStatus::Executing))
+            .map(|tool| tool.id.clone())
+            .collect::<Vec<_>>();
+        for id in discarded_ids {
+            self.orch.clear_discarded_tool_result_metadata(&id).await;
+        }
+        match self.scheduler.reset_after_server_fallback(None).await {
+            Ok(actor_removal) => {
+                self.tool_use_lifecycle.apply_removal(&actor_removal);
+            }
+            Err(_) => {
+                tracing::error!("autonomous scheduler stopped while abandoning tool work")
+            }
+        }
+        self.tools.clear();
+        self.actor_ready_indices.clear();
+        self.actor_terminal_ready_indices.clear();
+        removal
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn apply_abort_to_pending(&mut self) {
+        self.apply_abort_to_pending_owned().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn reset_after_server_fallback(
+        &mut self,
+        reason: Option<ToolUseRemovalReason>,
+    ) -> ToolUseRemoval {
+        self.reset_after_server_fallback_owned(reason)
+            .await
+            .expect("owned actor resets its current generation")
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn discard(&mut self) {
+        self.scheduler
+            .stop_scheduling()
+            .await
+            .expect("owned actor stops scheduling");
+        self.reset_after_server_fallback_owned(None)
+            .await
+            .expect("owned actor discards its current generation");
     }
 
     #[cfg(test)]
     pub(crate) async fn run_to_completion(
         &mut self,
     ) -> Result<Vec<ContentBlock>, crate::error::OrchestratorError> {
-        loop {
-            for (id, reason, is_mcp) in self.apply_abort_to_pending() {
-                if reason == AbortReason::UserInterrupted {
-                    self.orch
-                        .record_tool_denial_kind(
-                            &id,
-                            if is_mcp {
-                                "interrupted"
-                            } else {
-                                "user-rejected"
-                            },
-                        )
-                        .await;
-                }
-                self.orch
-                    .record_tool_use_result(&id, synthetic_tool_use_result_for_tool(reason, is_mcp))
-                    .await;
-            }
-            self.process_queue();
-            if self.inflight.is_empty() {
-                break;
-            }
+        self.apply_abort_to_pending_owned().await;
+        while !self.is_current_generation_idle().await {
             self.drain_one().await;
         }
+        self.finish_context_layers().await?;
         Ok(self
             .tools
             .iter()
-            .map(|t| t.result.clone().expect("completed"))
+            .map(|tool| tool.result.clone().expect("scheduler completed each tool"))
             .collect())
+    }
+
+    /// Apply the conversation-owned controller for an admitted streamed
+    /// fallback observation. The event carries provider routing facts only;
+    /// the controller decides whether this conversation accepts the hop.
+    pub(crate) async fn observe_server_fallback(
+        &mut self,
+        info: &llm_runtime::history::HistoryServerFallback,
+        discarded_had_tool_use: bool,
+    ) -> Result<crate::server_fallback::ServerFallbackAdmission, crate::error::OrchestratorError>
+    {
+        crate::server_fallback::handle(self.orch, info, discarded_had_tool_use).await
+    }
+
+    pub(crate) async fn persist_completed_assistant_row(
+        &mut self,
+        row: &mut crate::streaming_loop::CompletedAssistantRow,
+    ) -> Option<crate::streaming_loop::PersistedAssistantRowLink> {
+        self.orch
+            .persist_completed_assistant_row(row, Some(Arc::new(self.publication_fence.clone())))
+            .await
+    }
+
+    pub(crate) async fn remove_assistant_stream_rows(
+        &mut self,
+        rows: &[crate::streaming_loop::PersistedAssistantRowLink],
+    ) {
+        self.orch.remove_assistant_stream_rows(rows).await;
+    }
+
+    pub(crate) fn last_request_id(&self) -> Option<String> {
+        self.orch.api.last_request_id()
     }
 }
 
@@ -771,6 +1133,31 @@ fn set_provider_id(block: &mut ContentBlock, provider_id: Option<String>) {
     {
         *provider_tool_use_id = provider_id;
     }
+}
+
+fn unknown_tool_publication(
+    orch: &ConversationOrchestrator,
+    id: &ToolUseId,
+    name: &str,
+    block: &ContentBlock,
+) -> crate::turn_loop::ToolResultPublication {
+    let suffix = unknown_tool_suffix_for(name, orch);
+    let model_text = match block {
+        ContentBlock::ToolResult { content, .. } => content.clone(),
+        _ => format!(
+            "<tool_use_error>Error: No such tool available: {name}{suffix}</tool_use_error>"
+        ),
+    };
+    let mut publication = crate::turn_loop::ToolResultPublication::frame_only(
+        id,
+        name,
+        &model_text,
+        serde_json::json!({ "error": format!("tool not found: {name}") }),
+    );
+    publication.tool_use_result = Some(serde_json::Value::String(format!(
+        "Error: No such tool available: {name}{suffix}"
+    )));
+    publication
 }
 
 fn post_tool_batch_call_for_result(
@@ -811,12 +1198,31 @@ fn post_tool_batch_call_for_result(
 /// per-turn assistant via that assistant's captured JSONL uuid (TS
 /// `sourceToolAssistantUUID`), so no per-result assistant id is carried here.
 pub(crate) struct DrainedResult {
+    /// Assistant content-block row that owned this tool use. For a live
+    /// streaming row this is the stop-time UUID; batched/recovered callers use
+    /// their merged assistant identity and may supply a persisted parent map.
+    pub(crate) assistant_id: MessageId,
+    /// Host-only owner for settling this result; it is not part of any Native
+    /// event or serialized transcript row.
+    pub(crate) publication_guard: Option<Arc<dyn hooks::attachment::HookPublicationGuard>>,
     pub(crate) tool: String,
     pub(crate) block: ContentBlock,
     pub(crate) prevent_continuation: bool,
     pub(crate) injected: Vec<(ConversationMessage, ToolUseId)>,
     pub(crate) modifiers: Vec<ContextModifier>,
     pub(crate) post_tool_batch_calls: Vec<hooks::events::PostToolBatchCall>,
+    pub(crate) publications: Vec<crate::turn_loop::ToolResultPublication>,
+    /// Native `toolUseResult` sidecar for terminal-error synthetics. Normal
+    /// provider tool results already installed their sidecar at dispatch.
+    pub(crate) tool_use_result: Option<serde_json::Value>,
+}
+
+/// Native `xl(error)` text used for unmatched tool uses on ordinary model
+/// errors. Kept separate from cancelled-tool and sibling-error synthetics.
+pub(crate) fn terminal_error_tool_result(error: &str) -> String {
+    format!(
+        "The turn ended on an error, so this tool call was cancelled. If it had already started, some of its effects may have happened. Error: {error}"
+    )
 }
 
 impl<'a> StreamingToolExecutor<'a> {
@@ -825,31 +1231,50 @@ impl<'a> StreamingToolExecutor<'a> {
     /// non-concurrency-safe tool (don't emit past an unfinished exclusive
     /// barrier). Returns results in RECEIVED order.
     pub(crate) fn take_newly_completed(&mut self) -> Vec<DrainedResult> {
-        let mut out = Vec::new();
-        for t in &mut self.tools {
-            match t.status {
-                ToolStatus::Completed => {
-                    t.status = ToolStatus::Yielded;
-                    out.push(DrainedResult {
-                        tool: t.name.clone(),
-                        block: t.result.clone().expect("completed tool has result"),
-                        prevent_continuation: t.prevent_continuation,
-                        injected: std::mem::take(&mut t.injected),
-                        modifiers: std::mem::take(&mut t.modifiers),
-                        post_tool_batch_calls: std::mem::take(&mut t.post_tool_batch_calls),
-                    });
-                }
-                ToolStatus::Yielded => continue,
-                ToolStatus::Executing if !t.is_concurrency_safe => break,
-                _ => {}
-            }
-        }
-        out
+        let indices = std::mem::take(&mut self.actor_ready_indices);
+        indices
+            .into_iter()
+            .filter_map(|index| self.take_one_completed(index))
+            .collect()
     }
 
-    /// TS `hasUnfinishedTools`: any tool not yet `Yielded`. The live loop drives
-    /// on `inflight_is_empty` instead (guaranteed-progress shape), so this is
-    /// exercised by the executor's tests; kept as the faithful API twin.
+    fn take_one_completed(&mut self, index: usize) -> Option<DrainedResult> {
+        let publication_guard: Arc<dyn hooks::attachment::HookPublicationGuard> =
+            Arc::new(self.publication_fence.clone());
+        let tool = self.tools.get_mut(index)?;
+        if tool.status != ToolStatus::Completed {
+            return None;
+        }
+        tool.status = ToolStatus::Yielded;
+        self.tool_use_lifecycle.observe_tool_result(&tool.id);
+        Some(DrainedResult {
+            assistant_id: tool.assistant_id,
+            publication_guard: Some(publication_guard),
+            tool: tool.name.clone(),
+            block: tool.result.clone().expect("completed tool has result"),
+            prevent_continuation: tool.prevent_continuation,
+            injected: std::mem::take(&mut tool.injected),
+            modifiers: std::mem::take(&mut tool.modifiers),
+            post_tool_batch_calls: std::mem::take(&mut tool.post_tool_batch_calls),
+            publications: std::mem::take(&mut tool.publications),
+            tool_use_result: None,
+        })
+    }
+
+    /// Take all completed results in received order without applying the
+    /// ordinary non-concurrency-safe delivery barrier. Native's terminal
+    /// finalizer first runs Tn(false), then separately collects futures which
+    /// finished beyond that barrier.
+    pub(crate) fn take_all_completed(&mut self) -> Vec<DrainedResult> {
+        let indices = std::mem::take(&mut self.actor_terminal_ready_indices);
+        indices
+            .into_iter()
+            .filter_map(|index| self.take_one_completed(index))
+            .collect()
+    }
+
+    /// TS `hasUnfinishedTools`: any tool not yet `Yielded`. Scheduler progress
+    /// is independent of this facade-level query.
     #[allow(dead_code)]
     pub(crate) fn has_unfinished(&self) -> bool {
         self.tools.iter().any(|t| t.status != ToolStatus::Yielded)
@@ -871,7 +1296,7 @@ pub(crate) fn synthetic_unknown_tool(
         content: format!(
             "<tool_use_error>Error: No such tool available: {name}{suffix}</tool_use_error>"
         ),
-        is_error: true,
+        is_error: Some(true),
         provider_tool_use_id: provider_id,
         content_blocks: None,
     }
@@ -953,7 +1378,9 @@ pub(crate) fn unknown_tool_suffix(
         );
     }
     if registered.is_some() && canonical == "SendUserMessage" {
-        return format!(". {name} is not enabled in this session \u{2014} write your message as normal assistant text instead.");
+        return format!(
+            ". {name} is not enabled in this session \u{2014} write your message as normal assistant text instead."
+        );
     }
     let in_catalog = registered.is_some();
     // 2.1.263 `dt("external")` / Y7e. A catalog entry is not necessarily
@@ -1083,17 +1510,18 @@ mod streaming_executor_test;
 #[cfg(test)]
 mod synthetic_denial_kind_tests {
     use super::*;
+    use crate::OrchestratorConfig;
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
-        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-        StaticMemoryProvider,
+        MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+        noop_hook_executor,
     };
-    use crate::OrchestratorConfig;
     use async_trait::async_trait;
     use lingxi_core::types::MessageId;
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tool_api::context::ToolUseContext;
     use tool_api::progress::ToolProgressSender;
     use tool_api::registry::ToolRegistry;
@@ -1187,10 +1615,10 @@ mod synthetic_denial_kind_tests {
         }
     }
 
-    fn orch() -> ConversationOrchestrator {
+    fn orch() -> Arc<ConversationOrchestrator> {
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(CancelTool) as Arc<dyn Tool>);
-        ConversationOrchestrator::new(
+        ConversationOrchestrator::into_shared(ConversationOrchestrator::new(
             OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(vec![])),
             Arc::new(registry),
@@ -1199,7 +1627,7 @@ mod synthetic_denial_kind_tests {
             Arc::new(MockOutputStream::new()),
             Arc::new(StaticMemoryProvider::empty()),
             PathBuf::from("/tmp"),
-        )
+        ))
     }
 
     #[tokio::test]
@@ -1208,11 +1636,23 @@ mod synthetic_denial_kind_tests {
         let user_cancel = tokio_util::sync::CancellationToken::new();
         let a = MessageId::new();
         let id = ToolUseId::new();
-        let mut exec = StreamingToolExecutor::new_with_user_cancel(&orch, user_cancel.clone());
-        exec.add_tool(id.clone(), "CancelTool".into(), json!({}), None, a);
-        exec.process_queue();
+        let mut exec =
+            StreamingToolExecutor::try_new_with_user_cancel(&orch, Vec::new(), user_cancel.clone())
+                .await
+                .unwrap();
+        exec.add_tool(id.clone(), "CancelTool".into(), json!({}), None, a)
+            .await;
         user_cancel.cancel();
         let results = exec.run_to_completion().await.unwrap();
+        let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
+        orch.settle_stream_tool_results(
+            &mut settlement,
+            exec.take_newly_completed(),
+            &std::collections::HashMap::new(),
+            &None,
+        )
+        .await;
+
         let ContentBlock::ToolResult { content, .. } = &results[0] else {
             panic!("expected a tool_result")
         };
@@ -1235,10 +1675,12 @@ mod synthetic_denial_kind_tests {
         let orch = orch();
         let a = MessageId::new();
         let id = ToolUseId::new();
-        let mut exec = StreamingToolExecutor::new(&orch);
-        exec.add_tool(id.clone(), "CancelTool".into(), json!({}), None, a);
-        exec.process_queue();
-        exec.discard();
+        let mut exec = StreamingToolExecutor::try_new(&orch, Vec::new())
+            .await
+            .unwrap();
+        exec.add_tool(id.clone(), "CancelTool".into(), json!({}), None, a)
+            .await;
+        exec.discard().await;
         let _ = exec.run_to_completion().await.unwrap();
         assert!(
             !orch
@@ -1265,12 +1707,26 @@ mod synthetic_denial_kind_tests {
         let user_cancel = tokio_util::sync::CancellationToken::new();
         let a = MessageId::new();
         let id = ToolUseId::new();
-        let mut exec = StreamingToolExecutor::new_with_user_cancel(&orch, user_cancel.clone());
-        exec.add_tool(id.clone(), "CancelTool".into(), json!({}), None, a);
-        // Cancel while the tool is still Queued — `process_queue` never runs it,
-        // so `apply_abort_to_pending` is the path that produces the synthetic.
+        let mut exec =
+            StreamingToolExecutor::try_new_with_user_cancel(&orch, Vec::new(), user_cancel.clone())
+                .await
+                .unwrap();
+        // Cancel before admission: the actor completes this queued call
+        // without entering W1, then Tn hands its synthetic to settlement.
         user_cancel.cancel();
+        exec.add_tool(id.clone(), "CancelTool".into(), json!({}), None, a)
+            .await;
+        assert_eq!(exec.tools[0].status, ToolStatus::Queued);
         let results = exec.run_to_completion().await.unwrap();
+        let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
+        orch.settle_stream_tool_results(
+            &mut settlement,
+            exec.take_newly_completed(),
+            &std::collections::HashMap::new(),
+            &None,
+        )
+        .await;
+
         let ContentBlock::ToolResult { content, .. } = &results[0] else {
             panic!("expected a tool_result")
         };

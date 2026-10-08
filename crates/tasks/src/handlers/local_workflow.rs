@@ -46,14 +46,14 @@ use lingxi_core::host::{
     SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
 };
 use serde_json::Value;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::id::TaskType;
 use crate::output_manager::TaskOutputManager;
 use crate::state::TaskStatus;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
-use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::AnalyticsBus;
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 
 // Reuse the status-sink seam defined once in the bash handler (single impl wired
 // across handlers), exactly as `local_agent` does.
@@ -563,6 +563,24 @@ struct WorkspaceLeaseToolInvoker {
 
 #[async_trait]
 impl ToolInvoker for WorkspaceLeaseToolInvoker {
+    async fn cleanup_computer_inputs(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        origin_session_id: Option<lingxi_core::types::SessionId>,
+    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
+        self.inner
+            .cleanup_computer_inputs(agent_id, origin_session_id)
+            .await
+    }
+
+    fn permission_mode(&self) -> Option<String> {
+        self.inner.permission_mode()
+    }
+
+    fn tool_is_concurrency_safe(&self, name: &str, input: &Value) -> Option<bool> {
+        self.inner.tool_is_concurrency_safe(name, input)
+    }
+
     async fn invoke(
         &self,
         name: &str,
@@ -598,17 +616,21 @@ impl ToolInvoker for WorkspaceLeaseToolInvoker {
             .await
     }
 
+    async fn invoke_supplied_detailed(
+        &self,
+        name: &str,
+        input: Value,
+        ctx: SubagentInvocationContext,
+        _workspace_lease_token: Option<u64>,
+        supplied: Arc<dyn Any + Send + Sync>,
+    ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+        self.inner
+            .invoke_supplied_detailed(name, input, ctx, Some(self.token), supplied)
+            .await
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
-    }
-    async fn cleanup_computer_inputs(
-        &self,
-        agent_id: lingxi_core::types::AgentId,
-        origin_session_id: Option<lingxi_core::types::SessionId>,
-    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
-        self.inner
-            .cleanup_computer_inputs(agent_id, origin_session_id)
-            .await
     }
 }
 
@@ -1394,7 +1416,7 @@ impl SubagentSpawner for WorkflowIsolationSpawner {
 
 /// The env var that raises or lowers the workflow's in-flight `agent()` gate
 /// for one run, above (or below) the CPU-derived default.
-const WORKFLOW_MAX_CONCURRENT_AGENTS_ENV: &str = "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS";
+const WORKFLOW_MAX_CONCURRENT_AGENTS_ENV: &str = branding::WORKFLOW_MAX_CONCURRENT_AGENTS_ENV;
 
 /// claude-code's DEFAULT concurrency cap for in-flight `agent()` calls —
 /// `lr(ir())` where `function lr(e){return Math.min(16,Math.max(2,e-2))}`
@@ -1602,6 +1624,14 @@ fn make_request(
     }
 
     SubagentSpawnRequest {
+        stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped,
+        handback_opt_in: false,
+        parent_permission_mode: None,
+        handback_enabled: None,
+        handback_ends_turn_enabled: None,
+        restored_handback_state: None,
+        restored_handback_history: Vec::new(),
+        restore_handback_start: None,
         teammate_color: None,
         subagent_type,
         prompt: prompt.to_string(),
@@ -1614,6 +1644,7 @@ fn make_request(
         // `agent(prompt, { label })` → the subagent's display label.
         name: opt_str("label"),
         team_name: None,
+        agent_spawn_provenance: Default::default(),
         creator_teammate_name: None,
         creator_team_name: None,
         creator_agent_id: None,
@@ -1622,6 +1653,7 @@ fn make_request(
         cwd: None,
         worktree: None,
         fork_context_messages: None,
+        instruction_context: None,
         fork_parent_system_prompt: None,
         // `agent(prompt, { schema })` → structured output. The opt is a JSON
         // Schema object; carry it as its serialised form for the runner to force.
@@ -1646,6 +1678,7 @@ fn make_request(
         origin_session_id: None,
         // Workflow-spawned agents are top-level ⇒ the spawner's default anchors.
         parent_model_override: None,
+        parent_model_profile_override: None,
         forked_skill_name: None,
         forked_skill_attribution: None,
         forked_skill_effort: None,
@@ -1908,6 +1941,29 @@ impl WorkflowAgentLiveObserver {
     async fn snapshot(&self) -> WorkflowProgressUpdate {
         self.state.lock().await.clone()
     }
+
+    async fn observe_message(
+        &self,
+        message: lingxi_core::types::ConversationMessage,
+        surfaced_error: Option<String>,
+    ) {
+        let now = unix_time_ms_now();
+        self.publish_with(move |state| {
+            state.last_progress_at_ms = Some(now);
+            if surfaced_error.is_some() {
+                state.error = surfaced_error;
+            }
+            if let lingxi_core::types::ConversationMessage::Assistant { content, .. } = message {
+                for block in content {
+                    if let lingxi_core::types::ContentBlock::ToolUse { name, .. } = block {
+                        state.last_tool_name = Some(name.clone());
+                        state.last_tool_summary = Some(name);
+                    }
+                }
+            }
+        })
+        .await;
+    }
 }
 
 #[async_trait]
@@ -1965,22 +2021,25 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for WorkflowAgentL
                 })
                 .await;
             }
-            lingxi_core::host::subagent_spawn::SubagentObservation::Message { message, .. } => {
-                let now = unix_time_ms_now();
-                self.publish_with(move |state| {
-                    state.last_progress_at_ms = Some(now);
-                    if let lingxi_core::types::ConversationMessage::Assistant { content, .. } =
-                        message
-                    {
-                        for block in content {
-                            if let lingxi_core::types::ContentBlock::ToolUse { name, .. } = block {
-                                state.last_tool_name = Some(name.clone());
-                                state.last_tool_summary = Some(name);
-                            }
-                        }
-                    }
-                })
-                .await;
+            lingxi_core::host::subagent_spawn::SubagentObservation::Message { message, .. }
+            | lingxi_core::host::subagent_spawn::SubagentObservation::MessageRow {
+                message, ..
+            } => self.observe_message(message, None).await,
+            lingxi_core::host::subagent_spawn::SubagentObservation::ServerFallbackApiErrorRow {
+                row,
+                ..
+            } => {
+                let message = row.query_message();
+                let refusal_text = message.text_content();
+                self.observe_message(message, Some(refusal_text)).await;
+            }
+            lingxi_core::host::subagent_spawn::SubagentObservation::ServerFallbackTombstone {
+                ..
+            } => {
+                // This observer holds only a progress projection, not a
+                // UUID-indexed transcript. The transcript-aware observer/output
+                // stream consumes the complete tombstone; do not guess which
+                // summary fields to retract here.
             }
             lingxi_core::host::subagent_spawn::SubagentObservation::Completed {
                 total_tool_use_count,
@@ -2180,6 +2239,7 @@ mod captured_output_tests {
                 return Ok(result.clone());
             }
             Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: lingxi_core::types::AgentId::new(),
                 content: Value::String("answer".into()),
                 usage: lingxi_core::host::SubagentUsage {
@@ -2281,6 +2341,7 @@ mod captured_output_tests {
         cumulative: lingxi_core::host::SubagentUsage,
     ) -> SubagentResult {
         SubagentResult::Completed {
+            handback: None,
             agent_id: lingxi_core::types::AgentId::new(),
             content: Value::String("answer".into()),
             usage: lingxi_core::host::SubagentUsage {

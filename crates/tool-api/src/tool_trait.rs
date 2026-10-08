@@ -13,6 +13,21 @@ use thiserror::Error;
 use crate::context::ToolUseContext;
 use crate::progress::ToolProgressSender;
 
+/// The four source facts Native `Mx` checks before exposing a wrapped V1
+/// tool through `$.tool.call`. A wrapper is hidden only when the tool declares
+/// every fact with the matching Native type.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NativeModToolBatchWrapperFacts<'a> {
+    /// Defined string field `underlyingV1ToolName`.
+    pub underlying_v1_tool_name: Option<&'a str>,
+    /// Defined string field `entryFieldName`.
+    pub entry_field_name: Option<&'a str>,
+    /// Whether `perEntryHookInputs` is a function.
+    pub per_entry_hook_inputs_is_function: bool,
+    /// Whether `reassemble` is a function.
+    pub reassemble_is_function: bool,
+}
+
 /// Contract implemented by every tool the agent can call.
 ///
 /// A `Tool` exposes static metadata (name, input/output schema, enablement,
@@ -29,6 +44,14 @@ pub trait Tool: Send + Sync {
     /// Defaults to no aliases.
     fn aliases(&self) -> &[&str] {
         &[]
+    }
+
+    /// Exact wrapper-shape facts consumed by Native `$.tool.call` catalog
+    /// filtering. Ordinary tools must return the default (all missing) value;
+    /// the unrelated [`Self::underlying_v1_tool_name`] pool-matching field is
+    /// not enough to identify a batch wrapper.
+    fn native_mod_tool_batch_wrapper_facts(&self) -> NativeModToolBatchWrapperFacts<'_> {
+        NativeModToolBatchWrapperFacts::default()
     }
 
     /// Canonical V1 tool identity used by tool-pool configuration matching.
@@ -71,6 +94,60 @@ pub trait Tool: Send + Sync {
     /// invalidated before reusing serialized schemas.
     fn input_schema_revision(&self) -> Option<String> {
         None
+    }
+
+    /// Provider-native desktop adaptation for this registered tool, when supported.
+    fn native_computer_capabilities(
+        &self,
+    ) -> Option<lingxi_llm_client::protocol::computer::ComputerCapabilities> {
+        None
+    }
+
+    /// Convert protocol data into this tool's ordinary input without executing it.
+    fn lower_computer_operation(
+        &self,
+        _operation: &lingxi_llm_client::protocol::computer::ComputerOperation,
+        _frame: &lingxi_llm_client::protocol::computer::ComputerFrame,
+    ) -> Result<Value, ToolError> {
+        Err(ToolError::InvalidInput("native computer adaptation unavailable".into()))
+    }
+
+    /// Return an authorized, current observation belonging to the calling owner.
+    async fn native_computer_frame(
+        &self,
+        _ctx: &ToolUseContext,
+    ) -> Result<Option<lingxi_llm_client::protocol::computer::ComputerFrame>, ToolError> {
+        Ok(None)
+    }
+
+    /// Retain desktop ownership across an ordered native sequence and its observation.
+    async fn begin_computer_sequence(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// End a sequence while retaining ownership of inputs still held by the owner.
+    async fn end_computer_sequence(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// Release inputs held by this owner at cancellation or lifecycle completion.
+    async fn cleanup_computer_inputs(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// Apply the final model-visible observation after output hooks and Mods.
+    async fn computer_model_output(
+        &self,
+        _ctx: &ToolUseContext,
+        _content: &str,
+        _blocks: Option<&[Value]>,
+    ) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// Require a fresh observation after recovery or a host geometry reset.
+    async fn invalidate_computer_observation(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
+        Ok(())
     }
 
     /// Runtime parser schema, distinct from advertised foreign JSON Schema.
@@ -122,6 +199,18 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Model-facing text for a Mod-supplied result. Returning `None` selects
+    /// the shared generic result mapper. This must not execute the tool body.
+    fn map_result_text(&self, _result: &Value) -> Option<String> {
+        None
+    }
+
+    /// Error bit produced by a tool-specific result mapper. For example,
+    /// Bash marks an interrupted result as an error even when it has output.
+    fn map_result_is_error(&self, _result: &Value) -> Option<bool> {
+        None
+    }
+
     /// Whether this tool is enabled for the given static context
     /// (feature flags, environment, etc.).
     fn is_enabled(&self, ctx: &ToolStaticContext) -> bool;
@@ -129,6 +218,17 @@ pub trait Tool: Send + Sync {
     /// Whether this tool is sourced from an MCP server.
     fn is_mcp(&self) -> bool {
         false
+    }
+
+    /// Trusted per-call ceiling projected on the Native Mod `tool.check`
+    /// surface. Implementations return a value only when they have an
+    /// authoritative host fact for this exact input; the dispatcher does not
+    /// infer organization policy from `is_mcp`, tool names, or payload fields.
+    async fn tool_check_permission_ceiling(
+        &self,
+        _input: &Value,
+    ) -> Option<lingxi_core::host::McpPermissionCeiling> {
+        None
     }
 
     /// Observe a static JSON-schema rejection before the dispatcher returns it
@@ -149,6 +249,17 @@ pub trait Tool: Send + Sync {
     /// decide per invocation. The default keeps every existing tool unchanged.
     fn result_ends_turn(&self, _result: &ToolCallResult) -> bool {
         false
+    }
+
+    /// Require the bound Auto classifier even when rules or hooks allow the
+    /// call. Policy is host-owned tool metadata, never model arguments.
+    fn classifier_only(&self) -> Option<lingxi_core::host::permission_gate::ClassifierOnlyPolicy> {
+        None
+    }
+
+    /// Action reviewed by the classifier-only path after native input parsing.
+    fn classifier_only_action(&self, input: &Value) -> String {
+        input.to_string()
     }
 
     /// Optional MCP server routing role.  Native and generic tools return
@@ -363,60 +474,6 @@ pub trait Tool: Send + Sync {
     fn user_facing_name_background_color(&self, _input: &Value) -> Option<String> {
         None
     }
-
-    /// Provider-native desktop adaptation for this registered tool, when supported.
-    fn native_computer_capabilities(
-        &self,
-    ) -> Option<lingxi_llm_client::protocol::computer::ComputerCapabilities> {
-        None
-    }
-
-    /// Convert protocol data into this tool's ordinary input without executing it.
-    fn lower_computer_operation(
-        &self,
-        _operation: &lingxi_llm_client::protocol::computer::ComputerOperation,
-        _frame: &lingxi_llm_client::protocol::computer::ComputerFrame,
-    ) -> Result<Value, ToolError> {
-        Err(ToolError::InvalidInput("native computer adaptation unavailable".into()))
-    }
-
-    /// Return an authorized, current observation belonging to the calling owner.
-    async fn native_computer_frame(
-        &self,
-        _ctx: &ToolUseContext,
-    ) -> Result<Option<lingxi_llm_client::protocol::computer::ComputerFrame>, ToolError> {
-        Ok(None)
-    }
-
-    /// Retain desktop ownership across an ordered native sequence and its observation.
-    async fn begin_computer_sequence(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
-        Ok(())
-    }
-
-    /// End a sequence while retaining ownership of inputs still held by the owner.
-    async fn end_computer_sequence(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
-        Ok(())
-    }
-
-    /// Release inputs held by this owner at cancellation or lifecycle completion.
-    async fn cleanup_computer_inputs(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
-        Ok(())
-    }
-
-    /// Apply the final model-visible observation after output hooks and Mods.
-    async fn computer_model_output(
-        &self,
-        _ctx: &ToolUseContext,
-        _content: &str,
-        _blocks: Option<&[Value]>,
-    ) -> Result<(), ToolError> {
-        Ok(())
-    }
-
-    /// Require a fresh observation after recovery or a host geometry reset.
-    async fn invalidate_computer_observation(&self, _ctx: &ToolUseContext) -> Result<(), ToolError> {
-        Ok(())
-    }
 }
 
 /// Static context passed to [`Tool::is_enabled`]: feature flags and other
@@ -449,6 +506,17 @@ pub struct DescriptionOptions {
     pub is_non_interactive_session: bool,
 }
 
+/// Model-visible skill suggestions for Bash's precommit guidance.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct BashPrecommitSkills {
+    /// A model-visible `verify` skill loaded from a custom skill/command directory.
+    pub custom_verify: bool,
+    /// A model-visible `simplify` skill loaded from a custom skill/command directory.
+    pub custom_simplify: bool,
+    /// `code-review` is model-visible and its suggestion setting is enabled.
+    pub code_review: bool,
+}
+
 /// Options controlling [`Tool::prompt`] output.
 #[derive(Debug, Clone, Default)]
 pub struct PromptOptions {
@@ -467,6 +535,12 @@ pub struct PromptOptions {
     /// Tool prompts that need provider-specific wording should use this instead
     /// of request-builder internals.
     pub model_profile: Option<String>,
+    /// Skill suggestions from the owning session's current eligible skill set.
+    /// Callers suppress these when the request does not offer the `Skill` tool.
+    pub bash_precommit_skills: BashPrecommitSkills,
+    /// Registry-owned session activation generation. Clear/resume increments
+    /// it so a reused Bash tool starts a fresh precommit wording latch.
+    pub bash_precommit_session_generation: u64,
 }
 
 /// Information returned by [`Tool::is_search_or_read`] describing how an
@@ -507,38 +581,14 @@ pub enum InterruptBehavior {
     Block,
 }
 
-/// Why a successful tool result ended the current turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolResultTurnEndSource {
-    /// The native tool result returned `endsTurn: true`.
-    Tool,
-    /// The tool result's MCP `_meta` block requested turn termination.
-    McpMeta,
-}
-
-impl ToolResultTurnEndSource {
-    /// Analytics wire value used by `tengu_mcp_tool_result_ended_turn`.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Tool => "tool",
-            Self::McpMeta => "mcp_meta",
-        }
-    }
-}
-
-/// Extra metadata for a successful tool result that ends the current turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ToolResultTurnEnd {
-    /// Marker that won the oracle's `tool`-before-`mcp_meta` precedence.
-    pub source: ToolResultTurnEndSource,
-}
+pub use lingxi_core::host::tool_invoker::{ToolResultTurnEnd, ToolResultTurnEndSource};
 
 /// Classify whether a successful tool result requests turn termination.
 ///
-/// This is the exact `qbt` precedence from Claude Code 2.1.252:
-/// `toolEndsTurn` wins over MCP metadata, and an error result never ends the
-/// turn even when either marker is present.
+/// Matches Claude Code 2.1.286's `dEo` in the dispatcher's single-result
+/// boolean domain: `toolEndsTurn` wins over MCP metadata, and an error result
+/// never ends the turn even when either marker is present. Whole raw frames
+/// and truthy non-booleans are separate native evidence, not coerced inputs.
 #[must_use]
 pub fn tool_result_turn_end(
     tool_ends_turn: bool,
@@ -564,6 +614,10 @@ pub fn tool_result_turn_end(
             source: ToolResultTurnEndSource::McpMeta,
         })
 }
+
+#[cfg(test)]
+#[path = "tool_turn_end_oracle_tests.rs"]
+mod tool_turn_end_oracle_tests;
 
 /// A one-shot mutator a tool returns to adjust the turn's [`ToolUseContext`] —
 /// the Rust twin of claude-code's `ToolResult.contextModifier`.
@@ -728,9 +782,17 @@ pub enum ToolError {
         /// Char limit that was hit.
         limit: usize,
     },
-    /// M4-05: subagent loop crashed.
-    #[error("subagent failed: {0}")]
-    SubagentFailed(String),
+    /// A spawned subagent terminated with an error. Preserve its host-owned
+    /// identity so lifecycle hooks can consume that child's route and history.
+    #[error("subagent failed: {reason}")]
+    SubagentFailed {
+        /// The allocated child, distinct from an admission failure.
+        agent_id: lingxi_core::types::AgentId,
+        /// Model-facing failure reason.
+        reason: String,
+        /// An existing host lifecycle worker already owns the global stop.
+        terminal_hooks_owned: bool,
+    },
     /// M4-07: MCP server reported a tool-call failure.
     #[error("MCP tool error: {server}/{tool}: {detail}")]
     McpFailure {
@@ -778,9 +840,9 @@ impl ToolError {
             | ToolError::Io(s)
             | ToolError::Internal(s)
             | ToolError::InteractionRequired(s)
-            | ToolError::SubagentFailed(s)
             | ToolError::LspFailure(s)
             | ToolError::Transport(s) => s.clone(),
+            ToolError::SubagentFailed { reason, .. } => reason.clone(),
             // Structured / prefix-free variants: `Display` already renders the
             // exact model-facing message (no LingXi-only prefix to strip).
             other => other.to_string(),
@@ -870,7 +932,12 @@ mod m4_01_error_variant_tests {
 
         // Other single-string variants are bare too.
         assert_eq!(
-            ToolError::SubagentFailed("boom".into()).model_facing_message(),
+            ToolError::SubagentFailed {
+                agent_id: lingxi_core::types::AgentId::new(),
+                reason: "boom".into(),
+                terminal_hooks_owned: false,
+            }
+            .model_facing_message(),
             "boom"
         );
 

@@ -6,12 +6,12 @@
 
 use crate::content_replacement::ContentReplacementState;
 use crate::registry::ToolRegistry;
+use lingxi_core::SessionState;
 use lingxi_core::host::audio::{
     AudioError, AudioErrorKind, AudioInitiator, AudioOperationContext, AudioOperationId, AudioOwner,
 };
 use lingxi_core::host::tool_invoker::ToolExecutionPolicy;
 use lingxi_core::types::{AgentId, McpConnectionId, MessageId, SessionId, ToolUseId};
-use lingxi_core::SessionState;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -22,6 +22,10 @@ use tokio::sync::Mutex;
 /// cache slot lands in Plan 10.
 #[derive(Clone)]
 pub struct ToolUseContext {
+    /// Exact JSON input owned by this physical invocation. The display value
+    /// agrees with the input handed to validate/check/call; input rewrites must
+    /// replace or rebase this projection before that next boundary.
+    pub input_projection: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// Static per-call options (debug flags, budget, system-prompt overrides).
     pub options: ToolUseOptions,
     /// Conversation history up to (but not including) the current call.
@@ -34,8 +38,17 @@ pub struct ToolUseContext {
     /// request. Omitted for call sites that have no current assistant message
     /// (for example isolated unit tests and subagent helper invocations).
     pub assistant_message_id: Option<MessageId>,
+    /// Raw assistant row for the currently dispatched completed block. This
+    /// is independent of `messages` (the pre-query history snapshot) and is
+    /// refreshed from trusted host facts for every nested invocation.
+    pub assistant_message: Option<lingxi_core::types::ConversationMessage>,
+    /// Tool-use blocks from earlier sibling rows in the same query, excluding
+    /// the current assistant row. The host refreshes this on every call.
+    pub same_turn_tool_uses: Vec<lingxi_core::types::ContentBlock>,
     /// The agent that issued this call, if known.
     pub agent_id: Option<AgentId>,
+    /// Native per-context nested-memory triggers; independent of file cache.
+    pub nested_memory_triggers: Arc<crate::nested_memory_triggers::NestedMemoryTriggers>,
     /// The DISPLAY NAME of the teammate that issued this call, if known
     /// (claude-code `getAgentName()`). For an in-process teammate this is its
     /// human name (e.g. `"researcher"`), NOT the `agent:<uuid>` form of
@@ -57,10 +70,21 @@ pub struct ToolUseContext {
     /// immutable identity to keep their cost and budget accounting attached to
     /// the originating conversation.
     pub origin_session_id: Option<SessionId>,
+    /// Host-captured plugin caller/origin for nested `agent.spawn` events.
+    /// Mod-rewritten JSON never supplies or overwrites this identity.
+    pub agent_spawn_provenance: lingxi_core::host::subagent_spawn::AgentSpawnProvenance,
     /// Trusted host-selected execution policy for this invocation. The nested
     /// dispatch path copies it from `SubagentInvocationContext`; ordinary
     /// callers use [`ToolExecutionPolicy::Ordinary`].
     pub tool_execution_policy: ToolExecutionPolicy,
+    /// Trusted effective permission mode for recursive Agent launches. Nested
+    /// dispatch derives this from its host override or the enforcing live gate.
+    pub trusted_effective_permission_mode: Option<String>,
+    /// Invocation-local verdict from the bound classifier-only permission
+    /// path. Tool bodies may annotate reports but cannot mint this result.
+    pub classifier_only_review: Option<lingxi_core::host::handback::ReportReview>,
+    /// Host snapshot inherited by ordinary and forked children.
+    pub instruction_context: Option<lingxi_core::host::instructions::InstructionContext>,
     /// Shared content-replacement state. Populated in Task 3.
     pub content_replacement_state: Option<Arc<Mutex<ContentReplacementState>>>,
     /// Mutable session state (M4-04). Tools that mutate the conversation
@@ -98,7 +122,7 @@ pub struct ToolUseContext {
     /// This agent's recursion depth — claude's `agentContext.depth` (`z6`:
     /// `"main"` ⇒ 0, else this value). The `Agent` tool reads it to set a
     /// spawned child's depth (`child = depth + 1`), and the subagent
-    /// tool-resolver applies `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` (default 1).
+    /// tool-resolver applies `LINGXI_MAX_SUBAGENT_SPAWN_DEPTH` (default 1).
     /// `0` for the main thread and every non-subagent call; the dispatch invoker
     /// overwrites it from [`crate::SubagentInvocationContext::depth`] for a
     /// subagent's own tool calls.
@@ -123,6 +147,50 @@ pub struct ToolUseContext {
 }
 
 impl ToolUseContext {
+    /// Validate the association before exposing exact input to a tool or frame.
+    pub fn projected_input(
+        &self,
+        input: &serde_json::Value,
+    ) -> Result<
+        lingxi_core::types::utf16_json::Utf16JsonProjection,
+        lingxi_core::types::utf16_json::Utf16JsonProjectionError,
+    > {
+        use lingxi_core::types::utf16_json::{Utf16JsonProjection, Utf16JsonProjectionError};
+        let Some(projection) = &self.input_projection else {
+            return Ok(Utf16JsonProjection::plain(input.clone()));
+        };
+        if projection.value != *input {
+            return Err(Utf16JsonProjectionError::InvalidProjection(
+                "tool input projection belongs to different input",
+            ));
+        }
+        projection.validate()?;
+        Ok(projection.clone())
+    }
+
+    /// A rich rewrite replaces the previous invocation input atomically.
+    pub fn replace_input(
+        &mut self,
+        projection: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<serde_json::Value, lingxi_core::types::utf16_json::Utf16JsonProjectionError> {
+        projection.validate()?;
+        let value = projection.value.clone();
+        self.input_projection = Some(projection);
+        Ok(value)
+    }
+
+    /// A display-tree transformation keeps exact units only at unchanged
+    /// leaves/keys. Removed or changed values discard their previous sidecars.
+    pub fn rebase_input(
+        &mut self,
+        input: &serde_json::Value,
+    ) -> Result<(), lingxi_core::types::utf16_json::Utf16JsonProjectionError> {
+        let Some(projection) = self.input_projection.as_mut() else {
+            return Ok(());
+        };
+        projection.rebase_display_value(input.clone())
+    }
+
     /// Build device-audio ownership only from trusted host context. The
     /// per-call agent/tool IDs remain attribution and never become the stable
     /// recording owner.
@@ -159,22 +227,23 @@ impl ToolUseContext {
         })
     }
 
-    /// Build a minimal context that carries ONLY `main_loop_model`; every other
+    /// Build a minimal context carrying the complete model and provider profile; every other
     /// field is inert (`None` / empty / default).
     ///
     /// The turn loop seeds this with the live `session.model`, folds a tool
     /// batch's [`crate::tool_trait::ContextModifier`]s over it, and reads back
-    /// the resolved `options.main_loop_model` to apply a skill's `model:`
+    /// the resolved model and profile to apply a skill's `model:`
     /// override (SKILLEXEC.3, model scope). It is never handed to a tool, so the
     /// inert fields are never observed.
     #[must_use]
-    pub fn model_seed(main_loop_model: String) -> Self {
+    pub fn model_seed(main_loop_model: String, model_profile: Option<String>) -> Self {
         Self {
+            input_projection: None,
             options: ToolUseOptions {
                 debug: false,
                 verbose: false,
                 main_loop_model,
-                model_profile: None,
+                model_profile,
                 max_budget_nano_usd: None,
                 mcp_clients: Vec::new(),
                 is_non_interactive_session: true,
@@ -184,11 +253,18 @@ impl ToolUseContext {
             messages: Vec::new(),
             tool_use_id: None,
             assistant_message_id: None,
+            assistant_message: None,
+            same_turn_tool_uses: Vec::new(),
             agent_id: None,
+            nested_memory_triggers: Arc::default(),
             agent_name: None,
             team_name: None,
             origin_session_id: None,
+            agent_spawn_provenance: Default::default(),
+            instruction_context: None,
             tool_execution_policy: ToolExecutionPolicy::Ordinary,
+            trusted_effective_permission_mode: None,
+            classifier_only_review: None,
             content_replacement_state: None,
             session: None,
             subagent_registry: None,
@@ -207,10 +283,65 @@ impl ToolUseContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    #[test]
+    fn projection_rebase_retains_only_unchanged_utf16_leaves_and_keys() {
+        let mut ctx = ToolUseContext::model_seed("opus".into(), None);
+        let original = Utf16JsonProjection::parse(
+            r#"{"keep":"\ud800","drop":"\udfff","\ud901":"value","timeout":1}"#,
+        )
+        .unwrap();
+        let mut value = ctx.replace_input(original.clone()).unwrap();
+        value["timeout"] = serde_json::json!(2);
+        value["drop"] = serde_json::json!("replaced");
+        ctx.rebase_input(&value).unwrap();
+        let projected = ctx.projected_input(&value).unwrap();
+        assert_eq!(projected.string_units("/keep"), Some(vec![0xd800]));
+        assert_eq!(
+            projected.string_units("/drop"),
+            Some("replaced".encode_utf16().collect())
+        );
+        assert_eq!(projected.keys, original.keys);
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove(&original.keys[0].placeholder);
+        ctx.rebase_input(&value).unwrap();
+        assert!(ctx.projected_input(&value).unwrap().keys.is_empty());
+    }
+
+    #[test]
+    fn new_input_source_replaces_equal_display_surrogate_units() {
+        let mut ctx = ToolUseContext::model_seed("opus".into(), None);
+        let original = Utf16JsonProjection::parse(r#"{"text":"\ud800"}"#).unwrap();
+        let updated = Utf16JsonProjection::parse(r#"{"text":"\udfff"}"#).unwrap();
+        assert_eq!(original.value, updated.value);
+        ctx.replace_input(original).unwrap();
+        let value = ctx.replace_input(updated).unwrap();
+        assert_eq!(
+            ctx.projected_input(&value).unwrap().string_units("/text"),
+            Some(vec![0xdfff])
+        );
+        ctx.replace_input(Utf16JsonProjection::plain(value.clone()))
+            .unwrap();
+        assert!(ctx.projected_input(&value).unwrap().strings.is_empty());
+    }
+
+    #[test]
+    fn input_projection_rejects_stale_display_association() {
+        let mut ctx = ToolUseContext::model_seed("opus".into(), None);
+        ctx.replace_input(Utf16JsonProjection::parse(r#"{"text":"\ud800"}"#).unwrap())
+            .unwrap();
+        assert!(
+            ctx.projected_input(&serde_json::json!({"text":"different"}))
+                .is_err()
+        );
+    }
 
     #[test]
     fn tool_use_context_carries_optional_cancel_token() {
-        let mut ctx = ToolUseContext::model_seed("opus".into());
+        let mut ctx = ToolUseContext::model_seed("opus".into(), None);
         assert!(ctx.cancel.is_none());
         ctx.cancel = Some(tokio_util::sync::CancellationToken::new());
         assert!(ctx.cancel.is_some());

@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
 use lingxi_core::host::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
 use lingxi_core::host::subagent_spawn::{
-    SubagentInheritance, SubagentListingEntry, SubagentResult, SubagentSpawnError,
-    SubagentSpawnRequest, SubagentSpawner, SubagentUsage,
+    AgentSpawnAdmission, AgentSpawnStart, SubagentInheritance, SubagentListingEntry,
+    SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, SubagentUsage,
 };
 use lingxi_core::host::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
@@ -42,6 +42,7 @@ pub struct MockSubagentSpawner {
     invocations: Mutex<Vec<MockSpawnInvocation>>,
     teammate_enabled: Mutex<bool>,
     response: Mutex<MockSpawnResponse>,
+    handback: Mutex<Option<lingxi_core::host::handback::HandbackState>>,
     /// `required_mcp_servers` surfaced from `resolve_required_mcp_servers` (the
     /// `#G3` pre-spawn MCP gate). Default empty (no requirement).
     required_mcp_servers: Mutex<Vec<String>>,
@@ -63,9 +64,26 @@ pub struct MockSubagentSpawner {
     /// `subagent_type is required` tests, which need a catalog WITHOUT
     /// `general-purpose`.
     listing_override: Mutex<Option<Vec<SubagentListingEntry>>>,
+    /// Separate model-facing offer projection. `None` follows the raw listing.
+    model_listing_override: Mutex<Option<Vec<SubagentListingEntry>>>,
     /// Scripted `tools_denied_agent_types` (claude 2.1.238 `NJa`/`mdr`,
     /// @290291941). Default empty ⇒ nothing withheld.
     tools_denied: Mutex<Vec<String>>,
+    agent_spawn_rewrite: Mutex<Option<serde_json::Value>>,
+    agent_spawn_answer: Mutex<Option<serde_json::Value>>,
+    agent_spawn_started: Arc<Mutex<Vec<(lingxi_core::types::AgentId, String)>>>,
+    agent_spawn_inputs: Mutex<Vec<serde_json::Value>>,
+    agent_spawn_provenances: Mutex<Vec<lingxi_core::host::subagent_spawn::AgentSpawnProvenance>>,
+}
+
+struct MockAgentSpawnStart(Arc<Mutex<Vec<(lingxi_core::types::AgentId, String)>>>);
+
+impl AgentSpawnStart for MockAgentSpawnStart {
+    fn started(self: Box<Self>, agent_id: lingxi_core::types::AgentId, model: String) {
+        self.0.lock().unwrap().push((agent_id, model));
+    }
+
+    fn failed(self: Box<Self>, _reason: String) {}
 }
 
 #[derive(Clone)]
@@ -98,13 +116,20 @@ impl MockSubagentSpawner {
             invocations: Mutex::new(Vec::new()),
             teammate_enabled: Mutex::new(false),
             response: Mutex::new(MockSpawnResponse::Completed),
+            handback: Mutex::new(None),
             required_mcp_servers: Mutex::new(Vec::new()),
             selection: Mutex::new(None),
             registered_names: Mutex::new(Vec::new()),
             async_unwired: Mutex::new(false),
             concurrent_subagents: AtomicUsize::new(0),
             listing_override: Mutex::new(None),
+            model_listing_override: Mutex::new(None),
             tools_denied: Mutex::new(Vec::new()),
+            agent_spawn_rewrite: Mutex::new(None),
+            agent_spawn_answer: Mutex::new(None),
+            agent_spawn_started: Arc::new(Mutex::new(Vec::new())),
+            agent_spawn_inputs: Mutex::new(Vec::new()),
+            agent_spawn_provenances: Mutex::new(Vec::new()),
         }
     }
 
@@ -118,9 +143,42 @@ impl MockSubagentSpawner {
         *self.listing_override.lock().unwrap() = Some(entries);
     }
 
+    /// Replace only the model-facing offer projection; explicit resolution
+    /// continues to use `agent_listing`.
+    pub fn set_agent_listing_for_model(&self, entries: Vec<SubagentListingEntry>) {
+        *self.model_listing_override.lock().unwrap() = Some(entries);
+    }
+
     /// Script the agent types whose every tool is denied (claude `NJa`).
     pub fn set_tools_denied_agent_types(&self, types: Vec<String>) {
         *self.tools_denied.lock().unwrap() = types;
+    }
+
+    /// Have the mock Mod bridge forward a rewritten spawn event.
+    pub fn script_agent_spawn_rewrite(&self, rewrite: serde_json::Value) {
+        *self.agent_spawn_rewrite.lock().unwrap() = Some(rewrite);
+    }
+
+    /// Have the mock Mod bridge answer without forwarding to a spawner.
+    pub fn script_agent_spawn_answer(&self, answer: serde_json::Value) {
+        *self.agent_spawn_answer.lock().unwrap() = Some(answer);
+    }
+
+    /// Receipts sent by AgentTool after a child was launched.
+    pub fn agent_spawn_started(&self) -> Vec<(lingxi_core::types::AgentId, String)> {
+        self.agent_spawn_started.lock().unwrap().clone()
+    }
+
+    /// Inputs presented by AgentTool before a scripted Mod rewrite.
+    pub fn agent_spawn_inputs(&self) -> Vec<serde_json::Value> {
+        self.agent_spawn_inputs.lock().unwrap().clone()
+    }
+
+    /// Provenance sidecars passed alongside each pre-spawn hook input.
+    pub fn agent_spawn_provenances(
+        &self,
+    ) -> Vec<lingxi_core::host::subagent_spawn::AgentSpawnProvenance> {
+        self.agent_spawn_provenances.lock().unwrap().clone()
     }
 
     /// Set the active-subagent count returned at the pre-spawn boundary.
@@ -155,6 +213,12 @@ impl MockSubagentSpawner {
     /// Force the next (and subsequent) spawns to fail.
     pub fn script_failed(&self, reason: impl Into<String>) {
         *self.response.lock().unwrap() = MockSpawnResponse::Failed(reason.into());
+    }
+
+    /// Attach typed reporting state to subsequent completed responses so tests
+    /// exercise AgentTool's send, flagged, and withheld result projection.
+    pub fn script_handback(&self, state: lingxi_core::host::handback::HandbackState) {
+        *self.handback.lock().unwrap() = Some(state);
     }
 
     /// Script a fully-specified completed result (claude `content` JSON, usage,
@@ -237,6 +301,34 @@ impl Default for MockSubagentSpawner {
 
 #[async_trait]
 impl SubagentSpawner for MockSubagentSpawner {
+    async fn begin_agent_spawn(
+        &self,
+        mut input: serde_json::Value,
+        provenance: lingxi_core::host::subagent_spawn::AgentSpawnProvenance,
+    ) -> Result<AgentSpawnAdmission, SubagentSpawnError> {
+        self.agent_spawn_inputs.lock().unwrap().push(input.clone());
+        self.agent_spawn_provenances
+            .lock()
+            .unwrap()
+            .push(provenance);
+        if let Some(answer) = self.agent_spawn_answer.lock().unwrap().clone() {
+            return Ok(AgentSpawnAdmission::Answered(answer));
+        }
+        let Some(rewrite) = self.agent_spawn_rewrite.lock().unwrap().clone() else {
+            return Ok(AgentSpawnAdmission::Bypass(input));
+        };
+        for (key, value) in rewrite
+            .as_object()
+            .expect("scripted Mod rewrite is an object")
+        {
+            input[key] = value.clone();
+        }
+        Ok(AgentSpawnAdmission::Forwarded {
+            input,
+            start: Box::new(MockAgentSpawnStart(self.agent_spawn_started.clone())),
+        })
+    }
+
     fn teammate_enabled(&self) -> bool {
         *self.teammate_enabled.lock().unwrap()
     }
@@ -252,9 +344,10 @@ impl SubagentSpawner for MockSubagentSpawner {
         });
         Ok(lingxi_core::host::team_spawn::TeammateLaunch {
             teammate_id: "scout@session".into(),
-            agent_id: "scout@session".into(),
+            agent_id: lingxi_core::types::AgentId::new().to_string(),
             agent_type: request.subagent_type,
-            model: "sonnet".into(),
+            model: request.model.unwrap_or_else(|| "sonnet".into()),
+            model_profile: request.model_profile,
             name: request.name.unwrap(),
             color: "blue".into(),
             tmux_session_name: String::new(),
@@ -279,6 +372,7 @@ impl SubagentSpawner for MockSubagentSpawner {
         Ok(match resp {
             // Mock: no real child exists, so a fresh AgentId is acceptable HERE.
             MockSpawnResponse::Completed => SubagentResult::Completed {
+                handback: self.handback.lock().unwrap().clone(),
                 agent_id: lingxi_core::types::AgentId::new(),
                 content: json!({ "mock": true }),
                 usage: SubagentUsage::default(),
@@ -302,6 +396,7 @@ impl SubagentSpawner for MockSubagentSpawner {
                 response_char_count,
                 last_request_id,
             } => SubagentResult::Completed {
+                handback: self.handback.lock().unwrap().clone(),
                 agent_id,
                 content,
                 usage: usage.clone(),
@@ -394,6 +489,13 @@ impl SubagentSpawner for MockSubagentSpawner {
                 tools_description: "All tools except Edit".into(),
             },
         ]
+    }
+
+    async fn agent_listing_for_model(&self) -> Vec<SubagentListingEntry> {
+        if let Some(entries) = self.model_listing_override.lock().unwrap().clone() {
+            return entries;
+        }
+        self.agent_listing().await
     }
 
     /// Surface the scripted `required_mcp_servers` (default empty — built-ins
@@ -578,6 +680,7 @@ impl TaskRegistryHandle for MockTaskRegistryHandle {
                 status: "running".into(),
                 owner_agent_id: Some(registration.agent_id.to_string()),
                 is_backgrounded: Some(false),
+                agent_facts: None,
                 ..Default::default()
             },
         );
@@ -686,6 +789,7 @@ impl TaskRegistryHandle for MockTaskRegistryHandle {
             status: "pending".into(),
             description: input.description,
             command: None,
+            agent_facts: None,
             ..Default::default()
         };
         self.records

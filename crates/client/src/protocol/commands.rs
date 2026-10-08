@@ -198,6 +198,17 @@ pub struct HookAdminCommandDto {
     pub payload_json: Option<String>,
 }
 
+/// Remote UI surface that can attach to a running session's Mod surface roster.
+/// `terminal` is host-owned and is never announced by a remote client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "lowercase")]
+pub enum UiSurfaceDto {
+    Desktop,
+    Mobile,
+    Vscode,
+}
+
 /// The inbound command envelope a client sends to the engine.
 ///
 /// `#[non_exhaustive]` (mirrors `lingxi_core::host::OutputEvent`) so adding a command is
@@ -979,6 +990,59 @@ pub enum ClientCommand {
     /// Update the connection's shared device-audio capability snapshot.
     UpdateAudioCapabilities {
         capabilities: AudioCapabilitySnapshotDto,
+    },
+
+    // Explicit renderer lifecycle. These are separate from the bridge hello
+    // and socket close: a renderer attaches only after its session is ready,
+    // and the host uses connection ownership to clean up a lost renderer.
+    UiAttach {
+        surface: UiSurfaceDto,
+        client_id: String,
+    },
+    UiDetach {
+        client_id: String,
+    },
+    // Session-bound Mod UI control request. `request_json` is the canonical
+    // Native control payload including its subtype; the correlation id is an
+    // outer client-protocol field and must not be copied into that payload.
+    UiRender {
+        request_id: String,
+        request_json: String,
+    },
+    UiClientModule {
+        request_id: String,
+        plugin: String,
+    },
+    UiMessage {
+        request_id: String,
+        request_json: String,
+    },
+    UiClientFault {
+        request_id: String,
+        request_json: String,
+    },
+    UiClientPress {
+        request_id: String,
+        request_json: String,
+    },
+    // Parent UI held-action controls. These are Native `$` controls and remain
+    // distinct from the nested Client surface's `ui_client_press` route.
+    UiPress {
+        request_id: String,
+        request_json: String,
+    },
+    UiInput {
+        request_id: String,
+        request_json: String,
+    },
+    UiSelect {
+        request_id: String,
+        request_json: String,
+    },
+    // Host-local UI VM adapter operation; this is not a Native $.ui subtype.
+    UiClientOperation {
+        request_id: String,
+        operation_json: String,
     },
 }
 

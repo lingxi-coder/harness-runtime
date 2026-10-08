@@ -29,30 +29,19 @@
 //! m3-02 plan invented one). `enabled == false` keeps the whole subsystem inert,
 //! so the ~4000 locked fixtures stay byte-identical.
 
-use crate::file::{parse_markdown_with_frontmatter, MemoryError, MemoryFrontmatter};
+use crate::file::{MemoryError, MemoryFrontmatter, parse_markdown_with_frontmatter};
 use lingxi_core::types::{ConversationMessage, MessageId};
 use sidequery::{CacheSafeParams, ForkPurpose, ForkedAgentRequest, ForkedAgentRunner, QuerySource};
 use std::path::{Path, PathBuf};
 
 /// Configuration for the standalone session-memory extractor (spec §6.5).
 ///
-/// `enabled` is the single master gate (no `tengu_session_memory` flag exists in
-/// v2.1.251). The token/tool defaults mirror the local Claude Code source. The
-/// numeric `*_threshold` fields remain as a compatibility shim for callers of
-/// the original tool-count-only port; a non-zero legacy value overrides the
-/// corresponding new tool-call gate.
+/// `enabled` is the single master gate. Extraction requires the configured
+/// context size, token growth and activity gates.
 #[derive(Debug, Clone)]
 pub struct SessionMemoryConfig {
     /// Master gate for the session-memory subsystem.
     pub enabled: bool,
-    /// Legacy tool-call count that triggers the FIRST extraction. A non-zero
-    /// value is retained for callers of the pre-token-threshold API; new
-    /// callers should leave it at zero and use the token + tool gates below.
-    pub initialization_threshold: u32,
-    /// Legacy tool-call count that triggers a SUBSEQUENT extraction. A
-    /// non-zero value overrides [`Self::tool_calls_between_updates`] for
-    /// backwards compatibility with the original port.
-    pub update_threshold: u32,
     /// Minimum context size required before the first extraction. Claude Code
     /// 2.1.251 uses 10,000 tokens for this gate.
     pub minimum_message_tokens_to_init: u32,
@@ -63,9 +52,6 @@ pub struct SessionMemoryConfig {
     /// 2.1.251 uses three tool calls, unless a natural no-tool assistant turn
     /// reaches the token-growth gate first.
     pub tool_calls_between_updates: u32,
-    /// Model alias used for the cheap distillation fork. Haiku-class by default
-    /// (matches `crate::selector::MemorySelector::new`).
-    pub extraction_model: String,
 }
 
 impl Default for SessionMemoryConfig {
@@ -74,16 +60,9 @@ impl Default for SessionMemoryConfig {
             // Inert by default — keeps the locked fixtures byte-identical until a
             // composition root opts in.
             enabled: false,
-            // Legacy fields are zero by default. The current token/tool gates
-            // mirror Claude Code's session-memory defaults.
-            initialization_threshold: 0,
-            update_threshold: 0,
             minimum_message_tokens_to_init: 10_000,
             minimum_tokens_between_update: 5_000,
             tool_calls_between_updates: 3,
-            // Cheap standalone distillation fork — Haiku-class, matching the
-            // memory selector's default model.
-            extraction_model: "claude-haiku-4-5".to_string(),
         }
     }
 }
@@ -137,8 +116,7 @@ impl SessionMemoryExtractor {
     }
 
     /// `true` once at least one extraction has completed (spec §6.5
-    /// `is_initialized`). Legacy threshold callers use this to select their
-    /// initial-vs-update field; the current token gate has separate state.
+    /// `is_initialized`). The initial token gate has separate state.
     #[must_use]
     pub fn is_initialized(&self) -> bool {
         self.last_extracted_message_id.is_some()
@@ -226,20 +204,6 @@ impl SessionMemoryExtractor {
         if !self.config.enabled {
             return false;
         }
-        // Preserve the original public API's tool-count-only semantics for
-        // callers that explicitly zero both token gates. This keeps existing
-        // integrations/test fixtures deterministic while the default config
-        // (10k/5k/3) follows Claude's current token/activity rules.
-        if self.config.minimum_message_tokens_to_init == 0
-            && self.config.minimum_tokens_between_update == 0
-        {
-            let calls = self.pending_tool_calls_for_history(history);
-            return if self.is_initialized() {
-                calls >= self.config.update_threshold
-            } else {
-                calls >= self.config.initialization_threshold
-            };
-        }
         let current_tokens = token_count_with_estimation(history);
         if !self.session_memory_initialized {
             if current_tokens < u64::from(self.config.minimum_message_tokens_to_init) {
@@ -256,14 +220,7 @@ impl SessionMemoryExtractor {
         }
 
         let calls = self.pending_tool_calls_for_history(history);
-        let required_calls = if self.is_initialized() && self.config.update_threshold > 0 {
-            self.config.update_threshold
-        } else if !self.is_initialized() && self.config.initialization_threshold > 0 {
-            self.config.initialization_threshold
-        } else {
-            self.config.tool_calls_between_updates
-        };
-        let has_tool_call_threshold = calls >= required_calls;
+        let has_tool_call_threshold = calls >= self.config.tool_calls_between_updates;
         let last_assistant_has_tool_calls = has_tool_calls_in_last_assistant_turn(history);
         has_tool_call_threshold || !last_assistant_has_tool_calls
     }
@@ -278,7 +235,7 @@ impl SessionMemoryExtractor {
     /// next session re-loads through the normal selector/prefetch/surfacing path
     /// (this module adds NO second injection).
     ///
-    /// `config_home` is the resolved `$LINGXI_CONFIG_DIR ?? $HOME/.claude`
+    /// `config_home` is the resolved `$LINGXI_CONFIG_DIR ?? $HOME/.lingxi`
     /// directory (see [`session_memory_path`]); the caller passes it so this
     /// stays testable with a tempdir.
     ///
@@ -493,7 +450,7 @@ fn estimate_block_tokens(block: &lingxi_core::types::ContentBlock) -> u64 {
 
     match block {
         ContentBlock::ProviderContent { value, .. } => rough_token_count(json_len(value)),
-        ContentBlock::Text { text } => rough_token_count(utf16_len(text)),
+        ContentBlock::Text { text, .. } => rough_token_count(utf16_len(text)),
         ContentBlock::TextJsUtf16 {
             utf16_code_units, ..
         } => rough_token_count(utf16_code_units.len()),
@@ -641,14 +598,14 @@ fn write_session_memory(path: &Path, content: &str) -> Result<(), MemoryError> {
 
 /// Resolve the config-home directory used for session-memory writes:
 /// `$LINGXI_CONFIG_DIR` when set (claude-code `??`: an empty value is honored
-/// verbatim → cwd-relative) else `$HOME/.claude` else `$USERPROFILE/.claude`
-/// else a bare `.claude`.
+/// verbatim → cwd-relative) else `$HOME/.lingxi` else `$USERPROFILE/.lingxi`
+/// else a bare `.lingxi`.
 ///
 /// Delegates the `$LINGXI_CONFIG_DIR`-vs-home resolution to the canonical
 /// [`crate::lingxi_md::user_config_dir`]; this fn only resolves the fallback home
 /// from `$HOME`/`$USERPROFILE` (the memory crate has no `dirs` dependency).
 /// `Path::new("").join(".lingxi") == ".lingxi"`, so the no-home case stays the
-/// bare `.claude` form — byte-identical to the prior inline implementation.
+/// bare `.lingxi` form.
 #[must_use]
 pub fn config_home_dir() -> PathBuf {
     let home = std::env::var_os("HOME")
@@ -668,34 +625,16 @@ mod tests {
     use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
     use std::sync::Arc;
 
-    fn enabled_config(init: u32, update: u32) -> SessionMemoryConfig {
-        SessionMemoryConfig {
-            enabled: true,
-            initialization_threshold: init,
-            update_threshold: update,
-            // Keep the pre-token-threshold unit tests focused on the legacy
-            // compatibility fields. Dedicated tests below exercise Claude's
-            // token/activity gates with their real defaults.
-            minimum_message_tokens_to_init: 0,
-            minimum_tokens_between_update: 0,
-            tool_calls_between_updates: update,
-            ..SessionMemoryConfig::default()
-        }
-    }
-
-    fn token_gated_config(
+    fn enabled_config(
         minimum_message_tokens_to_init: u32,
         minimum_tokens_between_update: u32,
         tool_calls_between_updates: u32,
     ) -> SessionMemoryConfig {
         SessionMemoryConfig {
             enabled: true,
-            initialization_threshold: 0,
-            update_threshold: 0,
             minimum_message_tokens_to_init,
             minimum_tokens_between_update,
             tool_calls_between_updates,
-            ..SessionMemoryConfig::default()
         }
     }
 
@@ -727,7 +666,6 @@ mod tests {
             !c.enabled,
             "must be off by default (locked fixtures stay byte-identical)"
         );
-        assert_eq!(c.extraction_model, "claude-haiku-4-5");
         assert_eq!(c.minimum_message_tokens_to_init, 10_000);
         assert_eq!(c.minimum_tokens_between_update, 5_000);
         assert_eq!(c.tool_calls_between_updates, 3);
@@ -743,7 +681,7 @@ mod tests {
 
     #[test]
     fn reset_clears_watermark_and_carried_progress() {
-        let mut ex = SessionMemoryExtractor::new(enabled_config(10, 3));
+        let mut ex = SessionMemoryExtractor::new(enabled_config(0, 0, 3));
         let watermark = user("watermark");
         ex.mark_extracted_through(Some(watermark.id()));
         ex.record_compaction_boundary(Some(user("tail").id()), 2);
@@ -757,37 +695,60 @@ mod tests {
     }
 
     #[test]
-    fn should_extract_uses_initialization_threshold_before_first_extraction() {
-        let mut ex = SessionMemoryExtractor::new(enabled_config(3, 1));
+    fn should_extract_requires_configured_tool_calls_before_first_extraction() {
+        let mut ex = SessionMemoryExtractor::new(enabled_config(0, 0, 3));
         assert!(!ex.is_initialized());
-        // 2 tool calls < init threshold 3 => no.
+        // Two tool calls do not reach the configured activity gate.
         assert!(!ex.should_extract(&[assistant_tools(2)]));
-        // 3 tool calls >= init threshold 3 => yes.
+        assert!(ex.session_memory_initialized);
+        // Three tool calls reach the same gate before any completed extraction.
         assert!(ex.should_extract(&[assistant_tools(3)]));
     }
 
     #[test]
-    fn should_extract_uses_update_threshold_after_first_extraction() {
-        let mut ex = SessionMemoryExtractor::new(enabled_config(10, 2));
+    fn should_extract_requires_configured_tool_calls_after_first_extraction() {
+        let mut ex = SessionMemoryExtractor::new(enabled_config(0, 0, 2));
         // Simulate a completed first extraction by setting the watermark.
         let watermark = user("watermark");
         ex.mark_extracted_through(Some(watermark.id()));
         assert!(ex.is_initialized());
 
         // History: watermark, then 1 tool call (since the watermark) => below
-        // the update threshold of 2.
+        // the configured activity gate of two.
         let one = assistant_tools(1);
         let history = vec![watermark.clone(), one];
         assert!(!ex.should_extract(&history));
 
-        // Add another tool call after the watermark => 2 >= update threshold.
+        // Add another tool call after the watermark to reach the same gate.
         let history2 = vec![watermark, assistant_tools(1), assistant_tools(1)];
         assert!(ex.should_extract(&history2));
     }
 
     #[test]
+    fn zero_token_gates_allow_natural_no_tool_assistant_turns() {
+        let mut ex = SessionMemoryExtractor::new(enabled_config(0, 0, 3));
+        let tool_turn = assistant_tools(1);
+        assert!(!ex.should_extract(std::slice::from_ref(&tool_turn)));
+
+        let natural_turn = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: "done".to_string(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".to_string()),
+        };
+        let history = vec![tool_turn, natural_turn];
+        assert!(ex.should_extract(&history));
+
+        ex.mark_extracted_through(Some(history[0].id()));
+        assert!(ex.should_extract(&history));
+        assert_eq!(ex.pending_tool_calls(), 0);
+    }
+
+    #[test]
     fn token_gates_match_claude_initialization_and_activity_rules() {
-        let mut ex = SessionMemoryExtractor::new(token_gated_config(5, 3, 2));
+        let mut ex = SessionMemoryExtractor::new(enabled_config(5, 3, 2));
         let short = vec![user("1234567890123456")]; // 4 rough tokens.
         assert!(!ex.should_extract(&short));
         assert!(!ex.session_memory_initialized);
@@ -807,7 +768,7 @@ mod tests {
 
     #[test]
     fn token_growth_is_required_even_when_tool_call_threshold_is_met() {
-        let mut ex = SessionMemoryExtractor::new(token_gated_config(1, 5, 1));
+        let mut ex = SessionMemoryExtractor::new(enabled_config(1, 5, 1));
         let watermark = user("watermark");
         let base = vec![watermark.clone(), assistant_tools(1)];
         ex.mark_extracted_through(Some(watermark.id()));
@@ -834,7 +795,7 @@ mod tests {
 
     #[test]
     fn token_growth_allows_a_natural_no_tool_assistant_turn() {
-        let mut ex = SessionMemoryExtractor::new(token_gated_config(1, 5, 99));
+        let mut ex = SessionMemoryExtractor::new(enabled_config(1, 5, 99));
         let watermark = user("watermark");
         let base = vec![watermark.clone(), assistant_tools(1)];
         ex.mark_extracted_through(Some(watermark.id()));
@@ -849,6 +810,7 @@ mod tests {
                 id: MessageId::new(),
                 content: vec![ContentBlock::Text {
                     text: "done".to_string(),
+                    citations: None,
                 }],
                 stop_reason: Some("end_turn".to_string()),
             },
@@ -871,7 +833,7 @@ mod tests {
 
     #[test]
     fn missing_watermark_preserves_pending_progress_across_compaction() {
-        let mut ex = SessionMemoryExtractor::new(enabled_config(10, 3));
+        let mut ex = SessionMemoryExtractor::new(enabled_config(0, 0, 3));
         let watermark = user("watermark");
         ex.mark_extracted_through(Some(watermark.id()));
 
@@ -879,7 +841,9 @@ mod tests {
         assert!(!ex.should_extract(&pre_compact));
         assert_eq!(ex.pending_tool_calls(), 2);
 
-        let compacted = vec![user("compacted tail")];
+        // A retained tool turn keeps the activity gate active; its calls are
+        // already covered by the carried progress and must not be recounted.
+        let compacted = vec![assistant_tools(1), user("compacted tail")];
         assert!(!ex.should_extract(&compacted));
         assert_eq!(ex.pending_tool_calls(), 2);
         assert_eq!(
@@ -895,9 +859,9 @@ mod tests {
 
     #[test]
     fn record_compaction_boundary_resumes_from_compacted_tail() {
-        let mut ex = SessionMemoryExtractor::new(enabled_config(10, 3));
+        let mut ex = SessionMemoryExtractor::new(enabled_config(0, 0, 3));
         let watermark = user("watermark");
-        let compacted_tail = user("compacted tail");
+        let compacted_tail = assistant_tools(1);
         ex.mark_extracted_through(Some(watermark.id()));
         let revision_before_compaction = ex.state_revision();
         ex.record_compaction_boundary(Some(compacted_tail.id()), 2);
@@ -979,7 +943,7 @@ mod tests {
         };
 
         let dir = tempfile::tempdir().unwrap();
-        let mut ex = SessionMemoryExtractor::new(enabled_config(1, 1));
+        let mut ex = SessionMemoryExtractor::new(enabled_config(0, 0, 1));
         let history = vec![assistant_tools(1), user("last")];
         let last_id = history.last().unwrap().id();
 
@@ -1076,7 +1040,7 @@ mod tests {
         };
 
         let dir = tempfile::tempdir().unwrap();
-        let mut ex = SessionMemoryExtractor::new(enabled_config(1, 1));
+        let mut ex = SessionMemoryExtractor::new(enabled_config(0, 0, 1));
         let visible = user("visible");
         let unseen = user("unseen");
 
@@ -1122,17 +1086,17 @@ mod tests {
     }
 
     #[test]
-    fn config_home_dir_honors_claude_config_dir_then_home() {
+    fn config_home_dir_honors_override_then_home() {
         // We avoid mutating real process env across threads beyond a scoped check.
-        let prev = std::env::var_os("LINGXI_CONFIG_DIR");
-        std::env::set_var("LINGXI_CONFIG_DIR", "/explicit/cfg");
+        let prev = std::env::var_os(branding::CONFIG_DIR_ENV);
+        std::env::set_var(branding::CONFIG_DIR_ENV, "/explicit/cfg");
         assert_eq!(config_home_dir(), PathBuf::from("/explicit/cfg"));
         // A set-but-EMPTY string is honored verbatim (claude-code `??`).
-        std::env::set_var("LINGXI_CONFIG_DIR", "");
+        std::env::set_var(branding::CONFIG_DIR_ENV, "");
         assert_eq!(config_home_dir(), PathBuf::from(""));
         match prev {
-            Some(v) => std::env::set_var("LINGXI_CONFIG_DIR", v),
-            None => std::env::remove_var("LINGXI_CONFIG_DIR"),
+            Some(v) => std::env::set_var(branding::CONFIG_DIR_ENV, v),
+            None => std::env::remove_var(branding::CONFIG_DIR_ENV),
         }
     }
 }

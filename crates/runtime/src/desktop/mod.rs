@@ -63,11 +63,11 @@ mod skill_loader;
 mod watcher_test_support;
 
 use client::adapter::AdapterPermissionGate;
-pub use command_api::builtins::{runtime_build_info, BuildInfo};
+pub use command_api::builtins::{BuildInfo, runtime_build_info};
 use command_api::model::BuiltinCommandHandler;
 use command_api::{
-    parse_slash_command, CommandRegistry, CommandResult, ParsedSlashCommand,
-    RegistrySlashDispatcher,
+    CommandRegistry, CommandResult, ParsedSlashCommand, RegistrySlashDispatcher,
+    parse_slash_command,
 };
 
 use command_api::builtins::{
@@ -76,6 +76,8 @@ use command_api::builtins::{
 };
 
 use lingxi_core::host::{AuthHandle, OrchestratorHandle, OutputStream};
+pub use orchestrator::native_computer::VerifiedComputerProfile;
+pub use lingxi_llm_client::protocol::computer::NativeComputerProvider;
 use orchestrator::{ConversationOrchestrator, ProviderApiAdapter};
 use permission::gate::PermissionGate;
 
@@ -468,6 +470,57 @@ impl DeferredToolInvoker {
 
 #[async_trait::async_trait]
 impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
+    async fn cleanup_computer_inputs(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        origin_session_id: Option<lingxi_core::types::SessionId>,
+    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
+        match self.inner.get() {
+            Some(inner) => {
+                inner
+                    .cleanup_computer_inputs(agent_id, origin_session_id)
+                    .await
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn permission_mode(&self) -> Option<String> {
+        self.inner
+            .get()
+            .and_then(|invoker| invoker.permission_mode())
+    }
+
+    fn tool_is_concurrency_safe(&self, name: &str, input: &serde_json::Value) -> Option<bool> {
+        self.inner
+            .get()
+            .and_then(|invoker| invoker.tool_is_concurrency_safe(name, input))
+    }
+
+    async fn invoke_supplied_detailed(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+        workspace_lease_token: Option<u64>,
+        supplied: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<
+        lingxi_core::host::tool_invoker::ToolInvocationResult,
+        lingxi_core::host::tool_invoker::ToolInvokerError,
+    > {
+        match self.inner.get() {
+            Some(invoker) => {
+                invoker
+                    .invoke_supplied_detailed(name, input, ctx, workspace_lease_token, supplied)
+                    .await
+            }
+            None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
+                "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
+                    .to_string(),
+            )),
+        }
+    }
+
     async fn invoke_detailed(
         &self,
         name: &str,
@@ -536,20 +589,6 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-    async fn cleanup_computer_inputs(
-        &self,
-        agent_id: lingxi_core::types::AgentId,
-        origin_session_id: Option<lingxi_core::types::SessionId>,
-    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
-        match self.inner.get() {
-            Some(inner) => {
-                inner
-                    .cleanup_computer_inputs(agent_id, origin_session_id)
-                    .await
-            }
-            None => Ok(()),
-        }
     }
 }
 
@@ -622,6 +661,25 @@ struct TeammateStatusFanout {
 
 #[async_trait::async_trait]
 impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
+    fn task_registry(
+        &self,
+    ) -> Option<Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>> {
+        tasks::handlers::TaskStatusSink::task_registry(self.task_registry.as_ref())
+    }
+
+    async fn bind_agent_id(
+        &self,
+        task_id: &str,
+        agent_id: lingxi_core::types::AgentId,
+    ) -> Result<(), String> {
+        tasks::handlers::TaskStatusSink::bind_agent_id(
+            self.task_registry.as_ref(),
+            task_id,
+            agent_id,
+        )
+        .await
+    }
+
     fn requires_explicit_activation(&self) -> bool {
         tasks::handlers::TaskStatusSink::requires_explicit_activation(self.task_registry.as_ref())
     }
@@ -688,11 +746,6 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
         .await;
     }
 
-    async fn set_pid(&self, task_id: &str, pid: u32) {
-        tasks::handlers::TaskStatusSink::set_pid(self.task_registry.as_ref(), task_id, pid).await;
-        tasks::handlers::TaskStatusSink::set_pid(self.coordinator.as_ref(), task_id, pid).await;
-    }
-
     async fn notify_rest(
         &self,
         task_id: &str,
@@ -701,6 +754,7 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
         agent_id: Option<lingxi_core::types::AgentId>,
         agent_name: Option<String>,
         team_name: Option<String>,
+        run: Option<lingxi_core::host::handback::HandbackRunKey>,
     ) {
         tasks::handlers::TaskStatusSink::notify_rest(
             self.task_registry.as_ref(),
@@ -710,6 +764,7 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
             agent_id,
             agent_name.clone(),
             team_name.clone(),
+            run,
         )
         .await;
         tasks::handlers::TaskStatusSink::notify_rest(
@@ -720,6 +775,7 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
             agent_id,
             agent_name,
             team_name,
+            run,
         )
         .await;
     }
@@ -769,6 +825,10 @@ impl tasks::handlers::TaskStatusSink for TeammateStatusFanout {
     }
 }
 
+#[cfg(test)]
+#[path = "tests/teammate_status_fanout_test.rs"]
+mod teammate_status_fanout_test;
+
 /// Session-owned routing for teammate messages. Team creation is implicit;
 /// the tool registry exposes only SendMessage alongside Agent.
 pub struct CoordinatorWiring {
@@ -785,7 +845,7 @@ fn teammate_backend_selector(
     is_tty: bool,
 ) -> Arc<dyn Fn() -> pane_teammate::PaneBackendSelection + Send + Sync> {
     use platform_posix::swarm::detection::{
-        detect_terminal_env, select_backend, BackendChoice, TeammateMode,
+        BackendChoice, TeammateMode, detect_terminal_env, select_backend,
     };
     let backends = std::sync::Mutex::new(std::collections::HashMap::<
         &'static str,
@@ -2077,7 +2137,7 @@ impl DesktopBashRunner {
         // A minimal per-call context for a user-initiated `!` command: no
         // tool_use_id, empty history, inert options. The model id is unused for
         // execution (only `BashTool::prompt` reads it).
-        let use_ctx = tool_api::ToolUseContext::model_seed(self.ctx.default_model.clone());
+        let use_ctx = tool_api::ToolUseContext::model_seed(self.ctx.default_model.clone(), None);
         match tool
             .call(
                 serde_json::json!({ "command": command }),
@@ -2246,7 +2306,7 @@ impl DesktopWorktreeCommandHandler {
         input: serde_json::Value,
     ) -> String {
         let (progress_tx, _progress_rx) = tool_api::progress_channel();
-        let use_ctx = tool_api::ToolUseContext::model_seed(self.ctx.default_model.clone());
+        let use_ctx = tool_api::ToolUseContext::model_seed(self.ctx.default_model.clone(), None);
         match tool.call(input, use_ctx, progress_tx).await {
             Ok(result) => result
                 .model_content
@@ -2348,6 +2408,11 @@ pub struct DesktopRuntime {
     /// the dispatcher and skill/plugin loaders. Surfaced so non-TUI hosts can
     /// snapshot the live catalog and detect command-set mutations.
     pub shared_command_registry: Arc<RwLock<CommandRegistry>>,
+    /// Live Mod command catalog; the product host binds its queue after the
+    /// queue consumer exists, so plugin-origin runs preserve input ordering.
+    pub mod_command_catalog: Arc<command_api::RegistryModCommandCatalog>,
+    /// Dynamic UI attachment roster shared with the current orchestrator.
+    pub mod_surface_roster: Arc<orchestrator::mod_surface_roster::ModSurfaceRoster>,
     /// Slash-command dispatcher seeded with the builtin handlers + wired core
     /// handlers (the `register_all_builtin_commands` → `register_core_batch_1`
     /// → `register_core_batch_2` sequence).
@@ -2562,7 +2627,6 @@ pub struct DesktopRuntime {
 impl DesktopRuntime {
     /// The names of every tool this build registered, by value.
     ///
-
     /// The honest observation point for a capability-gated tool: the tool
     /// context itself is consumed by [`build`], so "did the capability reach
     /// the engine" can only be asked of what the registry ended up holding.
@@ -2576,7 +2640,6 @@ impl DesktopRuntime {
     /// Whether this runtime was built with a device-audio capability
     /// ([`DesktopConfig::audio`]).
     ///
-
     /// Read from the capability itself, not from the tool list, so the two
     /// together distinguish "the config never reached the runtime" from "it
     /// reached the runtime but not the tool context".
@@ -2733,6 +2796,9 @@ pub enum BuildError {
     /// API base URL resolution / api-client construction failed.
     #[error("api base resolution failed: {0}")]
     ApiBase(String),
+    /// Explicit custom-agent configuration could not be parsed.
+    #[error("Invalid --agents configuration: {0}")]
+    InvalidAgents(String),
     /// Custom beta headers were requested for a route/auth mode that cannot
     /// safely carry Anthropic first-party API-key beta headers.
     #[error("custom betas require a first-party Anthropic API-key session")]
@@ -3314,6 +3380,18 @@ fn load_effective_settings_for_config(
     .ok()
 }
 
+/// Sample the current merged main/subagent prompt-cache settings for an API
+/// request. This uses the same user, project, local, flag and managed layers
+/// as the other desktop settings consumers.
+pub(super) fn prompt_cache_ttl_settings_for_config(
+    cfg: &DesktopConfig,
+) -> lingxi_core::settings::schema::PromptCacheTtlSettings {
+    let managed = credentials::managed_settings_raw_tiers_sync();
+    load_effective_settings_for_config(cfg, &managed)
+        .map(|settings| settings.settings.prompt_cache_ttl_settings())
+        .unwrap_or_default()
+}
+
 /// `Bk("bashEditDiffEnabled")[0]` — the value as the USER / flag / policy tiers
 /// alone see it, ignoring project and project-local settings.
 ///
@@ -3544,6 +3622,12 @@ fn load_merged_disable_all_hooks(project_dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+fn load_merged_allow_managed_hooks_only(project_dir: &std::path::Path) -> bool {
+    load_merged_settings(project_dir)
+        .and_then(|eff| eff.settings.allow_managed_hooks_only)
+        .unwrap_or(false)
+}
+
 /// The settings an administrator pinned through the managed (policy) layer:
 /// key → value, read from the SAME file-based tiers the merge above consumes
 /// (`managed_settings_raw_tiers`).
@@ -3659,26 +3743,28 @@ fn agent_source_is_trusted(source: agent::AgentSource) -> bool {
 /// disabled)",{level:"warn"})`). Merge precedence per `XXt`'s tier map
 /// `[built-in, plugin, userSettings, projectSettings, flagSettings,
 /// policySettings]` (later wins): a flag agent REPLACES a same-named
-/// user/project dir agent, else appends. Parse failures inside
-/// [`agent::parse_agents_from_flag_json`] log and contribute no agents —
-/// the flag never aborts boot.
+/// user/project dir agent, else appends. Invalid explicit configuration is
+/// rejected before the catalog changes.
 fn merge_cli_flag_agents(
     agents: &mut Vec<agent::AgentDefinition>,
     cli_agents_json: Option<&str>,
     safe_mode: bool,
-) {
-    let Some(raw) = cli_agents_json else { return };
+) -> Result<(), String> {
+    let Some(raw) = cli_agents_json else {
+        return Ok(());
+    };
     if safe_mode {
         tracing::warn!("--agents: ignored in safe mode (user-supplied custom agents are disabled)");
-        return;
+        return Ok(());
     }
-    for a in agent::parse_agents_from_flag_json(raw) {
+    for a in agent::parse_agents_from_flag_json_checked(raw)? {
         if let Some(slot) = agents.iter_mut().find(|e| e.agent_type == a.agent_type) {
             *slot = a;
         } else {
             agents.push(a);
         }
     }
+    Ok(())
 }
 
 /// (M7 cc2.1.220) Boot gates for [`merge_agent_frontmatter_mcp_servers`],
@@ -3974,6 +4060,15 @@ async fn build_agent_mcp_tool_set(
             } else {
                 tool
             };
+            let tool = if let Some(ceiling) =
+                tool_mcp::mcp_tool::configured_organization_max_permission(
+                    &entry_config,
+                    &dto.tool_name,
+                ) {
+                tool.with_organization_max_permission(ceiling)
+            } else {
+                tool
+            };
             let tool = match &bound_key {
                 Some(key) => tool.with_bound_server_key(key.clone()),
                 None => tool,
@@ -4129,6 +4224,127 @@ async fn load_managed_plugin_names() -> std::collections::HashSet<String> {
         }
     }
     managed
+}
+
+/// The upstream security default is outermost on machines with managed
+/// settings, unless policy explicitly supplies `prependPlugins`. In that
+/// case the organization must name the built-in in the list. The 2.1.288
+/// initializer accepts both its stable settings identity and the bundled ID.
+fn sec_default_order_from_raw_tiers(raw_tiers: &[String]) -> Option<i64> {
+    if raw_tiers.is_empty() {
+        return None;
+    }
+    let mut explicit_prepend = None;
+    for raw in raw_tiers {
+        let Ok(serde_json::Value::Object(map)) = serde_json::from_str(raw) else {
+            continue;
+        };
+        if let Some(ids) = map
+            .get("prependPlugins")
+            .and_then(serde_json::Value::as_array)
+        {
+            if let Some(ids) = ids
+                .iter()
+                .map(serde_json::Value::as_str)
+                .collect::<Option<Vec<_>>>()
+            {
+                explicit_prepend = Some(
+                    ids.iter()
+                        .position(|id| {
+                            matches!(*id, "sec-default@builtin" | "cc-plugin-sec-default@builtin")
+                        })
+                        .and_then(|index| i64::try_from(index).ok()),
+                );
+            }
+        }
+    }
+    explicit_prepend.unwrap_or(Some(-1))
+}
+
+/// Exact managed `plugin@marketplace` Mod identities and tier order. A false
+/// `enabledPlugins` value in a higher-priority managed tier removes that ID.
+fn managed_mod_seats_from_raw_tiers(
+    raw_tiers: impl IntoIterator<Item = String>,
+) -> plugin::manager::ManagedModSeats {
+    let mut seats = plugin::manager::ManagedModSeats::default();
+    let mut enabled = std::collections::HashMap::new();
+    for raw in raw_tiers {
+        let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&raw) else {
+            continue;
+        };
+        if let Some(entries) = map
+            .get("enabledPlugins")
+            .and_then(|value| value.as_object())
+        {
+            for (identity, value) in entries {
+                if let Some(active) = value.as_bool() {
+                    enabled.insert(identity.clone(), active);
+                }
+            }
+        }
+        for (key, destination) in [
+            ("prependPlugins", &mut seats.prepend),
+            ("appendPlugins", &mut seats.append),
+        ] {
+            if let Some(ids) = map.get(key).and_then(|value| value.as_array()) {
+                if let Some(ids) = ids
+                    .iter()
+                    .map(|value| value.as_str().map(ToOwned::to_owned))
+                    .collect::<Option<Vec<_>>>()
+                {
+                    *destination = ids;
+                }
+            }
+        }
+    }
+    seats.enabled = enabled
+        .into_iter()
+        .filter_map(|(identity, active)| active.then_some(identity))
+        .collect();
+    seats
+}
+
+#[cfg(test)]
+mod managed_mod_seat_tests {
+    use super::{managed_mod_seats_from_raw_tiers, sec_default_order_from_raw_tiers};
+
+    #[test]
+    fn later_managed_tiers_override_enabled_state_and_seat_lists() {
+        let seats = managed_mod_seats_from_raw_tiers([
+            r#"{"enabledPlugins":{"guard@org":true,"audit@org":true},"prependPlugins":["guard@org"]}"#.to_string(),
+            r#"{"enabledPlugins":{"guard@org":false},"prependPlugins":[],"appendPlugins":["audit@org"]}"#.to_string(),
+        ]);
+        assert!(!seats.enabled.contains("guard@org"));
+        assert!(seats.enabled.contains("audit@org"));
+        assert!(seats.prepend.is_empty());
+        assert_eq!(seats.append, ["audit@org"]);
+    }
+
+    #[test]
+    fn security_default_follows_explicit_managed_prepend_list() {
+        let managed = r#"{"enabledPlugins":{"guard@org":true}}"#.to_string();
+        let raw = [managed.clone()];
+        assert_eq!(
+            sec_default_order_from_raw_tiers(&raw),
+            Some(-1),
+            "managed settings without an explicit list keep the default outermost placement"
+        );
+        assert_eq!(sec_default_order_from_raw_tiers(&[]), None);
+        let explicit_empty = [managed.clone(), r#"{"prependPlugins":[]}"#.to_string()];
+        assert_eq!(sec_default_order_from_raw_tiers(&explicit_empty), None);
+
+        for id in ["sec-default@builtin", "cc-plugin-sec-default@builtin"] {
+            let explicit = [
+                managed.clone(),
+                format!(r#"{{"prependPlugins":["guard@org","{id}"]}}"#),
+            ];
+            assert_eq!(
+                sec_default_order_from_raw_tiers(&explicit),
+                Some(1),
+                "the 2.1.288 initializer recognizes {id}"
+            );
+        }
+    }
 }
 
 /// Read the managed-only blocked marketplace policy (`blockedMarketplaces`),
@@ -4377,16 +4593,19 @@ impl PluginRuntime {
     /// targets so ownership does not overlap or partially duplicate.
     pub async fn refresh(&self) -> PluginRefreshCounts {
         let _refresh_guard = self.refresh_lock.lock().await;
+        let plugin_configs =
+            load_plugin_configs(&self.home, self.restricted, self.flag_settings.as_ref()).await;
+        let blocked_marketplaces = load_blocked_marketplaces().await;
+        let managed_plugin_names = load_managed_plugin_names().await;
+        let managed_tiers = settings_watch::managed_settings_raw_tiers().await;
         self.manager
-            .replace_plugin_configs(
-                load_plugin_configs(&self.home, self.restricted, self.flag_settings.as_ref()).await,
+            .replace_runtime_refresh_state(
+                plugin_configs,
+                blocked_marketplaces,
+                managed_plugin_names,
+                sec_default_order_from_raw_tiers(&managed_tiers),
+                managed_mod_seats_from_raw_tiers(managed_tiers),
             )
-            .await;
-        self.manager
-            .replace_blocked_marketplaces(load_blocked_marketplaces().await)
-            .await;
-        self.manager
-            .replace_managed_plugin_names(load_managed_plugin_names().await)
             .await;
         // (1) The fresh target set from disk + settings.
         let additional_project_roots = self.additional_project_roots.read().await.clone();
@@ -4512,31 +4731,78 @@ fn spawn_cli_plugin_dir_collection_watch(runtime: Arc<PluginRuntime>) {
 /// [`AsyncHookResponseProvider::take_pending_responses`] drains the buffer
 /// (mirrors TS `removeDeliveredAsyncHooks`). A plain `std::sync::Mutex` — every
 /// critical section is a brief push / `mem::take`, never held across an `await`.
+struct PendingAsyncHookResponse {
+    response: orchestrator::prompt::async_hook_response::AsyncHookResponse,
+    publication_guard: Option<Arc<dyn hooks::attachment::HookPublicationGuard>>,
+}
+
 #[derive(Clone, Default)]
 struct AsyncHookResponseBuffer {
-    responses: Arc<std::sync::Mutex<Vec<String>>>,
+    responses: Arc<std::sync::Mutex<Vec<PendingAsyncHookResponse>>>,
     rewake_target: Arc<std::sync::OnceLock<std::sync::Weak<dyn OrchestratorHandle>>>,
+    pending_rewakes:
+        Arc<std::sync::Mutex<Vec<Option<lingxi_core::host::CancellationToken>>>>,
 }
 
 impl AsyncHookResponseBuffer {
-    fn push(&self, text: String) {
+    fn push(
+        &self,
+        text: hooks::ExactHookText,
+        hook_event: Option<String>,
+        publication_guard: Option<Arc<dyn hooks::attachment::HookPublicationGuard>>,
+    ) {
         if let Ok(mut v) = self.responses.lock() {
-            v.push(text);
+            v.push(PendingAsyncHookResponse {
+                response: orchestrator::prompt::async_hook_response::AsyncHookResponse {
+                    text,
+                    hook_event,
+                    publication_guard: None,
+                },
+                publication_guard,
+            });
         }
     }
 
     fn attach_rewake_target(&self, orchestrator: &Arc<ConversationOrchestrator>) {
         let target: Arc<dyn OrchestratorHandle> = orchestrator.clone();
-        let _ = self.rewake_target.set(Arc::downgrade(&target));
+        self.attach_rewake_handle(&target);
     }
 
-    async fn rewake(&self) {
-        let Some(target) = self.rewake_target.get().and_then(std::sync::Weak::upgrade) else {
-            return;
+    fn attach_rewake_handle(&self, target: &Arc<dyn OrchestratorHandle>) {
+        let pending = {
+            let mut pending = self.pending_rewakes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = self.rewake_target.set(Arc::downgrade(target));
+            std::mem::take(&mut *pending)
         };
-        if let Err(error) = target.run_async_hook_rewake().await {
-            tracing::warn!(error = %error, "async hook re-wake turn failed");
+        for generation_cancel in pending {
+            self.schedule_rewake(generation_cancel);
         }
+    }
+
+    fn schedule_rewake(&self, generation_cancel: Option<lingxi_core::host::CancellationToken>) {
+        if generation_cancel.as_ref().is_some_and(|cancel| cancel.is_cancelled()) {
+            return;
+        }
+        let target = {
+            let mut pending = self.pending_rewakes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match self.rewake_target.get().and_then(std::sync::Weak::upgrade) {
+                Some(target) => target,
+                None if self.rewake_target.get().is_none() => {
+                    pending.push(generation_cancel);
+                    return;
+                }
+                None => return,
+            }
+        };
+        tokio::spawn(async move {
+            if let Err(error) = target.run_async_hook_rewake(generation_cancel).await {
+                tracing::warn!(error = %error, "async hook re-wake turn failed");
+            }
+        });
     }
 }
 
@@ -4544,22 +4810,153 @@ impl AsyncHookResponseBuffer {
 impl orchestrator::prompt::async_hook_response::AsyncHookResponseProvider
     for AsyncHookResponseBuffer
 {
-    async fn take_pending_responses(&self) -> Vec<String> {
+    async fn take_pending_responses(&self) -> Vec<hooks::ExactHookText> {
         self.responses
             .lock()
             .map(|mut v| std::mem::take(&mut *v))
             .unwrap_or_default()
+            .into_iter()
+            .filter(|pending| {
+                pending
+                    .publication_guard
+                    .as_ref()
+                    .is_none_or(|guard| guard.is_current())
+            })
+            .map(|pending| pending.response.text)
+            .collect()
+    }
+
+    async fn take_pending_with_events(
+        &self,
+    ) -> Vec<orchestrator::prompt::async_hook_response::AsyncHookResponse> {
+        self.responses
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|pending| {
+                pending
+                    .publication_guard
+                    .as_ref()
+                    .is_none_or(|guard| guard.is_current())
+            })
+            .map(
+                |pending| orchestrator::prompt::async_hook_response::AsyncHookResponse {
+                    text: pending.response.text,
+                    hook_event: pending.response.hook_event,
+                    publication_guard: pending.publication_guard,
+                },
+            )
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod async_hook_response_buffer_tests {
+    use super::*;
+    use orchestrator::prompt::async_hook_response::AsyncHookResponseProvider;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    struct TestPublicationGuard(lingxi_core::host::CancellationToken);
+
+    impl hooks::attachment::HookPublicationGuard for TestPublicationGuard {
+        fn is_current(&self) -> bool {
+            !self.0.is_cancelled()
+        }
+
+        fn generation_cancellation_token(&self) -> Option<lingxi_core::host::CancellationToken> {
+            Some(self.0.clone())
+        }
+
+        fn publish_if_current<'a>(
+            &'a self,
+            publication: Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            let root = self.0.clone();
+            Box::pin(async move {
+                if root.is_cancelled() {
+                    return false;
+                }
+                publication.await;
+                true
+            })
+        }
+
+        fn commit_if_current<'a>(
+            &'a self,
+            mutation: Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            self.publish_if_current(mutation)
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_rewakes_wait_for_the_initialized_target() {
+        let buffer = AsyncHookResponseBuffer::default();
+        let canceled = lingxi_core::host::CancellationToken::new();
+        let live = lingxi_core::host::CancellationToken::new();
+        buffer.schedule_rewake(Some(canceled.clone()));
+        buffer.schedule_rewake(Some(live.clone()));
+        buffer.schedule_rewake(None);
+        assert_eq!(buffer.pending_rewakes.lock().unwrap().len(), 3);
+        canceled.cancel();
+
+        let target: Arc<dyn OrchestratorHandle> =
+            Arc::new(orchestrator::test_support::MockOrchestratorHandle::default());
+        buffer.attach_rewake_handle(&target);
+        assert!(buffer.pending_rewakes.lock().unwrap().is_empty());
+        assert!(buffer.rewake_target.get().and_then(std::sync::Weak::upgrade).is_some());
+        buffer.schedule_rewake(None);
+        assert!(buffer.pending_rewakes.lock().unwrap().is_empty());
+        tokio::task::yield_now().await;
+    }
+
+    #[tokio::test]
+    async fn queued_completion_is_rejected_after_reset_with_live_control() {
+        let buffer = AsyncHookResponseBuffer::default();
+        let stale_root = lingxi_core::host::CancellationToken::new();
+        let stale_guard: Arc<dyn hooks::attachment::HookPublicationGuard> =
+            Arc::new(TestPublicationGuard(stale_root.clone()));
+        buffer.push(
+            "old generation".into(),
+            Some("PostToolUse".into()),
+            Some(stale_guard),
+        );
+
+        // Reset happens after the result entered the process buffer but before
+        // the next prompt consumes it.
+        stale_root.cancel();
+        assert!(
+            buffer.take_pending_with_events().await.is_empty(),
+            "a buffered old-generation hook result must not reach a new prompt"
+        );
+
+        let live_guard: Arc<dyn hooks::attachment::HookPublicationGuard> = Arc::new(
+            TestPublicationGuard(lingxi_core::host::CancellationToken::new()),
+        );
+        buffer.push(
+            "current generation".into(),
+            Some("PostToolUse".into()),
+            Some(live_guard),
+        );
+        let live = buffer.take_pending_with_events().await;
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].text.display, "current generation");
+        assert_eq!(live[0].hook_event.as_deref(), Some("PostToolUse"));
     }
 }
 
 fn registry_skill_listing_provider(
     registry: Arc<RwLock<CommandRegistry>>,
     read_file_state: tool_api::read_file_state::ReadFileStateMap,
+    include_code_review_suggestion: Arc<dyn Fn() -> bool + Send + Sync>,
 ) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
     // Conditional-skill activation is SESSION state, not per-listing: once a
     // touched file has revealed a skill, a later turn whose touched set no
     // longer names that file must not hide it again.
     let conditional = Arc::new(std::sync::Mutex::new(skill_api::ConditionalSkills::new()));
+    let precommit_registry = registry.clone();
     Arc::new(
         orchestrator::prompt::skill_listing::LazySkillListingProvider::new(move || {
             let registry = registry.clone();
@@ -4591,8 +4988,6 @@ fn registry_skill_listing_provider(
                                 | SlashCommandKind::Bundled { .. }
                         )
                     })
-                    // TS `cmd.source !== 'builtin'`.
-                    .filter(|c| c.source != CommandSource::Builtin)
                     // A CONDITIONAL skill (`paths:`) stays out of the listing
                     // until the session has touched a matching file (claude-code
                     // `lhr`). `read_file_state` is this port's record of what the
@@ -4604,13 +4999,15 @@ fn registry_skill_listing_provider(
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .is_available_named(&c.name, patterns, &touched, &root),
                     })
-                    // TS loadedFrom ∈ {bundled,skills,commands_DEPRECATED} ||
-                    //    hasUserSpecifiedDescription || whenToUse.
+                    // 2.1.286 Gee: builtin prompt or a recognized skill origin,
+                    // otherwise explicit description/whenToUse is required.
                     .filter(|c| {
-                        matches!(
-                            c.loaded_from.as_deref(),
-                            Some("bundled" | "skills" | "commands_DEPRECATED")
-                        ) || c.has_user_specified_description
+                        c.source == CommandSource::Builtin
+                            || matches!(
+                                c.loaded_from.as_deref(),
+                                Some("bundled" | "skills" | "syncedSkills" | "commands_DEPRECATED")
+                            )
+                            || c.has_user_specified_description
                             || c.when_to_use.is_some()
                     })
                     .map(|c| orchestrator::prompt::skill_listing::SkillListingEntry {
@@ -4623,9 +5020,40 @@ fn registry_skill_listing_provider(
                     })
                     .collect()
             }
+        })
+        .with_bash_precommit_skills(move |entries| {
+            let registry = precommit_registry.clone();
+            let include_code_review_suggestion = include_code_review_suggestion();
+            async move {
+                let registry = registry.read().await;
+                crate::skill_prompt::bash_precommit_skills(
+                    &registry,
+                    &entries,
+                    include_code_review_suggestion,
+                )
+            }
         }),
     )
 }
+
+fn code_review_suggestion_provider(
+    cfg: DesktopConfig,
+    session_cwd: Arc<SessionCwd>,
+) -> Arc<dyn Fn() -> bool + Send + Sync> {
+    Arc::new(move || {
+        let mut current_cfg = cfg.clone();
+        current_cfg.cwd = session_cwd.cwd();
+        load_effective_settings_for_config(
+            &current_cfg,
+            &credentials::managed_settings_raw_tiers_sync(),
+        )
+        .is_some_and(|effective| effective.settings.include_code_review_suggestion == Some(true))
+    })
+}
+
+#[cfg(test)]
+#[path = "tests/bash_precommit_skill_wiring_tests.rs"]
+mod bash_precommit_skill_wiring_tests;
 
 /// Production [`mcp::oauth::OnAuthorizationUrl`] callback for OAuth-configured
 /// remote MCP servers. The MCP OAuth flow ([`mcp::McpRegistry::connect`]) fires
@@ -4955,6 +5383,10 @@ mod legacy_opening_balance_test;
 mod tests;
 
 #[cfg(test)]
+#[path = "tests/environment_oauth_tests.rs"]
+mod environment_oauth_tests;
+
+#[cfg(test)]
 #[path = "tests/connected_fallback_tests.rs"]
 mod connected_fallback_tests;
 
@@ -4986,10 +5418,17 @@ mod bash_edit_diff_wiring_tests;
 #[path = "tests/read_auto_allow_wiring_tests.rs"]
 mod read_auto_allow_wiring_tests;
 
+#[cfg(test)]
+#[path = "tests/server_fallback_model_policy_tests.rs"]
+mod server_fallback_model_policy_tests;
+
 mod assembly;
 mod configuration;
 mod credentials;
 mod fusion_services;
+mod mod_commands;
+mod mod_settings;
+mod mod_tool_invoker;
 mod permission_config;
 mod platform;
 mod shutdown;
@@ -4997,15 +5436,18 @@ mod shutdown;
 pub use assembly::build;
 pub use assembly::build_with_credential_stack;
 pub use assembly::build_with_host_automation;
-use configuration::api_provider;
-use configuration::is_env_truthy;
-pub use configuration::model_deprecation_warning;
-use configuration::resolve_memory_feature_gates;
 use configuration::ApiProvider;
 pub use configuration::CustomizationGates;
 pub use configuration::DesktopConfig;
 pub use configuration::DesktopEngineConfig;
 pub use configuration::DesktopSessionComposition;
+use configuration::api_provider;
+use configuration::is_env_truthy;
+pub use configuration::model_deprecation_warning;
+use configuration::resolve_memory_feature_gates;
+use credentials::CredentialStoreAuthProvider;
+pub use credentials::LlmStack;
+pub use credentials::SharedCredentialStack;
 pub use credentials::api_service_from_stack;
 use credentials::aws_auth_refresher;
 pub use credentials::build_api_service;
@@ -5016,20 +5458,6 @@ use credentials::capture_legacy_opening_balance;
 use credentials::managed_settings_raw_tiers_sync;
 pub use credentials::resolve_llm_stack;
 use credentials::resolve_llm_stack_with_credentials;
-use credentials::CredentialStoreAuthProvider;
-pub use credentials::LlmStack;
-pub use credentials::SharedCredentialStack;
-use fusion_services::desktop_fusion_attempts;
-use fusion_services::desktop_fusion_catalog_row;
-use fusion_services::desktop_fusion_runtime_config;
-use fusion_services::filter_fusion_catalog;
-pub use fusion_services::fusion_credential_restart_required_message;
-use fusion_services::fusion_route_flag;
-pub use fusion_services::publish_fusion_catalog_credential;
-pub use fusion_services::refresh_fusion_catalog_after_credential_delete;
-pub use fusion_services::refresh_fusion_catalog_after_credential_write;
-pub use fusion_services::register_fusion_catalog_refresher;
-pub use fusion_services::spawn_fusion_catalog_refresh;
 use fusion_services::DesktopFusionConfigSource;
 use fusion_services::DesktopFusionExecutor;
 use fusion_services::DesktopFusionPriceBook;
@@ -5041,6 +5469,19 @@ use fusion_services::FusionCatalogRefreshingCopilotConnect;
 use fusion_services::FusionCatalogRefreshingCredentialWriter;
 use fusion_services::FusionCatalogRefreshingOAuthConnect;
 pub use fusion_services::FusionCatalogRegistry;
+use fusion_services::desktop_fusion_attempts;
+use fusion_services::desktop_fusion_catalog_row;
+use fusion_services::desktop_fusion_runtime_config;
+use fusion_services::filter_fusion_catalog;
+pub use fusion_services::fusion_credential_restart_required_message;
+use fusion_services::fusion_route_flag;
+pub use fusion_services::publish_fusion_catalog_credential;
+pub use fusion_services::refresh_fusion_catalog_after_credential_delete;
+pub use fusion_services::refresh_fusion_catalog_after_credential_write;
+pub use fusion_services::register_fusion_catalog_refresher;
+pub use fusion_services::spawn_fusion_catalog_refresh;
+pub use orchestrator::config::ModRenderSurface;
+use permission_config::BootPermissionTiers;
 use permission_config::append_mcp_permission_rules;
 use permission_config::append_restricted_builtin_denies;
 use permission_config::apple_events_override;
@@ -5065,14 +5506,13 @@ use permission_config::sandbox_auto_allow_from_settings_tiers;
 use permission_config::sandbox_runtime_config_from_settings_tiers;
 use permission_config::should_enforce_permissions;
 use permission_config::strict_allowlist_override;
-use permission_config::BootPermissionTiers;
-pub use shutdown::refresh_process_session_presence;
-#[cfg(any(unix, windows))]
-pub use shutdown::supervisor_exit_sink;
+pub use shutdown::DESKTOP_SHUTDOWN_BUDGET;
 pub use shutdown::DesktopSessionLifecycle;
 pub use shutdown::DesktopSessionShutdownReport;
 use shutdown::ProcessSessionActivationObserver;
-pub use shutdown::DESKTOP_SHUTDOWN_BUDGET;
+pub use shutdown::refresh_process_session_presence;
+#[cfg(any(unix, windows))]
+pub use shutdown::supervisor_exit_sink;
 
 #[cfg(test)]
 use assembly::resolve_workspace_trust;

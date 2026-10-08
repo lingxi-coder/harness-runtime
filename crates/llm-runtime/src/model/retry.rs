@@ -112,25 +112,16 @@ pub const WATCHDOG_MAX_BACKOFF_MS: u64 = 21_600_000;
 static MAX_RETRIES_CLAMP_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// `ct(process.env.CLAUDE_CODE_RETRY_WATCHDOG)` truthiness, over explicit
-/// values. `lingxi` (`LINGXI_RETRY_WATCHDOG`) wins over the `claude`
-/// (`CLAUDE_CODE_RETRY_WATCHDOG`) alias, matching the dual-read convention in
-/// `stream_watchdog.rs`. Truthy = `1`/`true`/`yes`/`on` (case-insensitive);
-/// everything else (incl. absent) is OFF — the watchdog is opt-in.
+/// Current native typed boolean parsing for the branded retry watchdog.
 #[must_use]
-pub fn retry_watchdog_from_values(lingxi: Option<&str>, claude: Option<&str>) -> bool {
-    lingxi_core::host::env::is_env_truthy(lingxi.or(claude))
+pub fn retry_watchdog_from_value(value: Option<&str>) -> bool {
+    value.is_some_and(crate::structured_output::bool_value)
 }
 
-/// Read the retry-watchdog flag from the process environment
-/// (`LINGXI_RETRY_WATCHDOG` else `CLAUDE_CODE_RETRY_WATCHDOG`). Binary
-/// `oMe(){return ct(process.env.CLAUDE_CODE_RETRY_WATCHDOG)}`.
+/// Read the canonical branded retry-watchdog flag from the environment.
 #[must_use]
 pub fn retry_watchdog_from_env() -> bool {
-    retry_watchdog_from_values(
-        std::env::var("LINGXI_RETRY_WATCHDOG").ok().as_deref(),
-        std::env::var("CLAUDE_CODE_RETRY_WATCHDOG").ok().as_deref(),
-    )
+    retry_watchdog_from_value(std::env::var(branding::RETRY_WATCHDOG_ENV).ok().as_deref())
 }
 
 /// Byte-faithful port of the binary's `pDs()` max-retries resolver.
@@ -263,6 +254,10 @@ pub struct RetryState {
     /// terminal check `attempt >= max_retries` would then be `255 >= 300`
     /// forever, retrying persistent non-capacity errors indefinitely.
     pub attempt: u32,
+    /// Capacity waits under the persistent retry watchdog. These advance the
+    /// backoff ladder without spending an ordinary retry (`Ese`'s `B`, while
+    /// `$t` is decremented after each persistent 429/529 wait).
+    pub watchdog_capacity_waits: u32,
     /// Count of consecutive `Overloaded` errors without an intervening
     /// non-overloaded outcome.
     pub consecutive_overloaded: u8,
@@ -594,8 +589,7 @@ pub fn next_step_with_backoff(
                 return DriveStep::Terminal;
             }
 
-            let base = capacity_base_delay_ms(state.attempt, backoff_ms, ctl.watchdog);
-            state.attempt = state.attempt.saturating_add(1);
+            let base = next_capacity_backoff(state, ctl, backoff_ms);
             DriveStep::RetryAfter(jittered_delay(base))
         }
 
@@ -640,7 +634,7 @@ pub fn next_step_with_backoff(
                 return DriveStep::Terminal;
             }
 
-            let base = capacity_base_delay_ms(state.attempt, backoff_ms, ctl.watchdog);
+            let base = next_capacity_backoff(state, ctl, backoff_ms);
             let delay = match retry_after {
                 // Binary `sle` treats the retry-after header as a FLOOR, not a
                 // verbatim value: `return Math.max(header*1000, jittered_backoff)`.
@@ -649,11 +643,11 @@ pub fn next_step_with_backoff(
                 Some(d) => (*d).max(jittered_delay(base)),
                 None => jittered_delay(base),
             };
-            state.attempt = state.attempt.saturating_add(1);
             DriveStep::RetryAfter(delay)
         }
 
         LlmError::ProviderInternal
+        | LlmError::ProviderTimeout { .. }
         | LlmError::Transport { .. }
         | LlmError::TransportTimeout { .. } => {
             // Reset the consecutive-overloaded counter.
@@ -663,7 +657,10 @@ pub fn next_step_with_backoff(
                 return DriveStep::Terminal;
             }
 
-            let base = scaled_base_delay_ms(state.attempt, backoff_ms);
+            let base = scaled_base_delay_ms(
+                state.attempt.saturating_add(state.watchdog_capacity_waits),
+                backoff_ms,
+            );
             state.attempt = state.attempt.saturating_add(1);
             DriveStep::RetryAfter(jittered_delay(base))
         }
@@ -706,6 +703,7 @@ pub fn next_step_with_backoff(
         // has to sign in again.
         | LlmError::OAuthRefreshDead
         | LlmError::PermissionDenied { .. }
+        | LlmError::RequestDispatchRejected { .. }
         | LlmError::ContextOverflow { .. }
         | LlmError::RequestTooLarge
         | LlmError::FileUploadOutcomeUnknown { .. }
@@ -784,6 +782,23 @@ pub fn capacity_base_delay_ms(attempt: u32, backoff_ms: Option<u64>, watchdog: b
     base.saturating_mul(factor)
         .min(WATCHDOG_MAX_BACKOFF_MS)
         .max(1)
+}
+
+/// Spend the appropriate counter only after the capacity error passed its
+/// terminal/fallback gates. Watchdog waits never consume ordinary retries.
+fn next_capacity_backoff(
+    state: &mut RetryState,
+    ctl: &RetryControl,
+    backoff_ms: Option<u64>,
+) -> u64 {
+    let counter = if ctl.watchdog {
+        &mut state.watchdog_capacity_waits
+    } else {
+        &mut state.attempt
+    };
+    let base = capacity_base_delay_ms(*counter, backoff_ms, ctl.watchdog);
+    *counter = counter.saturating_add(1);
+    base
 }
 
 /// Total time the retry ladder would still spend sleeping, from `state.attempt`

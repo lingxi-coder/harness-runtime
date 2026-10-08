@@ -136,7 +136,7 @@ pub use statusline::StatuslineHandler;
 pub use stickers::StickersHandler;
 pub use stop::StopHandler;
 pub use subtask::SubtaskHandler;
-pub use templates::OLD_INIT_PROMPT;
+pub use templates::INIT_PROMPT;
 pub use usage::UsageHandler;
 pub use version::{runtime_build_info, BuildInfo, VersionHandler};
 pub use workflows::WorkflowsHandler;

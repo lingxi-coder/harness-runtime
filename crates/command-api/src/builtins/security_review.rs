@@ -15,10 +15,10 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 
-/// Per-command allowed-tools for `/security-review`, parsed verbatim from the TS
+/// Per-command allowed-tools for `/security-review`, adapted to current registry names from the TS
 /// `security-review.ts:7` frontmatter `allowed-tools` line
 /// (`Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git show:*),
-/// Bash(git remote show:*), Read, Glob, Grep, LS, Task`). Injected into a fresh
+/// Bash(git remote show:*), Read, Glob, Grep, LS, Agent`). Injected into a fresh
 /// per-command effective policy before the embedded `!`git …`` bodies are
 /// expanded. Surfaced via [`SecurityReviewHandler::allowed_tools`].
 pub const ALLOWED_TOOLS: &[&str] = &[
@@ -31,7 +31,7 @@ pub const ALLOWED_TOOLS: &[&str] = &[
     "Glob",
     "Grep",
     "LS",
-    "Task",
+    "Agent",
 ];
 
 /// The injected prompt body — the markdown content of the TS
@@ -320,8 +320,8 @@ mod tests {
     }
 
     #[test]
-    fn allowed_tools_match_ts_frontmatter() {
-        // Verbatim from security-review.ts:7 frontmatter `allowed-tools`.
+    fn allowed_tools_use_current_agent_name() {
+        // Source frontmatter adapted to the current Agent registry name.
         let h = SecurityReviewHandler::new();
         assert_eq!(
             h.allowed_tools(),
@@ -335,7 +335,7 @@ mod tests {
                 "Glob",
                 "Grep",
                 "LS",
-                "Task",
+                "Agent",
             ]
         );
     }

@@ -54,9 +54,9 @@ const MAX_RETRIES: u32 = 3;
 /// no stdin `[Y/n]` permission prompt (see the module docs). They are locked by
 /// the tests to keep the REPL UX stable, not to mirror the binary.
 ///
-/// - Generic tools: `"Claude needs your permission to use {tool_name}\n[Y/n] "`
+/// - Generic tools: `"{PRODUCT_NAME} needs your permission to use {tool_name}\n[Y/n] "`
 ///   or `[y/N]` depending on the tool's default.
-/// - `Agent` and its legacy alias `Task`:
+/// - `Agent`:
 ///   `"Agent tool requires permission to spawn subagents.\n[Y/n] "`.
 ///
 /// The suffix bracket pair is always followed by a single space.
@@ -69,10 +69,13 @@ pub(crate) fn format_prompt_tool_use(tool_name: &str, default_decision: PromptDe
         PromptDefault::AllowByDefault => "[Y/n] ",
         PromptDefault::DenyByDefault => "[y/N] ",
     };
-    if tool_name == "Agent" || tool_name == "Task" {
+    if tool_name == "Agent" {
         format!("Agent tool requires permission to spawn subagents.\n{suffix}")
     } else {
-        format!("Claude needs your permission to use {tool_name}\n{suffix}")
+        format!(
+            "{} needs your permission to use {tool_name}\n{suffix}",
+            branding::PRODUCT_NAME
+        )
     }
 }
 
@@ -335,7 +338,11 @@ mod tests {
         let s = format_prompt_tool_use("Read", PromptDefault::AllowByDefault);
         assert_eq!(
             s.as_bytes(),
-            b"Claude needs your permission to use Read\n[Y/n] "
+            format!(
+                "{} needs your permission to use Read\n[Y/n] ",
+                branding::PRODUCT_NAME
+            )
+            .as_bytes()
         );
     }
 
@@ -344,7 +351,11 @@ mod tests {
         let s = format_prompt_tool_use("Bash", PromptDefault::DenyByDefault);
         assert_eq!(
             s.as_bytes(),
-            b"Claude needs your permission to use Bash\n[y/N] "
+            format!(
+                "{} needs your permission to use Bash\n[y/N] ",
+                branding::PRODUCT_NAME
+            )
+            .as_bytes()
         );
     }
 
@@ -369,16 +380,20 @@ mod tests {
         // The literal contains the LingXi-only "[Y/n]" affordance that has no
         // counterpart in the claude-code binary.
         assert!(s.contains("[Y/n] "));
-        assert!(s.contains("Claude needs your permission to use"));
+        assert!(s.starts_with(branding::PRODUCT_NAME));
+        assert!(s.contains(" needs your permission to use"));
     }
 
     #[test]
-    fn format_prompt_task_alias_also_uses_agent_message() {
-        // `Task` is the legacy alias for the Agent tool.
+    fn removed_task_alias_uses_generic_message() {
         let s = format_prompt_tool_use("Task", PromptDefault::AllowByDefault);
         assert_eq!(
             s.as_bytes(),
-            b"Agent tool requires permission to spawn subagents.\n[Y/n] "
+            format!(
+                "{} needs your permission to use Task\n[Y/n] ",
+                branding::PRODUCT_NAME
+            )
+            .as_bytes()
         );
     }
 

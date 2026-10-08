@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::response::{HookDecision, HookResponse, PermissionRequestResult};
+use crate::response::{ExactHookText, HookDecision, HookResponse, PermissionRequestResult};
 
 /// Marker unit struct that serializes/deserializes as the literal `"PreToolUse"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -880,6 +880,9 @@ pub struct AgentSpawnPayload {
     /// The requested model, when the spawn pinned one.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub model: Option<String>,
+    /// Configured provider route for the selected child model.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub model_profile: Option<String>,
     /// Whether the spawn was requested as a background run.
     pub background: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -1744,9 +1747,25 @@ pub fn parse_response(
     raw: &str,
     expected_event: &'static str,
 ) -> Result<HookResponse, HookResponseParseError> {
-    let v: Value =
-        serde_json::from_str(raw).map_err(|e| HookResponseParseError::Json(e.to_string()))?;
-    let obj = v.as_object().ok_or(HookResponseParseError::NotObject)?;
+    let projection = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(raw)
+        .map_err(|e| HookResponseParseError::Json(e.to_string()))?;
+    parse_response_projection(&projection, expected_event)
+}
+
+/// Parse and validate a hook response already held in the core UTF-16 JSON
+/// projection. Function hooks use this entry point so QuickJS strings retain
+/// their exact units without a projection-to-JSON-to-projection round trip.
+pub fn parse_response_projection(
+    projection: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    expected_event: &'static str,
+) -> Result<HookResponse, HookResponseParseError> {
+    projection
+        .validate()
+        .map_err(|e| HookResponseParseError::Json(e.to_string()))?;
+    let obj = projection
+        .value
+        .as_object()
+        .ok_or(HookResponseParseError::NotObject)?;
 
     // Claude Code validates the known output schema before interpreting any
     // decision. Keep unknown fields forward-compatible, but never silently
@@ -1781,8 +1800,12 @@ pub fn parse_response(
     }
 
     // systemMessage
-    if let Some(s) = obj.get("systemMessage").and_then(Value::as_str) {
-        resp.system_message = Some(s.to_string());
+    if obj
+        .get("systemMessage")
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        resp.system_message = ExactHookText::from_json_projection(&projection, "/systemMessage");
     }
 
     // #40 top-level `terminalSequence` (claude-code schema BIN off 200873127).
@@ -1980,7 +2003,11 @@ pub fn parse_response(
         // only `additionalContext` reaches the model (`utils/messages.ts:4117`
         // vs `:4258`). We must NOT merge them into one field.
         if let Some(addl) = hs.get("additionalContext").and_then(Value::as_str) {
-            resp.additional_context = Some(addl.to_string());
+            let _ = addl;
+            resp.additional_context = ExactHookText::from_json_projection(
+                &projection,
+                "/hookSpecificOutput/additionalContext",
+            );
         }
         // `hookSpecificOutput.retry` (claude-code `parseHookJSONOutput`,
         // `case 'PermissionDenied': result.retry = json.hookSpecificOutput.retry`,
@@ -2116,7 +2143,11 @@ pub fn parse_response(
         // these only in the SessionStart case of its result switch).
         if expected_event == "SessionStart" {
             if let Some(m) = hs.get("initialUserMessage").and_then(Value::as_str) {
-                resp.initial_user_message = Some(m.to_string());
+                let _ = m;
+                resp.initial_user_message = ExactHookText::from_json_projection(
+                    &projection,
+                    "/hookSpecificOutput/initialUserMessage",
+                );
             }
             if let Some(b) = hs.get("reloadSkills").and_then(Value::as_bool) {
                 resp.reload_skills = Some(b);

@@ -32,6 +32,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use crate::response::ExactHookText;
 
 /// The byte-faithful wire payload for a `TeammateIdle` fire, sourced from the
 /// teammate handler at the per-turn-set idle transition. Field set mirrors
@@ -70,7 +71,7 @@ pub struct TeammateIdleOutcome {
     /// message and therefore drives another turn instead of allowing idle.
     pub blocking_feedback: Vec<String>,
     /// Model-facing `additionalContext` values, in hook execution order.
-    pub additional_contexts: Vec<String>,
+    pub additional_contexts: Vec<ExactHookText>,
 }
 
 impl TeammateIdleOutcome {

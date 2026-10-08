@@ -134,12 +134,9 @@ async fn clear_does_not_wait_for_network_extraction_or_commit_stale_result() {
         extractor: tokio::sync::Mutex::new(memory::session_memory::SessionMemoryExtractor::new(
             memory::session_memory::SessionMemoryConfig {
                 enabled: true,
-                initialization_threshold: 0,
-                update_threshold: 0,
                 minimum_message_tokens_to_init: 0,
                 minimum_tokens_between_update: 0,
                 tool_calls_between_updates: 0,
-                extraction_model: "haiku".to_string(),
             },
         )),
         runner,

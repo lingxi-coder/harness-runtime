@@ -2,6 +2,31 @@
 
 use super::*;
 
+/// Current Ake/aW text read: bound disk bytes, decode lossily, then normalize
+/// the complete retained body before the caller applies its token budget.
+pub(super) async fn read_restored_text_prefix(
+    path: &std::path::Path,
+    max_bytes: usize,
+) -> std::io::Result<(String, bool)> {
+    use tokio::io::AsyncReadExt as _;
+    let file = tokio::fs::File::open(path).await?;
+    let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024));
+    file.take(u64::try_from(max_bytes.saturating_add(1)).unwrap_or(u64::MAX))
+        .read_to_end(&mut bytes)
+        .await?;
+    let truncated = bytes.len() > max_bytes;
+    bytes.truncate(max_bytes);
+    let read = String::from_utf8_lossy(&bytes);
+    let mut content = read
+        .strip_prefix('\u{feff}')
+        .unwrap_or(&read)
+        .replace("\r\n", "\n");
+    if content.ends_with('\r') {
+        content.pop();
+    }
+    Ok((content, truncated))
+}
+
 /// Which side of the surviving messages the fresh summary lands on.
 ///
 /// 🚨 There is exactly ONE `AfterKept` caller — `/rewind`'s "Summarize from
@@ -39,7 +64,817 @@ pub(crate) struct SelectorBoundaryMetadata {
 // Passing `hn` in here would read as wired and be discarded two hundred lines
 // later.
 
+#[derive(Clone)]
+struct SessionCompactRowRecord {
+    projection: serde_json::Value,
+    messages: Vec<ConversationMessage>,
+}
+
+/// Converts between Harness conversation messages and Claude's compact-event
+/// rows. Native Mods see `{ role, text, toolUses, toolResults?, handle? }`
+/// rows, not the host's full ConversationMessage representation. The handle
+/// table lets unchanged rows recover their original structured messages.
+#[derive(Default)]
+struct SessionCompactRowCodec {
+    records: std::collections::HashMap<String, SessionCompactRowRecord>,
+}
+
+impl SessionCompactRowCodec {
+    fn rows_for_messages(&mut self, messages: &[ConversationMessage]) -> Vec<serde_json::Value> {
+        let mut tool_result_details = std::collections::HashMap::new();
+        for message in messages {
+            let Some(row) = session_compact_row(message) else {
+                continue;
+            };
+            if let Some(tool_results) = row.get("toolResults").and_then(serde_json::Value::as_array)
+            {
+                for tool_result in tool_results {
+                    if let Some(tool_use_id) = tool_result
+                        .get("tool_use_id")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        tool_result_details.insert(tool_use_id.to_string(), tool_result.clone());
+                    }
+                }
+            }
+        }
+        let mut rows = Vec::new();
+        let mut leading_unrepresented = Vec::new();
+        for message in messages {
+            let Some(mut row) = session_compact_row(message) else {
+                leading_unrepresented.push(message.clone());
+                continue;
+            };
+            if let Some(tool_uses) = row
+                .get_mut("toolUses")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for tool_use in tool_uses {
+                    let Some(tool_use_id) = tool_use
+                        .get("tool_use_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned)
+                    else {
+                        continue;
+                    };
+                    let Some(tool_result) = tool_result_details.get(&tool_use_id) else {
+                        continue;
+                    };
+                    if let Some(text) = tool_result.get("text") {
+                        tool_use["text"] = text.clone();
+                    }
+                    if tool_result
+                        .get("isError")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    {
+                        tool_use["isError"] = serde_json::Value::Bool(true);
+                    }
+                }
+            }
+            let Some(handle) = row.get("handle").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let mut original_messages = std::mem::take(&mut leading_unrepresented);
+            original_messages.push(message.clone());
+            self.records.insert(
+                handle.to_string(),
+                SessionCompactRowRecord {
+                    projection: session_compact_row_projection(&row),
+                    messages: original_messages,
+                },
+            );
+            rows.push(row);
+        }
+        rows
+    }
+
+    fn messages_of_rows(
+        &self,
+        rows: &[serde_json::Value],
+    ) -> Result<Vec<ConversationMessage>, hooks::mods::ModError> {
+        let mut messages = Vec::new();
+        let mut restored_handles = std::collections::HashSet::new();
+        for row in rows {
+            let handle = row.get("handle").and_then(serde_json::Value::as_str);
+            if let Some(handle) = handle {
+                if let Some(record) = self.records.get(handle) {
+                    if record.projection == session_compact_row_projection(row)
+                        && restored_handles.insert(recorded_handle_key(handle))
+                    {
+                        messages.extend(record.messages.iter().cloned());
+                        continue;
+                    }
+                }
+            }
+            messages.push(session_compact_message_from_row(row)?);
+        }
+        Ok(messages)
+    }
+}
+
+fn recorded_handle_key(handle: &str) -> String {
+    handle.to_string()
+}
+
+fn session_compact_row_projection(row: &serde_json::Value) -> serde_json::Value {
+    let mut projection = serde_json::Map::new();
+    for key in ["role", "text", "toolUses", "toolResults"] {
+        if let Some(value) = row.get(key) {
+            projection.insert(key.to_string(), value.clone());
+        }
+    }
+    serde_json::Value::Object(projection)
+}
+
+fn validate_session_compact_rows(rows: &[serde_json::Value]) -> Result<(), hooks::mods::ModError> {
+    let invalid = || {
+        hooks::mods::ModError::Hook(
+            "session.compact messages must be a non-empty list of native rows".to_string(),
+        )
+    };
+    if rows.is_empty() {
+        return Err(invalid());
+    }
+    for row in rows {
+        let Some(object) = row.as_object() else {
+            return Err(invalid());
+        };
+        if !matches!(
+            object.get("role").and_then(serde_json::Value::as_str),
+            Some("user" | "assistant")
+        ) || object
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+            || object.get("handle").is_some_and(|value| !value.is_string())
+        {
+            return Err(invalid());
+        }
+        let Some(tool_uses) = object.get("toolUses").and_then(serde_json::Value::as_array) else {
+            return Err(invalid());
+        };
+        if tool_uses.iter().any(|tool_use| {
+            !tool_use.is_object()
+                || tool_use
+                    .get("tool_use_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none()
+                || tool_use
+                    .get("tool")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none()
+                || tool_use
+                    .get("input")
+                    .and_then(serde_json::Value::as_object)
+                    .is_none()
+        }) {
+            return Err(invalid());
+        }
+        if let Some(tool_results) = object.get("toolResults") {
+            let Some(tool_results) = tool_results.as_array() else {
+                return Err(invalid());
+            };
+            if tool_results.iter().any(|tool_result| {
+                !tool_result.is_object()
+                    || tool_result
+                        .get("tool_use_id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_none()
+                    || tool_result
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .is_none()
+            }) {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_native_session_compact_number(
+    result: &serde_json::Value,
+    field: &str,
+) -> Result<Option<f64>, hooks::mods::ModError> {
+    let Some(value) = result.get(field) else {
+        return Ok(None);
+    };
+    value
+        .as_f64()
+        .filter(|number| number.is_finite() && *number >= 0.0)
+        .map(Some)
+        .ok_or_else(|| {
+            hooks::mods::ModError::Hook(format!(
+                "session.compact {field} must be a non-negative number"
+            ))
+        })
+}
+
+fn parse_native_session_compact_usage(
+    result: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, hooks::mods::ModError> {
+    let Some(usage) = result.get("usage") else {
+        return Ok(None);
+    };
+    let fields = [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ];
+    if !usage.is_object()
+        || fields.iter().any(|field| {
+            usage
+                .get(*field)
+                .and_then(serde_json::Value::as_f64)
+                .is_none_or(|number| !number.is_finite() || number < 0.0)
+        })
+    {
+        return Err(hooks::mods::ModError::Hook(
+            "session.compact usage must contain four non-negative token counts".to_string(),
+        ));
+    }
+    Ok(Some(usage.clone()))
+}
+
+fn parse_session_compact_event_result(
+    result: &serde_json::Value,
+    codec: &SessionCompactRowCodec,
+) -> Result<SessionCompactEventResult, hooks::mods::ModError> {
+    let rows = result
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            hooks::mods::ModError::Hook(
+                "session.compact result must contain messages or skip".to_string(),
+            )
+        })?;
+    validate_session_compact_rows(rows)?;
+    Ok(SessionCompactEventResult {
+        messages: codec.messages_of_rows(rows)?,
+        tokens_before: parse_native_session_compact_number(result, "tokensBefore")?,
+        tokens_after: parse_native_session_compact_number(result, "tokensAfter")?,
+        usage: parse_native_session_compact_usage(result)?,
+    })
+}
+
+fn session_compact_rows_equal(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    let (Some(left), Some(right)) = (left.as_array(), right.as_array()) else {
+        return false;
+    };
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.get("handle") == right.get("handle")
+                && session_compact_row_projection(left) == session_compact_row_projection(right)
+        })
+}
+
+fn fresh_session_compact_message_id(message: ConversationMessage) -> ConversationMessage {
+    let Ok(mut value) = serde_json::to_value(&message) else {
+        return message;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return message;
+    };
+    let Ok(id) = serde_json::to_value(lingxi_core::types::MessageId::new()) else {
+        return message;
+    };
+    object.insert("id".to_string(), id);
+    serde_json::from_value(value).unwrap_or(message)
+}
+
+fn session_compact_row(message: &ConversationMessage) -> Option<serde_json::Value> {
+    let id = serde_json::to_value(message.id()).ok()?;
+    let handle = id.as_str()?;
+    let (role, text, tool_uses, tool_results) = match message {
+        ConversationMessage::Assistant { content, .. } => {
+            let mut text = String::new();
+            let mut tool_uses = Vec::new();
+            for block in content {
+                match block {
+                    lingxi_core::types::ContentBlock::Text { text: part, .. }
+                    | lingxi_core::types::ContentBlock::TextJsUtf16 { text: part, .. } => {
+                        text.push_str(part);
+                    }
+                    lingxi_core::types::ContentBlock::ToolUse {
+                        id,
+                        name,
+                        input,
+                        provider_id,
+                    } => {
+                        let tool_use_id = provider_id.clone().unwrap_or_else(|| {
+                            serde_json::to_value(id)
+                                .ok()
+                                .and_then(|value| value.as_str().map(ToOwned::to_owned))
+                                .unwrap_or_default()
+                        });
+                        tool_uses.push(serde_json::json!({
+                            "tool_use_id": tool_use_id,
+                            "tool": name,
+                            "input": input,
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+            ("assistant", text, tool_uses, Vec::new())
+        }
+        ConversationMessage::User {
+            content, is_meta, ..
+        } if !is_meta => {
+            let mut text = String::new();
+            let mut tool_results = Vec::new();
+            for block in content {
+                match block {
+                    lingxi_core::types::ContentBlock::Text { text: part, .. }
+                    | lingxi_core::types::ContentBlock::TextJsUtf16 { text: part, .. } => {
+                        text.push_str(part);
+                    }
+                    lingxi_core::types::ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                        provider_tool_use_id,
+                        ..
+                    } => {
+                        let tool_use_id = provider_tool_use_id.clone().unwrap_or_else(|| {
+                            serde_json::to_value(tool_use_id)
+                                .ok()
+                                .and_then(|value| value.as_str().map(ToOwned::to_owned))
+                                .unwrap_or_default()
+                        });
+                        let mut row = serde_json::json!({
+                            "tool_use_id": tool_use_id,
+                            "text": content,
+                        });
+                        if is_error.unwrap_or(false) {
+                            row["isError"] = serde_json::Value::Bool(true);
+                        }
+                        tool_results.push(row);
+                    }
+                    _ => {}
+                }
+            }
+            ("user", text, Vec::new(), tool_results)
+        }
+        ConversationMessage::User { .. } | ConversationMessage::System { .. } => return None,
+    };
+    let mut row = serde_json::json!({
+        "role": role,
+        "text": text,
+        "toolUses": tool_uses,
+        "handle": handle,
+    });
+    if !tool_results.is_empty() {
+        row["toolResults"] = serde_json::Value::Array(tool_results);
+    }
+    Some(row)
+}
+
+fn session_compact_message_from_row(
+    row: &serde_json::Value,
+) -> Result<ConversationMessage, hooks::mods::ModError> {
+    let invalid = || {
+        hooks::mods::ModError::Hook(
+            "session.compact messages must be native role/text rows".to_string(),
+        )
+    };
+    let role = row
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(invalid)?;
+    let text = row
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(invalid)?;
+    // `hat(row)` creates a fresh native message; row.handle is only an index
+    // into the original row map used to preserve an unchanged message.
+    let id = lingxi_core::types::MessageId::new();
+    let mut content = Vec::new();
+    let text_block = (!text.is_empty()).then(|| lingxi_core::types::ContentBlock::Text {
+        text: text.to_string(), citations: None,
+    });
+    match role {
+        "assistant" => {
+            if let Some(block) = text_block {
+                content.push(block);
+            }
+            if let Some(tool_uses) = row.get("toolUses").and_then(serde_json::Value::as_array) {
+                for tool_use in tool_uses {
+                    let id_text = tool_use
+                        .get("tool_use_id")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(invalid)?;
+                    let name = tool_use
+                        .get("tool")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(invalid)?;
+                    let input = tool_use.get("input").cloned().ok_or_else(invalid)?;
+                    content.push(lingxi_core::types::ContentBlock::ToolUse {
+                        id: lingxi_core::types::ToolUseId::from(id_text),
+                        name: name.to_string(),
+                        input,
+                        provider_id: Some(id_text.to_string()),
+                    });
+                }
+            }
+            Ok(ConversationMessage::Assistant {
+                id,
+                content,
+                stop_reason: None,
+            })
+        }
+        "user" => {
+            if let Some(tool_results) = row.get("toolResults").and_then(serde_json::Value::as_array)
+            {
+                for tool_result in tool_results {
+                    let id_text = tool_result
+                        .get("tool_use_id")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(invalid)?;
+                    let text = tool_result
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(invalid)?;
+                    let is_error = tool_result
+                        .get("isError")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    content.push(lingxi_core::types::ContentBlock::ToolResult {
+                        tool_use_id: lingxi_core::types::ToolUseId::from(id_text),
+                        content: text.to_string(),is_error: Some(is_error),
+                        provider_tool_use_id: Some(id_text.to_string()),
+                        content_blocks: None,
+                    });
+                }
+            }
+            if let Some(block) = text_block {
+                content.push(block);
+            }
+            Ok(ConversationMessage::User {
+                id,
+                content,
+                is_meta: false,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
+            })
+        }
+        _ => Err(invalid()),
+    }
+}
+
+pub(crate) struct SessionCompactEventResult {
+    pub(crate) messages: Vec<ConversationMessage>,
+    pub(crate) tokens_before: Option<f64>,
+    pub(crate) tokens_after: Option<f64>,
+    pub(crate) usage: Option<serde_json::Value>,
+}
+
+pub(crate) struct SessionCompactCoreOutput {
+    pub(crate) result: compaction::IterationCompactionResult,
+    pub(crate) source_messages: Vec<ConversationMessage>,
+    pub(crate) event_result: SessionCompactEventResult,
+    pub(crate) api_duration: std::time::Duration,
+}
+
+fn apply_session_compact_result(
+    result: &mut compaction::IterationCompactionResult,
+    event_result: &SessionCompactEventResult,
+    source_messages: &[ConversationMessage],
+) {
+    let preserved = result.messages_to_preserve.clone();
+    let split = (!preserved.is_empty()
+        && event_result.messages.len() >= preserved.len()
+        && event_result.messages[event_result.messages.len() - preserved.len()..] == preserved)
+        .then(|| event_result.messages.len() - preserved.len());
+    if let Some(split) = split {
+        result.messages = event_result.messages[..split].to_vec();
+        result.messages_to_preserve = preserved;
+    } else {
+        result.messages = event_result.messages.clone();
+        result.messages_to_preserve.clear();
+    }
+    // Native `wat` gives every replacement row a fresh UUID. Preserve the
+    // summary/tail split used by the host's boundary metadata, but refresh IDs
+    // on both sides only when Mods actually replaced the core rows.
+    result.messages = result
+        .messages
+        .drain(..)
+        .map(fresh_session_compact_message_id)
+        .collect();
+    result.messages_to_preserve = result
+        .messages_to_preserve
+        .drain(..)
+        .map(fresh_session_compact_message_id)
+        .collect();
+    result.raw_summary_text = result
+        .messages
+        .iter()
+        .map(ConversationMessage::text_content)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    // `tokensBefore` / `tokensAfter` are part of the Mod event envelope, not
+    // the host's freed-token accounting. Match the native replacement path,
+    // which estimates from its source and replacement messages.
+    let tokens_before = compaction::grouping::estimate_tokens_for_range(source_messages);
+    let tokens_after = compaction::grouping::estimate_tokens_for_range(&event_result.messages);
+    result.total_tokens_freed = tokens_before.saturating_sub(tokens_after);
+}
+
+impl SessionCompactCoreOutput {
+    pub(crate) fn new(
+        result: compaction::IterationCompactionResult,
+        source_messages: Vec<ConversationMessage>,
+        api_duration: std::time::Duration,
+    ) -> Self {
+        let mut messages = result.messages.clone();
+        messages.extend(result.messages_to_preserve.iter().cloned());
+        let tokens_before =
+            Some(compaction::grouping::estimate_tokens_for_range(&source_messages) as f64);
+        let tokens_after = Some(compaction::grouping::estimate_tokens_for_range(&messages) as f64);
+        let usage = result.compaction_usage.map(|usage| {
+            serde_json::json!({
+                "input_tokens": usage.tokens.input,
+                "output_tokens": usage.tokens.output,
+                "cache_read_input_tokens": usage.tokens.cache_read,
+                "cache_creation_input_tokens": usage.tokens.cache_write
+                    .saturating_add(usage.tokens.cache_write_1h),
+            })
+        });
+        Self {
+            result,
+            source_messages,
+            event_result: SessionCompactEventResult {
+                messages,
+                tokens_before,
+                tokens_after,
+                usage,
+            },
+            api_duration,
+        }
+    }
+
+    fn event_value(&self) -> Result<serde_json::Value, hooks::mods::ModError> {
+        let messages =
+            SessionCompactRowCodec::default().rows_for_messages(&self.event_result.messages);
+        let mut value = serde_json::json!({
+            "messages": messages,
+        });
+        if let Some(tokens_before) = self.event_result.tokens_before {
+            value["tokensBefore"] = serde_json::json!(tokens_before);
+        }
+        if let Some(tokens_after) = self.event_result.tokens_after {
+            value["tokensAfter"] = serde_json::json!(tokens_after);
+        }
+        if let Some(usage) = &self.event_result.usage {
+            value["usage"] = usage.clone();
+        }
+        Ok(value)
+    }
+}
+
+pub(crate) type SessionCompactCore = std::sync::Arc<
+    dyn Fn(
+            Vec<ConversationMessage>,
+            Option<String>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<SessionCompactCoreOutput, hooks::mods::ModError>,
+                    > + Send
+                    + 'static,
+            >,
+        > + Send
+        + Sync,
+>;
+
+/// Outcome of running the actual compaction callback through session.compact.
+pub(crate) enum SessionCompactDecision {
+    Continue {
+        result: compaction::IterationCompactionResult,
+        source_messages: Vec<ConversationMessage>,
+        api_duration: std::time::Duration,
+        core_ran: bool,
+    },
+    Skip {
+        reason: String,
+    },
+}
+
 impl ConversationOrchestrator {
+    /// Run the route-specific compactor inside the Mods middleware's core
+    /// continuation. The hook sees the real compact result from next(e), and
+    /// can rewrite the source messages/instructions before that callback runs.
+    pub(crate) async fn dispatch_session_compact_mods(
+        &self,
+        trigger: &str,
+        messages: Vec<ConversationMessage>,
+        instructions: Option<&str>,
+        compact: SessionCompactCore,
+    ) -> Result<SessionCompactDecision, hooks::mods::ModError> {
+        let original_instructions = instructions.map(ToString::to_string);
+        let Some(registry) = self.lifecycle_runtime.hook_registry.as_ref() else {
+            let output = compact(messages, original_instructions).await?;
+            return Ok(SessionCompactDecision::Continue {
+                result: output.result,
+                source_messages: output.source_messages,
+                api_duration: output.api_duration,
+                core_ran: true,
+            });
+        };
+        let Some(host) = registry.read().await.mod_host() else {
+            let output = compact(messages, original_instructions).await?;
+            return Ok(SessionCompactDecision::Continue {
+                result: output.result,
+                source_messages: output.source_messages,
+                api_duration: output.api_duration,
+                core_ran: true,
+            });
+        };
+        if !host.has_event("session.compact") {
+            let output = compact(messages, original_instructions).await?;
+            return Ok(SessionCompactDecision::Continue {
+                result: output.result,
+                source_messages: output.source_messages,
+                api_duration: output.api_duration,
+                core_ran: true,
+            });
+        }
+
+        let original_source_messages = messages.clone();
+        let row_codec =
+            std::sync::Arc::new(std::sync::Mutex::new(SessionCompactRowCodec::default()));
+        let messages_rows = row_codec.lock().unwrap().rows_for_messages(&messages);
+        validate_session_compact_rows(&messages_rows)?;
+        let mut input = serde_json::json!({
+            "trigger": trigger,
+            "messages": messages_rows,
+        });
+        if let Some(instructions) = instructions {
+            input["instructions"] = serde_json::Value::String(instructions.to_string());
+        }
+        let original_trigger = trigger.to_string();
+        let original_agent_id = input.get("agentId").cloned();
+        let core_result: std::sync::Arc<
+            tokio::sync::Mutex<Option<(SessionCompactCoreOutput, serde_json::Value)>>,
+        > = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let core_result_for_dispatch = core_result.clone();
+        let compact_for_dispatch = compact.clone();
+        let row_codec_for_dispatch = row_codec.clone();
+        let log_output = self.output.clone();
+        let toast_output = self.output.clone();
+        let status_output = self.output.clone();
+        let result = host
+            .dispatch_with_ui_at_session(
+                "session.compact",
+                input,
+                self,
+                move |event| {
+                    let core_result = core_result_for_dispatch.clone();
+                    let compact = compact_for_dispatch.clone();
+                    let row_codec = row_codec_for_dispatch.clone();
+                    let expected_trigger = original_trigger.clone();
+                    let expected_agent_id = original_agent_id.clone();
+                    async move {
+                        if event.get("trigger").and_then(serde_json::Value::as_str)
+                            != Some(expected_trigger.as_str())
+                            || event.get("agentId").cloned() != expected_agent_id
+                        {
+                            return Err(hooks::mods::ModError::Hook(
+                                "session.compact trigger and agentId are pinned".into(),
+                            ));
+                        }
+                        let instructions = match event.get("instructions") {
+                            None => None,
+                            Some(serde_json::Value::String(text)) => Some(text.clone()),
+                            _ => {
+                                return Err(hooks::mods::ModError::Hook(
+                                    "session.compact instructions must be a string".into(),
+                                ))
+                            }
+                        };
+                        let messages_value = event
+                            .get("messages")
+                            .and_then(serde_json::Value::as_array)
+                            .cloned()
+                            .ok_or_else(|| {
+                                hooks::mods::ModError::Hook(
+                                    "session.compact messages must be a native row list".into(),
+                                )
+                            })?;
+                        validate_session_compact_rows(&messages_value)?;
+                        let messages = row_codec
+                            .lock()
+                            .unwrap()
+                            .messages_of_rows(&messages_value)?;
+                        let instructions = instructions.filter(|text| !text.trim().is_empty());
+                        let output = compact(messages, instructions).await?;
+                        let event_result = output.event_value()?;
+                        row_codec
+                            .lock()
+                            .unwrap()
+                            .rows_for_messages(&output.event_result.messages);
+                        *core_result.lock().await = Some((output, event_result.clone()));
+                        Ok(event_result)
+                    }
+                },
+                move |plugin, text| {
+                    let output = log_output.clone();
+                    async move { output.emit_mod_log(&plugin, &text).await }
+                },
+                move |plugin, text, timeout_ms| {
+                    let output = toast_output.clone();
+                    async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+                },
+                move |plugin, text| {
+                    let output = status_output.clone();
+                    async move { output.emit_mod_status(&plugin, text.as_deref()).await }
+                },
+            )
+            .await?;
+
+        if let Some(reason) = result.get("skip").and_then(serde_json::Value::as_str) {
+            let ran_core = core_result.lock().await.take().is_some();
+            if reason.is_empty() || result.get("messages").is_some() {
+                return Err(hooks::mods::ModError::Hook(
+                    "session.compact skip must be non-empty and cannot include messages".into(),
+                ));
+            }
+            if ran_core && trigger != "precompute" {
+                return Err(hooks::mods::ModError::Hook(
+                    "session.compact cannot skip after its compact callback ran".into(),
+                ));
+            }
+            return Ok(SessionCompactDecision::Skip {
+                reason: reason.to_string(),
+            });
+        }
+
+        let compact_output = core_result.lock().await.take();
+        let source_messages_for_estimates = compact_output
+            .as_ref()
+            .map(|(output, _)| output.source_messages.clone())
+            .unwrap_or_else(|| original_source_messages.clone());
+        let event_result = parse_session_compact_event_result(&result, &row_codec.lock().unwrap())?;
+        match compact_output {
+            Some((mut output, last_core_value)) => {
+                let uses_last_core_result = session_compact_rows_equal(
+                    result.get("messages").unwrap_or(&serde_json::Value::Null),
+                    last_core_value
+                        .get("messages")
+                        .unwrap_or(&serde_json::Value::Null),
+                );
+                if !uses_last_core_result {
+                    apply_session_compact_result(
+                        &mut output.result,
+                        &event_result,
+                        &source_messages_for_estimates,
+                    );
+                }
+                Ok(SessionCompactDecision::Continue {
+                    result: output.result,
+                    source_messages: output.source_messages,
+                    api_duration: output.api_duration,
+                    core_ran: true,
+                })
+            }
+            None => {
+                // Native Mods may return a complete replacement without ever
+                // calling next(e). Such an outcome has no summarizer record,
+                // but its messages still flow through the normal replacement
+                // boundary path.
+                let mut replacement = compaction::IterationCompactionResult {
+                    messages: Vec::new(),
+                    raw_summary_text: String::new(),
+                    layers_applied: Vec::new(),
+                    total_tokens_freed: 0,
+                    cache_hit: false,
+                    consecutive_failures: 0,
+                    was_compacted: true,
+                    rapid_refill_breaker_tripped: false,
+                    consecutive_rapid_refills: 0,
+                    messages_to_preserve: Vec::new(),
+                    media_analysis_to_preserve: Vec::new(),
+                    compaction_usage: None,
+                    compaction_model: None,
+                };
+                apply_session_compact_result(
+                    &mut replacement,
+                    &event_result,
+                    &source_messages_for_estimates,
+                );
+                Ok(SessionCompactDecision::Continue {
+                    result: replacement,
+                    source_messages: original_source_messages,
+                    api_duration: std::time::Duration::ZERO,
+                    core_ran: false,
+                })
+            }
+        }
+    }
+
     /// Clone the current session request state and run the shared pre-call
     /// preparation hook, if one is wired.
     pub(crate) async fn prepare_model_call_snapshot(
@@ -60,6 +895,10 @@ impl ConversationOrchestrator {
         if let Some(settings) = crate::scheduled_turn::current() {
             draft.model = settings.model;
             draft.model_profile = Some(settings.provider);
+        }
+        if let Some(route) = crate::query_model::current() {
+            draft.model = route.model;
+            draft.model_profile = route.profile;
         }
         let prepared = match self.model_runtime.model_call_preparer.as_ref() {
             Some(preparer) => {
@@ -120,6 +959,9 @@ impl ConversationOrchestrator {
     /// transcript side-record writes: the in-memory projection remains usable
     /// for the current retry even if durable persistence is unavailable.
     pub(crate) async fn persist_context_collapse_drain(&self, drain: &compaction::DrainResult) {
+        if !drain.commits.is_empty() {
+            self.expect_prompt_cache_rebuild().await;
+        }
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
             return;
         };
@@ -172,6 +1014,11 @@ impl ConversationOrchestrator {
     }
 
     async fn reset_context_collapse_after_compact(&self) {
+        self.transcript
+            .thinking_recovery
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .reset_beta_rejections();
         if !compaction::is_context_collapse_enabled() {
             return;
         }
@@ -390,17 +1237,9 @@ impl ConversationOrchestrator {
                 "Message not found.".into(),
             ));
         };
-        let split = compaction::selector::split_at(&history_before, index, direction)
+        compaction::selector::split_at(&history_before, index, direction)
             .map_err(|message| lingxi_core::host::HandleError::ActionFailed(message.to_string()))?;
 
-        let messages_before = u32::try_from(history_before.len()).unwrap_or(u32::MAX);
-        let bytes_before: u64 = history_before
-            .iter()
-            .map(lingxi_core::types::text_byte_size)
-            .sum();
-        let pre_tokens_estimate =
-            compaction::grouping::estimate_tokens_for_range(&split.to_summarize);
-        let messages_summarized = u32::try_from(split.to_summarize.len()).unwrap_or(u32::MAX);
         let compact_started = std::time::Instant::now();
         self.output.emit_compaction_started().await;
 
@@ -430,34 +1269,112 @@ impl ConversationOrchestrator {
             );
 
             let system_prompt = self.effective_system_prompt().await;
-            let tools = self.build_wire_tools().await;
+            let tools = self.build_wire_tools().await.0;
             self.save_cache_safe_params(Some(&system_prompt), &model, &tools)
                 .await;
 
-            self.output.emit_compaction_phase("summarizing").await;
             let cost_scope = self.compaction_cost_scope().await.map_err(|error| {
                 lingxi_core::host::HandleError::ActionFailed(format!(
                     "Compaction cost preflight failed: {error}"
                 ))
             })?;
-            let api_started = std::time::Instant::now();
-            let context = split.summarizer_context(&history_before);
-            let mut result = tokio::select! {
+            let phase_output = self.output.clone();
+            let compact_for_core = compactor.clone();
+            let cancel_for_core = cancel.clone();
+            let message_uuid_for_core = message_uuid.to_string();
+            let direction_for_core = direction;
+            let core: SessionCompactCore =
+                std::sync::Arc::new(move |source_messages, instructions| {
+                    let compactor = compact_for_core.clone();
+                    let cancel = cancel_for_core.clone();
+                    let message_uuid = message_uuid_for_core.clone();
+                    let phase_output = phase_output.clone();
+                    let direction = direction_for_core;
+                    Box::pin(async move {
+                        let index = compaction::selector::index_of(&source_messages, &message_uuid)
+                            .ok_or_else(|| {
+                                hooks::mods::ModError::Native("Message not found.".into())
+                            })?;
+                        let split =
+                            compaction::selector::split_at(&source_messages, index, direction)
+                                .map_err(|message| {
+                                    hooks::mods::ModError::Native(message.to_string())
+                                })?;
+                        let context = split.summarizer_context(&source_messages);
+                        phase_output.emit_compaction_phase("summarizing").await;
+                        let api_started = std::time::Instant::now();
+                        let result = tokio::select! {
+                            biased;
+                            () = cancel.cancelled() => {
+                                return Err(hooks::mods::ModError::Native(
+                                    "Compaction canceled.".into(),
+                                ));
+                            }
+                            result = compactor.summarize_selection(
+                                context,
+                                &split.to_summarize,
+                                instructions.as_deref(),
+                                direction,
+                            ) => result.map_err(|error| {
+                                hooks::mods::ModError::Native(
+                                    Self::summarize_error(error).to_string(),
+                                )
+                            })?,
+                        };
+                        let api_duration = api_started.elapsed();
+                        let mut result = result;
+                        result.messages_to_preserve =
+                            compaction::partial::zero_preserved_tail_usage(split.to_keep);
+                        Ok(SessionCompactCoreOutput::new(
+                            result,
+                            source_messages,
+                            api_duration,
+                        ))
+                    })
+                });
+            let compacted = tokio::select! {
                 biased;
                 () = cancel.cancelled() => {
                     return Err(lingxi_core::host::HandleError::ActionFailed(
                         "Compaction canceled.".into(),
                     ));
                 }
-                r = compactor.summarize_selection(
-                    context,
-                    &split.to_summarize,
+                result = self.dispatch_session_compact_mods(
+                    "manual",
+                    history_before,
                     merged_instructions.as_deref(),
-                    direction,
-                ) => r
-                    .map_err(Self::summarize_error)?,
+                    core,
+                ) => result.map_err(|error| {
+                    lingxi_core::host::HandleError::ActionFailed(error.to_string())
+                })?,
             };
-            let compact_duration = api_started.elapsed();
+            let (result, history_before, compact_duration) = match compacted {
+                SessionCompactDecision::Continue {
+                    result,
+                    source_messages,
+                    api_duration,
+                    ..
+                } => (result, source_messages, api_duration),
+                SessionCompactDecision::Skip { reason, .. } => {
+                    return Err(lingxi_core::host::HandleError::ActionFailed(reason));
+                }
+            };
+            let split_index = compaction::selector::index_of(&history_before, message_uuid)
+                .ok_or_else(|| {
+                    lingxi_core::host::HandleError::ActionFailed("Message not found.".into())
+                })?;
+            let split = compaction::selector::split_at(&history_before, split_index, direction)
+                .map_err(|message| {
+                    lingxi_core::host::HandleError::ActionFailed(message.to_string())
+                })?;
+            let messages_before = u32::try_from(history_before.len()).unwrap_or(u32::MAX);
+            let bytes_before: u64 = history_before
+                .iter()
+                .map(lingxi_core::types::text_byte_size)
+                .sum();
+            let pre_tokens_estimate =
+                compaction::grouping::estimate_tokens_for_range(&split.to_summarize);
+            let messages_summarized = u32::try_from(split.to_summarize.len()).unwrap_or(u32::MAX);
             let cost_receipt =
                 self.begin_compaction_usage(cost_scope.as_ref(), &result, compact_duration);
             if cancel.is_cancelled() {
@@ -475,9 +1392,6 @@ impl ConversationOrchestrator {
 
             // The kept half rides through `apply_post_compact`'s preserved-tail
             // slot; `placement` decides which side of the summary it lands on.
-            result.messages_to_preserve =
-                compaction::partial::zero_preserved_tail_usage(split.to_keep.clone());
-
             let placement = match direction {
                 compaction::prompt::SummarizeDirection::UpTo => SummaryPlacement::BeforeKept,
                 compaction::prompt::SummarizeDirection::From => SummaryPlacement::AfterKept,
@@ -576,14 +1490,8 @@ impl ConversationOrchestrator {
             let s = self.session.lock().await;
             (s.model_context_history(), s.model.clone())
         };
-        let messages_before = u32::try_from(history_before.len()).unwrap_or(u32::MAX);
-        let bytes_before: u64 = history_before
-            .iter()
-            .map(lingxi_core::types::text_byte_size)
-            .sum();
         // Capture the token estimate before `history_before` is consumed by
         // `process_iteration` — used for the boundary `preTokens`.
-        let pre_tokens_estimate = compaction::grouping::estimate_tokens_for_range(&history_before);
 
         // Fast-path: if already cancelled, exit without invoking the
         // compactor. tokio::select! random-polls between ready arms,
@@ -619,137 +1527,170 @@ impl ConversationOrchestrator {
         self.output.emit_compaction_started().await;
 
         let outcome = async {
-        // hooks compaction lifecycle: PreCompact fires before the summary pass.
-        // This is the explicit `/compact` entry point, so the trigger is
-        // `manual` (TS `isAutoCompact ? 'auto' : 'manual'`). TS `VJn`: a
-        // blocking PreCompact hook ABORTS the compaction, throwing
-        // `"Compaction blocked by PreCompact hook: <blockedBy>"`. We surface the
-        // same message as the `/compact` failure result.
-        let pre_compact = self.fire_pre_compact("manual", custom_instructions).await;
-        if let Some(detail) = pre_compact.blocked_by {
-            let msg = if detail.is_empty() {
-                "Compaction blocked by PreCompact hook".to_string()
-            } else {
-                format!("Compaction blocked by PreCompact hook: {detail}")
+            // hooks compaction lifecycle: PreCompact fires before the summary pass.
+            // This is the explicit `/compact` entry point, so the trigger is
+            // `manual` (TS `isAutoCompact ? 'auto' : 'manual'`). TS `VJn`: a
+            // blocking PreCompact hook ABORTS the compaction, throwing
+            // `"Compaction blocked by PreCompact hook: <blockedBy>"`. We surface the
+            // same message as the `/compact` failure result.
+            let pre_compact = self.fire_pre_compact("manual", custom_instructions).await;
+            if let Some(detail) = pre_compact.blocked_by {
+                let msg = if detail.is_empty() {
+                    "Compaction blocked by PreCompact hook".to_string()
+                } else {
+                    format!("Compaction blocked by PreCompact hook: {detail}")
+                };
+                tracing::warn!("{msg}");
+                return Err(lingxi_core::host::HandleError::ActionFailed(msg));
+            }
+
+            let merged_instructions = merge_compact_instructions(
+                custom_instructions,
+                pre_compact.additional_instructions.as_deref(),
+            );
+
+            // A resumed session may not have made a live API call yet, leaving the
+            // shared cache-safe slot empty. Seed it from the current system prompt
+            // and live history so manual compaction works immediately after resume.
+            // Autocompactor replaces the slot's potentially stale message clone with
+            // `history_before`'s selected prefix before issuing the request.
+            let system_prompt = self.effective_system_prompt().await;
+            let tools = self.build_wire_tools().await.0;
+            self.save_cache_safe_params(Some(&system_prompt), &model, &tools)
+                .await;
+
+            // Run the 5-layer compactor, racing against the cancel token.
+            // process_iteration takes no CancellationToken; drop-on-cancel
+            // leaves history untouched because we have not written back.
+            // `biased` so the cancel arm wins a tie — preferred when both
+            // arms are immediately ready.
+            // The API-duration clock starts HERE (summarizer round-trip only) —
+            // separate from `compact_started` (pre-hooks), which feeds the
+            // boundary's durationMs.
+            let cost_scope = self.compaction_cost_scope().await.map_err(|error| {
+                lingxi_core::host::HandleError::ActionFailed(format!(
+                    "Compaction cost preflight failed: {error}"
+                ))
+            })?;
+            let phase_output = self.output.clone();
+            let compact_for_core = compactor.clone();
+            let cancel_for_core = cancel.clone();
+            let core: SessionCompactCore =
+                std::sync::Arc::new(move |source_messages, instructions| {
+                    let compactor = compact_for_core.clone();
+                    let cancel = cancel_for_core.clone();
+                    let phase_output = phase_output.clone();
+                    Box::pin(async move {
+                        phase_output.emit_compaction_phase("summarizing").await;
+                        let api_started = std::time::Instant::now();
+                        let result = tokio::select! {
+                            biased;
+                            () = cancel.cancelled() => {
+                                return Err(hooks::mods::ModError::Native(
+                                    "Compaction canceled.".into(),
+                                ));
+                            }
+                            result = compactor.process_forced(
+                                source_messages.clone(),
+                                instructions.as_deref(),
+                            ) => result.map_err(|error| {
+                                hooks::mods::ModError::Native(
+                                    Self::summarize_error(error).to_string(),
+                                )
+                            })?,
+                        };
+                        Ok(SessionCompactCoreOutput::new(
+                            result,
+                            source_messages,
+                            api_started.elapsed(),
+                        ))
+                    })
+                });
+            let compacted = tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    return Err(lingxi_core::host::HandleError::ActionFailed(
+                        "Compaction canceled.".into(),
+                    ));
+                }
+                result = self.dispatch_session_compact_mods(
+                    "manual",
+                    history_before,
+                    merged_instructions.as_deref(),
+                    core,
+                ) => result.map_err(|error| {
+                    lingxi_core::host::HandleError::ActionFailed(error.to_string())
+                })?,
             };
-            tracing::warn!("{msg}");
-            return Err(lingxi_core::host::HandleError::ActionFailed(msg));
-        }
-
-        let merged_instructions = merge_compact_instructions(
-            custom_instructions,
-            pre_compact.additional_instructions.as_deref(),
-        );
-
-        // A resumed session may not have made a live API call yet, leaving the
-        // shared cache-safe slot empty. Seed it from the current system prompt
-        // and live history so manual compaction works immediately after resume.
-        // Autocompactor replaces the slot's potentially stale message clone with
-        // `history_before`'s selected prefix before issuing the request.
-        let system_prompt = self.effective_system_prompt().await;
-        let tools = self.build_wire_tools().await;
-        self.save_cache_safe_params(Some(&system_prompt), &model, &tools)
-            .await;
-
-        // Run the 5-layer compactor, racing against the cancel token.
-        // process_iteration takes no CancellationToken; drop-on-cancel
-        // leaves history untouched because we have not written back.
-        // `biased` so the cancel arm wins a tie — preferred when both
-        // arms are immediately ready.
-        // The API-duration clock starts HERE (summarizer round-trip only) —
-        // separate from `compact_started` (pre-hooks), which feeds the
-        // boundary's durationMs.
-        self.output.emit_compaction_phase("summarizing").await;
-        let cost_scope = self.compaction_cost_scope().await.map_err(|error| {
-            lingxi_core::host::HandleError::ActionFailed(format!(
-                "Compaction cost preflight failed: {error}"
-            ))
-        })?;
-        let api_started = std::time::Instant::now();
-        let result = tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
+            let (result, history_before, compact_duration) = match compacted {
+                SessionCompactDecision::Continue {
+                    result,
+                    source_messages,
+                    api_duration,
+                    ..
+                } => (result, source_messages, api_duration),
+                SessionCompactDecision::Skip { reason, .. } => {
+                    return Err(lingxi_core::host::HandleError::ActionFailed(reason));
+                }
+            };
+            let messages_before = u32::try_from(history_before.len()).unwrap_or(u32::MAX);
+            let bytes_before: u64 = history_before
+                .iter()
+                .map(lingxi_core::types::text_byte_size)
+                .sum();
+            let pre_tokens_estimate =
+                compaction::grouping::estimate_tokens_for_range(&history_before);
+            let cost_receipt =
+                self.begin_compaction_usage(cost_scope.as_ref(), &result, compact_duration);
+            // CC re-checks `signal.aborted` between compaction phases: an Esc that
+            // lands while the summarizer response was already resolving must still
+            // abort BEFORE the post-compact transition (file re-reads, SessionStart
+            // hooks, history swap) — otherwise the cancelled task swaps history out
+            // from under a prompt the user has since submitted.
+            if cancel.is_cancelled() {
                 return Err(lingxi_core::host::HandleError::ActionFailed(
                     "Compaction canceled.".into(),
                 ));
             }
-            r = compactor.process_forced(history_before, merged_instructions.as_deref()) => r
-                .map_err(|e| match e {
-                    // TS throws `Error(GJn)` when the summarizer's PTL-retry loop
-                    // exhausts (nothing safe left to drop) — the port models that
-                    // as `MaxRetriesExceeded`. Surface the byte-exact GJn message
-                    // rather than the generic "compaction failed: …".
-                    compaction::autocompact::CompactionError::MaxRetriesExceeded => {
-                        lingxi_core::host::HandleError::ActionFailed(
-                            "Compaction failed · conversation could not be reduced below the context limit".to_string(),
-                        )
-                    }
-                    compaction::autocompact::CompactionError::NotEnoughMessages => {
-                        lingxi_core::host::HandleError::ActionFailed(
-                            "Not enough messages to compact.".to_string(),
-                        )
-                    }
-                    compaction::autocompact::CompactionError::MediaUnstrippable => {
-                        lingxi_core::host::HandleError::ActionFailed("Compaction failed · attached media exceeds size limits".into())
-                    }
-                    compaction::autocompact::CompactionError::Summary(detail)
-                    | compaction::autocompact::CompactionError::Internal(detail) => {
-                        lingxi_core::host::HandleError::ActionFailed(format!("Error during compaction: {detail}"))
-                    }
-                    other => lingxi_core::host::HandleError::ActionFailed(format!("Error during compaction: {other}")),
-                })?,
-        };
-        let compact_duration = api_started.elapsed();
-        let cost_receipt =
-            self.begin_compaction_usage(cost_scope.as_ref(), &result, compact_duration);
-        // CC re-checks `signal.aborted` between compaction phases: an Esc that
-        // lands while the summarizer response was already resolving must still
-        // abort BEFORE the post-compact transition (file re-reads, SessionStart
-        // hooks, history swap) — otherwise the cancelled task swaps history out
-        // from under a prompt the user has since submitted.
-        if cancel.is_cancelled() {
-            return Err(lingxi_core::host::HandleError::ActionFailed(
-                "Compaction canceled.".into(),
-            ));
+            // API duration = the summarizer round-trip only. `compact_started`
+            // (above, pre-hooks) feeds the boundary's user-visible durationMs;
+            // feeding it here would fold PreCompact hook wall-time into
+            // /cost's total_api_duration_ms.
+            self.settle_compaction_usage(cost_receipt)
+                .await
+                .map_err(|error| {
+                    lingxi_core::host::HandleError::ActionFailed(format!(
+                        "Compaction cost settlement failed: {error}"
+                    ))
+                })?;
+
+            // Apply the post-compact transition (boundary marker + history swap +
+            // CompactionCompleted emit) via the shared helper reused by the
+            // proactive trigger (Batch 4) and the reactive 413 fallback (Batch 5).
+            // `bytes_before` / `pre_tokens_estimate` were computed from the same
+            // `history_before` snapshot (consumed by `process_iteration` above).
+            let Some(summary_out) = self
+                .apply_post_compact(
+                    result,
+                    compaction::CompactTrigger::Manual,
+                    pre_tokens_estimate,
+                    messages_before,
+                    bytes_before,
+                    compact_started,
+                    Some(&cancel),
+                )
+                .await
+            else {
+                // Esc landed before the post-compact commit phase: no auxiliary
+                // state or history has been changed.
+                return Err(lingxi_core::host::HandleError::ActionFailed(
+                    "Compaction canceled.".into(),
+                ));
+            };
+
+            Ok(summary_out)
         }
-        // API duration = the summarizer round-trip only. `compact_started`
-        // (above, pre-hooks) feeds the boundary's user-visible durationMs;
-        // feeding it here would fold PreCompact hook wall-time into
-        // /cost's total_api_duration_ms.
-        self.settle_compaction_usage(cost_receipt)
-            .await
-            .map_err(|error| {
-                lingxi_core::host::HandleError::ActionFailed(format!(
-                    "Compaction cost settlement failed: {error}"
-                ))
-            })?;
-
-        // Apply the post-compact transition (boundary marker + history swap +
-        // CompactionCompleted emit) via the shared helper reused by the
-        // proactive trigger (Batch 4) and the reactive 413 fallback (Batch 5).
-        // `bytes_before` / `pre_tokens_estimate` were computed from the same
-        // `history_before` snapshot (consumed by `process_iteration` above).
-        let Some(summary_out) = self
-            .apply_post_compact(
-                result,
-                compaction::CompactTrigger::Manual,
-                pre_tokens_estimate,
-                messages_before,
-                bytes_before,
-                compact_started,
-                Some(&cancel),
-            )
-            .await
-        else {
-            // Esc landed before the post-compact commit phase: no auxiliary
-            // state or history has been changed.
-            return Err(lingxi_core::host::HandleError::ActionFailed(
-                "Compaction canceled.".into(),
-            ));
-        };
-
-        Ok(summary_out)
-        }.await;
+        .await;
         if let Err(error) = &outcome {
             let detail = match error {
                 lingxi_core::host::HandleError::ActionFailed(detail) => detail.as_str(),
@@ -821,18 +1762,22 @@ impl ConversationOrchestrator {
         &self,
         boundary_context: &[lingxi_core::types::ConversationMessage],
     ) -> Vec<lingxi_core::types::ConversationMessage> {
-        // Snapshot then clear the MODEL-VISIBLE portion of the ONE read-file-
-        // state registry (the `eOt` snapshot + `readFileState.clear()` step),
-        // so the post-compact context starts from the restored set only.
-        // Host-seeded snapshots stay cached for staleness/dedup because the
-        // model never saw them and therefore they must not be restored.
+        // Native g_n snapshots every cache entry, including nested-memory
+        // seeds, before readFileState.clear(). Keep the cache's MRU order so
+        // Evo's stable timestamp sort preserves ties.
         let snapshot: Vec<(std::path::PathBuf, tool_api::read_file_state::ReadFileEntry)> = {
             let mut map = self
                 .prompt_runtime
                 .read_state_map
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            map.drain_model_context()
+            let snapshot = map
+                .keys()
+                .into_iter()
+                .filter_map(|path| map.remove(&path).map(|entry| (path, entry)))
+                .collect::<Vec<_>>();
+            map.drain().for_each(drop);
+            snapshot
         };
 
         // The two arms are independent: skills restore from the process-global
@@ -1038,7 +1983,7 @@ impl ConversationOrchestrator {
                 let text = content
                     .iter()
                     .map(|block| match block {
-                        lingxi_core::types::ContentBlock::Text { text }
+                        lingxi_core::types::ContentBlock::Text { text, .. }
                         | lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. } => {
                             Some(text.as_str())
                         }
@@ -1077,30 +2022,61 @@ impl ConversationOrchestrator {
         // already survived in the preserved boundary context, then sort mtime
         // DESC and take the top five.
         let plan_file = crate::turn_loop::normalize_lexically(plan_file);
-        // Native EXo / gQ excludes the five memory entrypoints because the
-        // system prompt reloads them. Keep the repository's branded paths.
+        // Native Ovo / Dvo excludes the five eager entrypoints; folder memory
+        // files and imported files remain ordinary restore candidates.
+        let roots = self
+            .prompt_runtime
+            .nested_memory_roots
+            .clone()
+            .or_else(|| self.memory.hierarchy_roots());
+        let managed = roots
+            .as_ref()
+            .and_then(|(_, managed)| managed.clone())
+            .unwrap_or_else(memory::lingxi_md::hierarchy::managed_path);
         let mut memory_entrypoints = vec![
             self.cwd.join(branding::MEMORY_FILE),
             self.cwd.join(branding::MEMORY_LOCAL_FILE),
-            memory::lingxi_md::hierarchy::managed_path(),
+            managed.join(branding::MEMORY_FILE),
         ];
-        if let Some(home) = dirs::home_dir() {
-            memory_entrypoints
-                .push(memory::lingxi_md::user_config_dir(&home).join(branding::MEMORY_FILE));
+        let config_home = self.config_home.clone().or_else(|| {
+            roots
+                .as_ref()
+                .map(|(home, _)| memory::lingxi_md::user_config_dir(home))
+        });
+        if let Some(config_home) = config_home.as_ref() {
+            memory_entrypoints.push(config_home.join(branding::MEMORY_FILE));
         }
-        if let Some(dir) = self
+        let auto_memory_dir = self
             .prompt_runtime
             .memory_prefetch
             .as_ref()
             .and_then(|p| p.user_memdir())
-        {
+            .map(std::path::Path::to_path_buf)
+            .or_else(|| {
+                config_home
+                    .as_ref()
+                    .map(|home| memory::memdir::paths::user_memdir_for_project(home, &self.cwd))
+            });
+        if let Some(dir) = auto_memory_dir {
             memory_entrypoints.push(dir.join("MEMORY.md"));
         }
         let candidates = candidates
             .into_iter()
             .filter(|candidate| {
                 let path = crate::turn_loop::normalize_lexically(&candidate.path);
+                // Native x$o excludes persisted artifact-* files only directly
+                // inside tool-results, with a case-insensitive basename check.
+                let artifact = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.to_ascii_lowercase().starts_with("artifact-"))
+                    && path
+                        .parent()
+                        .and_then(std::path::Path::file_name)
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.eq_ignore_ascii_case("tool-results"));
                 path != plan_file
+                    && !artifact
                     && !memory_entrypoints
                         .iter()
                         .any(|entrypoint| crate::turn_loop::normalize_lexically(entrypoint) == path)
@@ -1128,17 +2104,17 @@ impl ConversationOrchestrator {
         // boundary).
         let mut fresh = Vec::with_capacity(selected.len());
         for candidate in selected {
-            match read_utf8_prefix(
+            let read = read_restored_text_prefix(
                 &candidate.path,
-                compaction::thresholds::POST_COMPACT_MAX_BYTES_PER_FILE_READ,
-                // vc = Math.round(UTF16.length / 4): 20_001 units still
-                // consume exactly 5_000 tokens in the ordinary-text case.
-                compaction::thresholds::POST_COMPACT_MAX_CHARS_PER_FILE_READ + 1,
+                tool_file::read::MAX_FILE_READ_SIZE as usize,
             )
-            .await
-            {
-                Ok(read) => {
-                    let units = read.content.encode_utf16().count() as u64;
+            .await;
+            match read {
+                Ok((content, truncated)) => {
+                    // Native Ake/aW normalizes a full text read before token
+                    // budgeting and counting lines, including its empty final
+                    // fragment. Apply the same body to the restored Read state.
+                    let units = content.encode_utf16().count() as u64;
                     let extension = candidate
                         .path
                         .extension()
@@ -1148,7 +2124,7 @@ impl ConversationOrchestrator {
                         Some("json" | "jsonl" | "jsonc") => 2,
                         _ => 4,
                     };
-                    if read.truncated
+                    if truncated
                         || (units + divisor / 2) / divisor
                             > compaction::POST_COMPACT_MAX_TOKENS_PER_FILE
                     {
@@ -1164,11 +2140,11 @@ impl ConversationOrchestrator {
                                 .modified()
                                 .map(tool_api::read_file_state::mtime_ms_floor)
                                 .unwrap_or(0);
-                            tool_api::read_file_state::set(
+                            tool_api::read_file_state::set_with_requested_path(
                                 &self.prompt_runtime.read_state_map,
                                 candidate.path.clone(),
                                 tool_api::read_file_state::ReadFileEntry {
-                                    content: read.content.clone(),
+                                    content: content.clone(),
                                     mtime_ms,
                                     offset: None,
                                     limit: None,
@@ -1176,11 +2152,13 @@ impl ConversationOrchestrator {
                                     seeded_from_context: false,
                                     is_partial_view: false,
                                 },
+                                true,
+                                Some(candidate.path.clone()),
                             );
                         }
                         fresh.push(FreshFileAttachment::Content {
                             path: candidate.path,
-                            content: read.content,
+                            content,
                         });
                     }
                 }
@@ -1192,49 +2170,27 @@ impl ConversationOrchestrator {
             }
         }
 
-        let read_tool_name = self
-            .tools
-            .find_by_name("Read")
-            .map_or_else(|| "Read".to_string(), |tool| tool.name().to_string());
         let mut running_tokens = 0u64;
         let mut restored = Vec::new();
         for attachment in fresh {
-            let (path, data, bodies) = match attachment {
+            let (path, data) = match attachment {
                 FreshFileAttachment::Content { path, content } => {
-                    let num_lines = content.split_inclusive('\n').count();
-                    let total_lines = if content.is_empty() {
-                        0
-                    } else {
-                        content.bytes().filter(|&byte| byte == b'\n').count() + 1
-                    };
+                    let lines = content.bytes().filter(|&byte| byte == b'\n').count() + 1;
                     let data = serde_json::json!({
                         "type": "file", "filename": path,
                         "content": { "type": "text", "file": {
                             "filePath": path, "content": content,
-                            "numLines": num_lines, "startLine": 1,
-                            "totalLines": total_lines,
+                            "numLines": lines, "startLine": 1,
+                            "totalLines": lines,
                         }},
                     });
-                    let result = if content.is_empty() {
-                        tool_file::read::EMPTY_FILE_WARNING.to_string()
-                    } else {
-                        tool_file::read::add_line_numbers(&content, 1)
-                    };
-                    let input = serde_json::json!({"file_path": path});
-                    let bodies = vec![
-                        format!(
-                            "Called the {read_tool_name} tool with the following input: {input}"
-                        ),
-                        format!("Result of calling the {read_tool_name} tool:\n{result}"),
-                    ];
-                    (path, data, bodies)
+                    (path, data)
                 }
                 FreshFileAttachment::Reference { path } => {
                     let data = serde_json::json!({
                         "type": "compact_file_reference", "filename": path,
                     });
-                    let body = compact_file_reference_body(&path, &read_tool_name);
-                    (path, data, vec![body])
+                    (path, data)
                 }
             };
             // yXo budgets JSON.stringify(pn(attachment)), including JSON
@@ -1257,9 +2213,10 @@ impl ConversationOrchestrator {
                 display_path.push(component.as_os_str());
             }
             data["displayPath"] = serde_json::json!(display_path.to_string_lossy());
+            let id = MessageId::new();
             let envelope = serde_json::json!({
                 "attachment": data, "type": "attachment",
-                "uuid": uuid::Uuid::new_v4().to_string(),
+                "uuid": id.as_uuid().to_string(),
                 "timestamp": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             });
             let cost = compaction::estimate_content_tokens(&envelope.to_string());
@@ -1267,12 +2224,14 @@ impl ConversationOrchestrator {
                 continue;
             }
             running_tokens = running_tokens.saturating_add(cost);
-            restored.extend(bodies.into_iter().map(|body| {
-                lingxi_core::types::ConversationMessage::user_meta(
-                    lingxi_core::types::MessageId::new(),
-                    format!("<system-reminder>\n{body}\n</system-reminder>"),
-                )
-            }));
+            let message = Self::file_attachment_projection(id, &data)
+                .expect("new current file restore payload");
+            self.transcript
+                .model_reminder_attachments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(id, data);
+            restored.push(message);
         }
         restored
     }
@@ -1479,6 +2438,12 @@ impl ConversationOrchestrator {
         if cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             return None;
         }
+        // Query auto/PTL success (`DCr(..., u4(w))`, 2.1.286) rolls the
+        // complete last-assistant usage before replacing the model context.
+        // Manual compact and selector summaries do not call that producer.
+        if matches!(trigger, compaction::CompactTrigger::Auto) {
+            self.compaction_runtime.roll_over_total_tokens_context();
+        }
         let session_memory_progress =
             if let Some(handle) = self.compaction_runtime.session_memory.clone() {
                 let history = self.session.lock().await.history.clone();
@@ -1509,6 +2474,7 @@ impl ConversationOrchestrator {
         // skills. Run the module-state cleanup first so the reload observes a
         // fresh post-compact state rather than the pre-compact caches.
         compaction::run_post_compact_cleanup(None);
+        self.prompt_runtime.instruction_cache.apply_compaction();
         self.reset_context_collapse_after_compact().await;
         self.fire_instructions_loaded_with_reason(hooks::events::InstructionsLoadReason::Compact)
             .await;
@@ -1572,6 +2538,57 @@ impl ConversationOrchestrator {
         // `hookResults` slot in Claude's `buildPostCompactMessages` order.
         history_after.extend(session_start_messages.iter().cloned());
 
+        // .286 Gr / Cn: only the normal auto/PTL retained-tail transition
+        // inserts missing announcement families immediately after the boundary,
+        // before the summary. The original Or snapshot is reused here.
+        let summary_last_uuid = result
+            .messages
+            .last()
+            .map(|message| message.id().as_uuid().to_string());
+        let anchor_matches = metadata
+            .preserved_messages
+            .as_ref()
+            .and_then(|preserved| preserved.anchor_uuid.as_ref())
+            .is_none_or(|anchor| Some(anchor) == summary_last_uuid.as_ref());
+        let retained_context_announcements = if tail_preserved
+            && matches!(trigger, compaction::CompactTrigger::Auto)
+            && matches!(placement, SummaryPlacement::BeforeKept)
+            && anchor_matches
+            && telemetry::feature_flags::flag_bool("tengu_calm_noodle", true)
+        {
+            self.context_announcement_rows_for_history(
+                &history_after,
+                self.frozen_instruction_refresh_reason().as_str(),
+            )
+            .await
+            .into_iter()
+            .filter(|(_, attachment)| {
+                attachment
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|kind| !kept_context_types.contains(kind))
+            })
+            .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        {
+            let mut attachments = self
+                .transcript
+                .model_reminder_attachments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (message, attachment) in &retained_context_announcements {
+                attachments.insert(message.id(), attachment.clone());
+            }
+        }
+        history_after.splice(
+            1..1,
+            retained_context_announcements
+                .iter()
+                .map(|(message, _)| message.clone()),
+        );
+
         if let Some((handle, pending_tool_calls, revision)) = session_memory_progress {
             let mut extractor = handle.extractor.lock().await;
             // A background extraction may have committed while post-compact
@@ -1609,19 +2626,31 @@ impl ConversationOrchestrator {
             .sum();
         let bytes_saved = bytes_before.saturating_sub(bytes_after);
 
-        // Swap model-visible history under the same lock while retaining
-        // transcript-only completion envelopes. They were excluded from the
-        // compactor input and remain excluded after the transition.
+        // Finalize compact metadata before the transcript row passes through
+        // session.append. The Mod may rewrite the visible boundary content,
+        // while the typed compact metadata and message identity remain owned
+        // by the compaction core.
         {
-            let mut s = self.session.lock().await;
+            let s = self.session.lock().await;
             metadata.active_goal = s
                 .active_goal
                 .as_ref()
                 .map(compaction::compact_active_goal_from_engine);
             debug_assert!(marker.set_compact_metadata(metadata.clone()));
-            history_after[0] = marker.clone();
-            s.replace_model_context_history(history_after);
         }
+        marker = self.mod_session_append_row(&marker, None, false, None).await;
+        history_after[0] = marker.clone();
+        // Swap model-visible history under the same lock while retaining
+        // transcript-only completion envelopes. They were excluded from the
+        // compactor input and remain excluded after the transition.
+        {
+            let mut s = self.session.lock().await;
+            s.replace_model_context_history(history_after);
+            self.compaction_runtime
+                .total_tokens_reminder_usage
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.expect_prompt_cache_rebuild().await;
         // Relevant-memory and skill reminders live only in outgoing request
         // snapshots. Once compaction discards those snapshots, they may surface
         // again; restored file attachments remain deduplicated by
@@ -1640,6 +2669,7 @@ impl ConversationOrchestrator {
         // Compaction rewrites history; a frozen git-status snapshot from the
         // pre-compact conversation would otherwise ride into the next turn.
         *self.prompt_runtime.git_status_snapshot.lock().await = None;
+        self.prompt_runtime.invalidate_mod_prompt_context().await;
         *self.prompt_runtime.pending_memory_prefetch.lock().await = None;
         *self.prompt_runtime.pending_skill_prefetch.lock().await = None;
         // P1-05: persist the full compaction transition (claude 2.1.207
@@ -1666,6 +2696,9 @@ impl ConversationOrchestrator {
         //    `buildPostCompactMessages`).
         self.persist_compact_boundary_to_jsonl(&marker, &metadata)
             .await;
+        for (message, _) in &retained_context_announcements {
+            self.persist_message_to_jsonl(message).await;
+        }
         for m in &result.messages {
             self.persist_compact_summary_to_jsonl(m).await;
         }
@@ -1772,6 +2805,15 @@ impl ConversationOrchestrator {
                 .counts()
                 .output_tokens
                 .saturating_sub(usage.counts().reasoning_tokens),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.compaction_runtime.total_tokens_reminder_usage.store(
+            total_input.saturating_add(
+                usage
+                    .counts()
+                    .output_tokens
+                    .saturating_sub(usage.counts().reasoning_tokens),
+            ),
             std::sync::atomic::Ordering::Relaxed,
         );
         // Feed the shared workflow `budget.spent()` pool: this is the single
@@ -2127,12 +3169,6 @@ impl ConversationOrchestrator {
             // Fall through — the auto path STILL PROCEEDS (parity with the binary).
         }
 
-        let messages_before = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
-        let bytes_before: u64 = snapshot
-            .iter()
-            .map(lingxi_core::types::text_byte_size)
-            .sum();
-
         // hooks compaction lifecycle: PreCompact fires once we have crossed the
         // autocompact threshold and are about to run the summary pass (TS
         // `executePreCompactHooks` BEFORE the summary request, `compact.ts:413`).
@@ -2152,9 +3188,6 @@ impl ConversationOrchestrator {
             return;
         }
 
-        // API duration = the summarizer pass only; `compact_started` (above,
-        // pre-hooks) is the boundary durationMs clock.
-        self.output.emit_compaction_phase("summarizing").await;
         let cost_scope = match self.compaction_cost_scope().await {
             Ok(scope) => scope,
             Err(error) => {
@@ -2167,45 +3200,92 @@ impl ConversationOrchestrator {
                 return;
             }
         };
-        // Run the orchestrator pass under the per-conversation tracking lock so
-        // the circuit-breaker state is read + written atomically for this turn.
-        // Cost preflight above is deliberately outside this guard.
-        let mut tracking = self.compaction_runtime.compaction_tracking.lock().await;
-        let api_started = std::time::Instant::now();
-        let result = match compactor
-            .process_iteration_tracked_with_instructions_and_timing(
+        let tracking_state = std::sync::Arc::new(tokio::sync::Mutex::new(
+            self.compaction_runtime
+                .compaction_tracking
+                .lock()
+                .await
+                .clone(),
+        ));
+        let tracking_for_core = tracking_state.clone();
+        let compact_for_core = compactor.clone();
+        let phase_output = self.output.clone();
+        let last_assistant_at_for_core = last_assistant_at;
+        let core: SessionCompactCore = std::sync::Arc::new(move |source_messages, instructions| {
+            let tracking = tracking_for_core.clone();
+            let compactor = compact_for_core.clone();
+            let phase_output = phase_output.clone();
+            let last_assistant_at = last_assistant_at_for_core;
+            Box::pin(async move {
+                phase_output.emit_compaction_phase("summarizing").await;
+                let api_started = std::time::Instant::now();
+                let mut tracking = tracking.lock().await;
+                let result = compactor
+                    .process_iteration_tracked_with_instructions_and_timing(
+                        source_messages.clone(),
+                        0,
+                        &mut tracking,
+                        instructions.as_deref(),
+                        last_assistant_at,
+                        std::time::SystemTime::now(),
+                    )
+                    .await
+                    .map_err(|error| hooks::mods::ModError::Native(error.to_string()))?;
+                Ok(SessionCompactCoreOutput::new(
+                    result,
+                    source_messages,
+                    api_started.elapsed(),
+                ))
+            })
+        });
+        let compacted = self
+            .dispatch_session_compact_mods(
+                "auto",
                 snapshot,
-                0,
-                &mut tracking,
                 pre_compact.additional_instructions.as_deref(),
-                last_assistant_at,
-                std::time::SystemTime::now(),
+                core,
             )
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                // Autocompact failed: `tracking.consecutive_failures` has
-                // already been incremented in-place by the orchestrator and is
-                // retained (the lock guard writes it back on drop). History is
-                // left untouched — proactive compaction is best-effort and must
-                // never fail the turn (TS `autoCompactIfNeeded` swallows the
-                // error and proceeds with the un-compacted history).
-                tracing::warn!(error = %e, "proactive autocompact failed; continuing un-compacted");
-                drop(tracking);
+            .await;
+        let tracking_after_core = tracking_state.lock().await.clone();
+        let turns_since = i64::from(tracking_after_core.turn_counter);
+        *self.compaction_runtime.compaction_tracking.lock().await = tracking_after_core;
+        let (result, snapshot, compact_duration, core_ran) = match compacted {
+            Ok(SessionCompactDecision::Continue {
+                result,
+                source_messages,
+                api_duration,
+                core_ran,
+                ..
+            }) => (result, source_messages, api_duration, core_ran),
+            Ok(SessionCompactDecision::Skip { reason, .. }) => {
+                tracing::info!(%reason, "proactive compact skipped by session.compact Mod");
+                self.output.emit_compaction_skipped().await;
+                self.output.emit_compaction_finished(None).await;
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "proactive autocompact failed; continuing un-compacted");
                 self.output
-                    .emit_compaction_finished(Some(&e.to_string()))
+                    .emit_compaction_finished(Some(&error.to_string()))
                     .await;
                 return;
             }
         };
-        let compact_duration = api_started.elapsed();
+        if !core_ran {
+            tracing::debug!(
+                "proactive session.compact Mod supplied replacement without running core"
+            );
+        }
+        let estimate = compaction::grouping::estimate_tokens_for_range(&snapshot);
+        let messages_before = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
+        let bytes_before: u64 = snapshot
+            .iter()
+            .map(lingxi_core::types::text_byte_size)
+            .sum();
         // The response facts become session-owned before any telemetry,
         // output, or cancellation-sensitive await below.
         let cost_receipt =
             self.begin_compaction_usage(cost_scope.as_ref(), &result, compact_duration);
-        let turns_since = i64::from(tracking.turn_counter);
-        drop(tracking);
         if let Err(error) = self.settle_compaction_usage(cost_receipt).await {
             tracing::error!(%error, "proactive compaction cost settlement failed");
             self.output
@@ -2284,6 +3364,7 @@ impl ConversationOrchestrator {
         {
             let _ = marker.set_compact_metadata(typed_metadata);
         }
+        marker = self.mod_session_append_row(&marker, None, false, None).await;
         {
             let mut session = self.session.lock().await;
             session.history.push(marker.clone());
@@ -2519,5 +3600,183 @@ impl ConversationOrchestrator {
                 ctx,
             )
             .await;
+    }
+}
+
+#[cfg(test)]
+mod session_compact_mod_tests {
+    use super::*;
+
+    fn empty_compaction_result() -> compaction::IterationCompactionResult {
+        compaction::IterationCompactionResult {
+            messages: Vec::new(),
+            raw_summary_text: String::new(),
+            layers_applied: Vec::new(),
+            total_tokens_freed: 0,
+            cache_hit: false,
+            consecutive_failures: 0,
+            was_compacted: true,
+            rapid_refill_breaker_tripped: false,
+            consecutive_rapid_refills: 0,
+            messages_to_preserve: Vec::new(),
+            media_analysis_to_preserve: Vec::new(),
+            compaction_usage: None,
+            compaction_model: None,
+        }
+    }
+
+    #[test]
+    fn native_token_counts_allow_fractional_optional_values_but_reject_negative() {
+        assert_eq!(
+            parse_native_session_compact_number(
+                &serde_json::json!({"tokensBefore": 1.5}),
+                "tokensBefore"
+            )
+            .unwrap(),
+            Some(1.5)
+        );
+        assert_eq!(
+            parse_native_session_compact_number(&serde_json::json!({}), "tokensBefore").unwrap(),
+            None
+        );
+        assert!(parse_native_session_compact_number(
+            &serde_json::json!({"tokensBefore": -0.5}),
+            "tokensBefore"
+        )
+        .is_err());
+        assert!(parse_native_session_compact_usage(&serde_json::json!({
+            "usage": {
+                "input_tokens": 0.5,
+                "output_tokens": 1,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            }
+        }))
+        .is_ok());
+        assert!(parse_native_session_compact_usage(&serde_json::json!({
+            "usage": {
+                "input_tokens": -0.5,
+                "output_tokens": 1,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            }
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn replacement_freed_tokens_use_source_and_replacement_estimates() {
+        let source = vec![ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            "a long original conversation row".into(),
+        )];
+        let replacement = vec![ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            "short".into(),
+        )];
+        let expected = compaction::grouping::estimate_tokens_for_range(&source).saturating_sub(
+            compaction::grouping::estimate_tokens_for_range(&replacement),
+        );
+        let mut result = empty_compaction_result();
+
+        apply_session_compact_result(
+            &mut result,
+            &SessionCompactEventResult {
+                messages: replacement,
+                tokens_before: Some(999.5),
+                tokens_after: Some(0.25),
+                usage: None,
+            },
+            &source,
+        );
+
+        assert_eq!(result.total_tokens_freed, expected);
+    }
+
+    #[test]
+    fn replacement_keeps_core_usage_and_direct_replacement_does_not_charge_mod_usage() {
+        let source = vec![ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            "original message".into(),
+        )];
+        let replacement = vec![ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            "replacement message".into(),
+        )];
+        let core_usage = cost::Usage {
+            tokens: cost::TokenUsage {
+                input: 13,
+                output: 5,
+                cache_read: 2,
+                cache_write: 1,
+                reasoning_output: 0,
+                cache_write_1h: 0,
+            },
+            server_tool_use: None,
+            speed: None,
+        };
+        let hook_usage = serde_json::json!({
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read_input_tokens": 20,
+            "cache_creation_input_tokens": 10,
+        });
+        let event_result = SessionCompactEventResult {
+            messages: replacement,
+            tokens_before: Some(900.0),
+            tokens_after: Some(1.0),
+            usage: Some(hook_usage),
+        };
+
+        let mut core_ran = empty_compaction_result();
+        core_ran.compaction_usage = Some(core_usage);
+        apply_session_compact_result(&mut core_ran, &event_result, &source);
+        assert_eq!(core_ran.compaction_usage, Some(core_usage));
+
+        let mut direct = empty_compaction_result();
+        apply_session_compact_result(&mut direct, &event_result, &source);
+        assert_eq!(direct.compaction_usage, None);
+    }
+
+    #[test]
+    fn native_row_codec_roundtrips_tool_messages_with_following_result_details() {
+        let tool_use_id = lingxi_core::types::ToolUseId::from("toolu_row_codec_test");
+        let messages = vec![
+            ConversationMessage::Assistant {
+                id: lingxi_core::types::MessageId::new(),
+                content: vec![
+                    lingxi_core::types::ContentBlock::Text {
+                        text: "reading a file".into(), citations: None,
+                    },
+                    lingxi_core::types::ContentBlock::ToolUse {
+                        id: tool_use_id.clone(),
+                        name: "Read".into(),
+                        input: serde_json::json!({"file_path":"/tmp/example"}),
+                        provider_id: Some(tool_use_id.to_string()),
+                    },
+                ],
+                stop_reason: Some("tool_use".into()),
+            },
+            ConversationMessage::User {
+                id: lingxi_core::types::MessageId::new(),
+                content: vec![lingxi_core::types::ContentBlock::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    content: "file contents".into(),
+                    is_error: Some(true),
+                    provider_tool_use_id: Some(tool_use_id.to_string()),
+                    content_blocks: None,
+                }],
+                is_meta: false,
+                is_compact_summary: false,
+                is_visible_in_transcript_only: false,
+            },
+        ];
+        let mut codec = SessionCompactRowCodec::default();
+
+        let rows = codec.rows_for_messages(&messages);
+        assert_eq!(rows[0]["toolUses"][0]["text"], "file contents");
+        assert_eq!(rows[0]["toolUses"][0]["isError"], true);
+        assert_eq!(rows[1]["toolResults"][0]["isError"], true);
+        assert_eq!(codec.messages_of_rows(&rows).unwrap(), messages);
     }
 }

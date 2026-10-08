@@ -1,8 +1,8 @@
 //! Prompt-cache ledger — the per-session record behind `/cost`'s
 //! `Prompt cache (main):` line and the `prompt_cache` status field (CLI-4).
 //!
-//! Oracle: `services/api/promptCacheLedger.ts`, class `fat` in the 2.1.270
-//! binary, with `Lyn` as the per-agent map and `ROe`/`IOe` as the read seams.
+//! Oracle: `services/api/promptCacheLedger.ts`, class `nn` in the 2.1.286
+//! binary, with `Ts` as the per-agent map and `Z$e`/`xKn` as the read seams.
 //!
 //! The ledger answers one question the raw token counters cannot: WHY the
 //! cached prefix stopped being reused. Every request lands as an entry; the
@@ -97,6 +97,10 @@ pub enum MissCause {
     BetasChanged,
     /// `effort_changed`
     EffortChanged,
+    /// `thinking_mode_changed`
+    ThinkingModeChanged,
+    /// `thinking_display_changed`
+    ThinkingDisplayChanged,
     /// `auto_mode_changed`
     AutoModeChanged,
     /// `overage_changed`
@@ -129,6 +133,8 @@ impl MissCause {
             Self::CacheScopeOrTtlChanged => "cache_scope_or_ttl_changed",
             Self::BetasChanged => "betas_changed",
             Self::EffortChanged => "effort_changed",
+            Self::ThinkingModeChanged => "thinking_mode_changed",
+            Self::ThinkingDisplayChanged => "thinking_display_changed",
             Self::AutoModeChanged => "auto_mode_changed",
             Self::OverageChanged => "overage_changed",
             Self::ExtraBodyChanged => "extra_body_changed",
@@ -152,6 +158,8 @@ impl MissCause {
             Self::CacheScopeOrTtlChanged => "cache scope or TTL changed",
             Self::BetasChanged => "beta headers changed",
             Self::EffortChanged => "effort changed",
+            Self::ThinkingModeChanged => "thinking toggled",
+            Self::ThinkingDisplayChanged => "thinking display changed",
             Self::AutoModeChanged => "auto mode toggled",
             Self::OverageChanged => "usage-limit state changed",
             Self::ExtraBodyChanged => "extra request fields changed",
@@ -668,6 +676,19 @@ mod tests {
         assert_eq!(MissCause::LikelySeverSide.wire(), "likely_server_side");
         assert_eq!(MissCause::ToolsChanged.label(), "tool definitions changed");
         assert_eq!(MissCause::TtlExpired1h.label(), "idle past the 1h TTL");
+        assert_eq!(
+            MissCause::ThinkingModeChanged.wire(),
+            "thinking_mode_changed"
+        );
+        assert_eq!(MissCause::ThinkingModeChanged.label(), "thinking toggled");
+        assert_eq!(
+            MissCause::ThinkingDisplayChanged.wire(),
+            "thinking_display_changed"
+        );
+        assert_eq!(
+            MissCause::ThinkingDisplayChanged.label(),
+            "thinking display changed"
+        );
         // U+2014, not an ASCII hyphen.
         assert_eq!(
             MissCause::LikelySeverSide.label(),

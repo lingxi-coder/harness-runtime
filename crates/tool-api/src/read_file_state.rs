@@ -126,6 +126,12 @@ pub struct ReadFileEntry {
 #[derive(Clone, Debug)]
 struct Node {
     entry: ReadFileEntry,
+    /// Original and translated pre-canonicalization spellings for each model
+    /// route that reached this canonical key, in first-observed order. Keeping
+    /// route forms grouped lets reminders require every coordinate spelling to
+    /// pass the live Read-deny check without treating the I/O key as an
+    /// alternate authorization route.
+    requested_path_groups: Vec<Vec<PathBuf>>,
     /// Whether this cache slot represents content the model has actually seen.
     /// Host-provided seed snapshots participate in staleness/dedup but must
     /// stay out of model-context consumers such as `/files` and post-compact
@@ -191,6 +197,18 @@ impl ReadFileStateLru {
         self.map.get(path).map(|n| n.entry.clone())
     }
 
+    /// Return the file-tool route groups captured for an entry, in
+    /// first-observed order, without changing LRU recency. Each group contains
+    /// the model spelling plus any translated filesystem spelling. An empty
+    /// list means no model route was captured.
+    #[must_use]
+    pub fn requested_path_groups(&self, path: &Path) -> Vec<Vec<PathBuf>> {
+        self.map
+            .get(path)
+            .map(|node| node.requested_path_groups.clone())
+            .unwrap_or_default()
+    }
+
     /// Whether `path` has an entry, WITHOUT promoting it to most-recently-used.
     ///
     /// The Rust equal of TS `readFileState.has(path)` — the guard on the
@@ -232,13 +250,77 @@ impl ReadFileStateLru {
 
     /// Insert (or overwrite) the entry for `path` as most-recently-used with
     /// explicit model-context provenance, then evict least-recently-used
-    /// entries while over the entry/byte budget.
+    /// entries while over the entry/byte budget. Model-visible callers also
+    /// capture the supplied path as the changed-file route.
     pub fn set_with_model_context(
         &mut self,
         path: PathBuf,
         entry: ReadFileEntry,
         in_model_context: bool,
     ) {
+        self.set_with_requested_path(path, entry, in_model_context, None);
+    }
+
+    /// Insert an entry while retaining its current changed-file source route.
+    /// Model-visible callers with no distinct route capture `path` itself;
+    /// callers with a pre-canonicalized key pass the original path spelling.
+    /// Non-model seed producers pass `None` only when Native would not scan
+    /// that seed.
+    pub fn set_with_requested_path(
+        &mut self,
+        path: PathBuf,
+        entry: ReadFileEntry,
+        in_model_context: bool,
+        requested_path: Option<PathBuf>,
+    ) {
+        let requested_path = requested_path.or_else(|| in_model_context.then(|| path.clone()));
+        self.set_with_requested_aliases(
+            path,
+            entry,
+            in_model_context,
+            requested_path.into_iter().collect(),
+        );
+    }
+
+    /// Insert or refresh a cache entry with one source route represented by
+    /// multiple spellings, such as model and translated host paths. If this is
+    /// a model-visible insertion with no aliases, `path` is the observed route.
+    /// New routes append once to the existing ordered groups.
+    pub fn set_with_requested_aliases(
+        &mut self,
+        path: PathBuf,
+        entry: ReadFileEntry,
+        in_model_context: bool,
+        new_requested_paths: Vec<PathBuf>,
+    ) {
+        // The canonical cache key may be reached through more than one model
+        // spelling. Keep prior spellings across every refresh: unlike Native's
+        // per-spelling Map entries, this cache folds aliases into one key, so a
+        // generic update cannot prove an earlier route was removed. Append a
+        // newly observed spelling once, preserving first-observed order.
+        let previous = self.map.get(&path);
+        let mut requested_path_groups = previous
+            .map(|old| old.requested_path_groups.clone())
+            .unwrap_or_default();
+        let new_requested_paths = if new_requested_paths.is_empty() && in_model_context {
+            vec![path.clone()]
+        } else {
+            new_requested_paths
+        };
+        // A non-model seed may share this canonical slot with an earlier
+        // model-visible alias. Preserve that visibility: Native keeps the
+        // alias in a separate Map entry, so this folded slot cannot let the
+        // seed erase the still-live changed-file candidate.
+        let in_model_context = in_model_context || previous.is_some_and(|old| old.in_model_context);
+        let mut route = Vec::new();
+        for requested_path in new_requested_paths {
+            if !route.contains(&requested_path) {
+                route.push(requested_path);
+            }
+        }
+        if !route.is_empty() && !requested_path_groups.contains(&route) {
+            requested_path_groups.push(route);
+        }
         let size = (entry.content.len() as u64).max(1);
         self.clock += 1;
         let last_used = self.clock;
@@ -246,6 +328,7 @@ impl ReadFileStateLru {
             path,
             Node {
                 entry,
+                requested_path_groups,
                 in_model_context,
                 last_used,
                 size,
@@ -310,11 +393,20 @@ impl ReadFileStateLru {
 
     /// Every MODEL-VISIBLE cached path in most-recently-used →
     /// least-recently-used order. This is the source of truth for `/files`,
-    /// conditional-rule matching, relevant-memory dedup against already-loaded
+    /// relevant-memory dedup against already-loaded
     /// files, and post-compact restore candidate selection.
     #[must_use]
     pub fn model_context_keys(&self) -> Vec<PathBuf> {
         self.ordered_paths(|node| node.in_model_context)
+    }
+
+    /// Cached paths with a recorded changed-file source route. Current model,
+    /// memory, post-compact restore, and SDK host-seed producers record their
+    /// actual source path when writing the entry; route-less synthetic seeds do
+    /// not become reminders merely from their cache key.
+    #[must_use]
+    pub fn changed_file_candidate_keys(&self) -> Vec<PathBuf> {
+        self.ordered_paths(|node| !node.requested_path_groups.is_empty())
     }
 
     fn ordered_paths(&self, include: impl Fn(&Node) -> bool) -> Vec<PathBuf> {
@@ -414,7 +506,10 @@ pub fn mtime_ms_floor(mtime: std::time::SystemTime) -> i64 {
 /// Insert (or overwrite) the read-state entry for `path`.
 ///
 /// 1:1 with TS `readFileState.set(fullFilePath, …)`. The key is the absolute
-/// path the caller resolved; this helper does no normalization of its own.
+/// path the caller resolved; this helper does no normalization of its own. For
+/// this generic model-visible producer the supplied path is also recorded as
+/// the changed-file route. A producer with a distinct requested spelling must
+/// use [`set_with_requested_path`] or [`set_with_requested_aliases`].
 pub fn set(map: &ReadFileStateMap, path: PathBuf, entry: ReadFileEntry) {
     if let Ok(mut guard) = map.lock() {
         guard.set(path, entry);
@@ -424,10 +519,11 @@ pub fn set(map: &ReadFileStateMap, path: PathBuf, entry: ReadFileEntry) {
 /// Insert (or overwrite) the read-state entry for `path` with explicit
 /// model-context provenance.
 ///
-/// Ordinary Read/Edit/Write callers should keep using [`set`], which marks the
-/// entry as model-visible. Host seed snapshots use `in_model_context = false`
-/// so they remain available for staleness/dedup without leaking into
-/// orchestrator context consumers.
+/// Generic model-visible callers record `path` as their changed-file route.
+/// File tools and seed producers with a distinct observed spelling use
+/// [`set_with_requested_path`] or [`set_with_requested_aliases`]. Host snapshots
+/// use `in_model_context = false`; their Native changed-file source route is
+/// captured separately by the host-seed producer.
 pub fn set_with_model_context(
     map: &ReadFileStateMap,
     path: PathBuf,
@@ -436,6 +532,39 @@ pub fn set_with_model_context(
 ) {
     if let Ok(mut guard) = map.lock() {
         guard.set_with_model_context(path, entry, in_model_context);
+    }
+}
+
+/// Insert or refresh read-state while retaining a current source route. When
+/// `in_model_context` is true and `requested_path` is `None`, `path` is recorded
+/// at this producer boundary as the model path. Non-model seed producers pass
+/// `Some(route)` when Native scans their source path. `None` for a non-model
+/// entry adds no route and preserves prior routes on the folded key.
+pub fn set_with_requested_path(
+    map: &ReadFileStateMap,
+    path: PathBuf,
+    entry: ReadFileEntry,
+    in_model_context: bool,
+    requested_path: Option<PathBuf>,
+) {
+    if let Ok(mut guard) = map.lock() {
+        guard.set_with_requested_path(path, entry, in_model_context, requested_path);
+    }
+}
+
+/// Insert or refresh read-state with one source route represented by multiple
+/// spellings, such as the original guest path plus its translated host path.
+/// Empty aliases on a model-visible producer record `path` itself; existing
+/// route groups remain in first-observed order.
+pub fn set_with_requested_aliases(
+    map: &ReadFileStateMap,
+    path: PathBuf,
+    entry: ReadFileEntry,
+    in_model_context: bool,
+    requested_paths: Vec<PathBuf>,
+) {
+    if let Ok(mut guard) = map.lock() {
+        guard.set_with_requested_aliases(path, entry, in_model_context, requested_paths);
     }
 }
 
@@ -523,6 +652,58 @@ mod tests {
         assert_eq!(got.mtime_ms, 2);
         assert_eq!(got.offset, Some(5));
         assert_eq!(got.limit, Some(7));
+    }
+
+    #[test]
+    fn requested_path_aliases_accumulate_once_in_insertion_order() {
+        let map = new_read_file_state_map();
+        let canonical = PathBuf::from("/workspace/secrets/a.rs");
+        let first = PathBuf::from("/workspace/alias-first/a.rs");
+        let first_host = PathBuf::from("/host/workspace/alias-first/a.rs");
+        let second = PathBuf::from("/workspace/alias-second/a.rs");
+        let second_host = PathBuf::from("/host/workspace/alias-second/a.rs");
+
+        set_with_requested_aliases(
+            &map,
+            canonical.clone(),
+            entry("old"),
+            true,
+            vec![first.clone(), first_host.clone()],
+        );
+        set_with_requested_aliases(
+            &map,
+            canonical.clone(),
+            entry("new"),
+            true,
+            vec![second.clone(), second_host.clone()],
+        );
+        set_with_requested_aliases(
+            &map,
+            canonical.clone(),
+            entry("newer"),
+            true,
+            vec![first.clone(), first_host.clone()],
+        );
+        assert_eq!(
+            map.lock().unwrap().requested_path_groups(&canonical),
+            vec![
+                vec![first.clone(), first_host.clone()],
+                vec![second.clone(), second_host.clone()]
+            ],
+            "repeat observations do not reorder routes"
+        );
+
+        set_with_model_context(&map, canonical.clone(), entry("seed"), false);
+        let guard = map.lock().unwrap();
+        assert_eq!(
+            guard.requested_path_groups(&canonical),
+            vec![vec![first, first_host], vec![second, second_host]],
+            "generic refreshes cannot erase routes that remain separate Native entries"
+        );
+        assert!(
+            guard.model_context_keys().contains(&canonical),
+            "a non-model seed cannot hide an existing model-visible route"
+        );
     }
 
     #[test]
@@ -691,6 +872,65 @@ mod tests {
         assert_eq!(
             map.lock().unwrap().keys(),
             vec![PathBuf::from("/a"), PathBuf::from("/b")]
+        );
+    }
+
+    #[test]
+    fn changed_file_candidates_include_model_memory_and_host_routes() {
+        let map = new_read_file_state_map();
+        let model = PathBuf::from("/repo/read.rs");
+        let rendered_memory = PathBuf::from("/repo/LINGXI.md");
+        let unrendered_memory = PathBuf::from("/repo/hidden.md");
+        let host = PathBuf::from("/repo/host-seed.rs");
+
+        set(&map, model.clone(), entry("read"));
+        set_with_requested_path(
+            &map,
+            rendered_memory.clone(),
+            ReadFileEntry { seeded_from_context: true, ..entry("memory") },
+            false,
+            Some(rendered_memory.clone()),
+        );
+        set_with_model_context(
+            &map,
+            unrendered_memory.clone(),
+            entry("unrendered"),
+            false,
+        );
+        set_with_requested_path(
+            &map,
+            host.clone(),
+            entry("host"),
+            false,
+            Some(host.clone()),
+        );
+
+        let candidates = map.lock().unwrap().changed_file_candidate_keys();
+        assert!(candidates.contains(&model));
+        assert!(candidates.contains(&rendered_memory));
+        assert!(!candidates.contains(&unrendered_memory));
+        assert!(candidates.contains(&host));
+    }
+
+    #[test]
+    fn generic_model_setter_records_a_new_observed_path_after_an_alias() {
+        let map = new_read_file_state_map();
+        let canonical = PathBuf::from("/repo/target.rs");
+        let alias = PathBuf::from("/repo/alias.rs");
+
+        set_with_requested_path(
+            &map,
+            canonical.clone(),
+            entry("through alias"),
+            true,
+            Some(alias.clone()),
+        );
+        set(&map, canonical.clone(), entry("direct model read"));
+
+        assert_eq!(
+            map.lock().unwrap().requested_path_groups(&canonical),
+            vec![vec![alias], vec![canonical.clone()]],
+            "a later model source is captured; reminder refresh supplies its chosen alias explicitly"
         );
     }
 

@@ -4,10 +4,11 @@
 
 use tree_sitter::{Node, Parser, Tree};
 
-/// Max command length the AST path will parse, mirroring claude-code
-/// `utils/bash/parser.ts:19` (`MAX_COMMAND_LENGTH = 10000`). Over-length (and
-/// empty) commands return `None` here → the caller keeps the legacy regex path,
-/// exactly as `parser.ts:59` returns `null` for `!command || > MAX_COMMAND_LENGTH`.
+/// Max command length the AST path will parse, mirroring Native 2.1.291's
+/// `utils/bash/parser.ts` `command.length > MAX_COMMAND_LENGTH` check. JavaScript
+/// string length counts UTF-16 code units, so use `encode_utf16().count()` below
+/// rather than Rust UTF-8 bytes or Unicode scalar values. Over-length (and empty)
+/// commands return `None`, matching Native's parser wrapper.
 const MAX_COMMAND_LENGTH: usize = 10_000;
 
 /// Parse `command` as bash. `None` when the command is empty / over the length
@@ -36,9 +37,31 @@ fn parse(command: &str) -> Option<Tree> {
 /// `PARSE_ABORTED` distinction is unreachable here.
 #[must_use]
 pub(crate) fn parse_raw(command: &str) -> Option<Tree> {
-    if command.is_empty() || command.len() > MAX_COMMAND_LENGTH {
+    if command.is_empty() || command.encode_utf16().count() > MAX_COMMAND_LENGTH {
         return None;
     }
+    parse_source(command)
+}
+
+/// Parse an internal syntax completion while applying the input cap to the
+/// caller's original command only. The suffix is produced from AST terminals,
+/// never accepted from a tool caller, and does not increase the Native raw-input
+/// length. The original command must still be non-empty and within the existing
+/// UTF-16 cap.
+#[must_use]
+pub(crate) fn parse_raw_with_internal_suffix(
+    original_command: &str,
+    suffix: &str,
+) -> Option<(Tree, String)> {
+    if original_command.is_empty() || original_command.encode_utf16().count() > MAX_COMMAND_LENGTH {
+        return None;
+    }
+    let completed_source = format!("{original_command}{suffix}");
+    let tree = parse_source(&completed_source)?;
+    Some((tree, completed_source))
+}
+
+fn parse_source(command: &str) -> Option<Tree> {
     let mut parser = Parser::new();
     let language: tree_sitter::Language = tree_sitter_bash::LANGUAGE.into();
     parser.set_language(&language).ok()?;
@@ -94,6 +117,25 @@ mod tests {
     #[test]
     fn plain_command_has_no_operators() {
         assert_eq!(has_actual_operator_nodes("ls -la"), Some(false));
+    }
+
+    #[test]
+    fn length_limit_counts_native_utf16_code_units() {
+        let bmp_at_limit = "\u{e9}".repeat(MAX_COMMAND_LENGTH);
+        assert_eq!(bmp_at_limit.len(), MAX_COMMAND_LENGTH * 2);
+        assert!(parse_raw(&bmp_at_limit).is_some());
+
+        let astral_at_limit = "\u{1f600}".repeat(MAX_COMMAND_LENGTH / 2);
+        assert_eq!(astral_at_limit.encode_utf16().count(), MAX_COMMAND_LENGTH);
+        assert!(parse_raw(&astral_at_limit).is_some());
+
+        let astral_over_limit = "\u{1f600}".repeat(MAX_COMMAND_LENGTH / 2 + 1);
+        assert!(astral_over_limit.chars().count() < MAX_COMMAND_LENGTH);
+        assert_eq!(
+            astral_over_limit.encode_utf16().count(),
+            MAX_COMMAND_LENGTH + 2
+        );
+        assert!(parse_raw(&astral_over_limit).is_none());
     }
 
     #[test]

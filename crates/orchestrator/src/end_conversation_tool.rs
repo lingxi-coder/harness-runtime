@@ -11,12 +11,12 @@
 //! the tool call and decides whether to end (2nd consecutive call) or return the
 //! re-read reminder (1st call).
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use lingxi_core::types::{ContentBlock, ConversationMessage};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tool_api::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolProgressSender,
     ToolStaticContext, ToolUseContext,
@@ -228,7 +228,7 @@ mod tests {
     }
 
     fn ctx_with(messages: Vec<ConversationMessage>) -> ToolUseContext {
-        let mut c = ToolUseContext::model_seed("x".into());
+        let mut c = ToolUseContext::model_seed("x".into(), None);
         c.messages = messages;
         c
     }

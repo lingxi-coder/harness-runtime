@@ -113,6 +113,7 @@ impl ModelRegistry {
     fn effective_metadata(
         provider: &crate::ProviderProfile,
         model: &crate::ModelProfile,
+        source_billing_mode: Option<lingxi_llm_client::protocol::BillingMode>,
     ) -> ModelMetadata {
         let mut metadata = model.metadata.clone();
         if let Some((_, override_pricing)) = provider
@@ -138,11 +139,29 @@ impl ModelRegistry {
                     source: Some("userOverride".to_string()),
                 });
             }
-        } else if provider.pricing.billing_mode != ModelBillingMode::Unknown {
+        } else if let Some(billing_mode) = provider.pricing.billing_mode {
             let pricing = metadata.pricing.get_or_insert_with(ModelPricing::default);
-            pricing.billing_mode = provider.pricing.billing_mode;
+            pricing.billing_mode = billing_mode;
+        } else if metadata.pricing.is_none() {
+            if let Some(billing_mode) = source_billing_mode.map(Self::host_billing_mode) {
+                metadata.pricing = Some(ModelPricing {
+                    billing_mode,
+                    ..ModelPricing::default()
+                });
+            }
         }
         metadata
+    }
+
+    fn host_billing_mode(mode: lingxi_llm_client::protocol::BillingMode) -> ModelBillingMode {
+        match mode {
+            lingxi_llm_client::protocol::BillingMode::PerToken => ModelBillingMode::PerToken,
+            lingxi_llm_client::protocol::BillingMode::Subscription => {
+                ModelBillingMode::Subscription
+            }
+            lingxi_llm_client::protocol::BillingMode::Free => ModelBillingMode::Free,
+            lingxi_llm_client::protocol::BillingMode::Unknown => ModelBillingMode::Unknown,
+        }
     }
 
     /// Build a registry from validated client config.
@@ -212,6 +231,7 @@ impl ModelRegistry {
     /// Return configured profile/model pairs.
     #[must_use]
     pub fn available_models(&self) -> Vec<ModelListing> {
+        let resolved_profiles = self.resolver.profiles();
         self.config
             .providers
             .iter()
@@ -220,31 +240,71 @@ impl ModelRegistry {
             // let a user "pick" a spare credential.
             .filter(|provider| !provider.connection.hidden)
             .flat_map(|provider| {
-                provider.models.iter().map(|model| ModelListing {
-                    provider_id: provider.provider_id.clone(),
-                    profile_name: provider.profile_name.clone(),
-                    group: provider.group().to_string(),
-                    connection_id: provider.connection_id().to_string(),
-                    hidden: provider.connection.hidden,
-                    display_model: model.display_model.clone(),
-                    request_model: model.request_model.clone(),
-                    billing_model: model.billing_model.clone(),
-                    aliases: model.aliases.clone(),
-                    description: model.description.clone(),
-                    capabilities: model.capabilities,
-                    metadata: Self::effective_metadata(provider, model),
-                    reasoning: reasoning_control_spec(ReasoningTarget {
-                        profile_name: Some(provider.profile_name.as_str()),
-                        protocol: &provider.protocol,
-                        base_url: &provider.base_url,
-                        model: &model.request_model,
-                    }),
-                    fusion_hints: crate::fusion_hints::hints_for(
-                        &provider.profile_name,
-                        &model.request_model,
-                    ),
-                    fusion_analyst_capable: model.capabilities.structured_output
-                        && provider.protocol.encodes_response_format(),
+                let resolved_profile = resolved_profiles
+                    .iter()
+                    .find(|profile| profile.profile_name == provider.profile_name);
+                provider.models.iter().map(move |model| {
+                    let source_billing_mode = resolved_profile.and_then(|profile| {
+                        profile
+                            .models
+                            .iter()
+                            .find(|source| {
+                                source.display_model == model.display_model
+                                    && source.request_model == model.request_model
+                            })
+                            .map(|source| source.billing_mode_on(&profile.pricing))
+                    });
+                    ModelListing {
+                        provider_id: provider.provider_id.clone(),
+                        profile_name: provider.profile_name.clone(),
+                        group: provider.group().to_string(),
+                        connection_id: provider.connection_id().to_string(),
+                        hidden: provider.connection.hidden,
+                        display_model: model.display_model.clone(),
+                        request_model: model.request_model.clone(),
+                        billing_model: model.billing_model.clone(),
+                        aliases: model.aliases.clone(),
+                        description: model.description.clone(),
+                        capabilities: model.capabilities,
+                        metadata: Self::effective_metadata(provider, model, source_billing_mode),
+                        reasoning: reasoning_control_spec(ReasoningTarget {
+                            inference: &self
+                                .resolver
+                                .profiles()
+                                .iter()
+                                .find(|selected| selected.profile_name == provider.profile_name)
+                                .map(|selected| selected.inference.clone())
+                                .unwrap_or_default(),
+                            features: &self
+                                .resolver
+                                .profiles()
+                                .iter()
+                                .find(|selected| selected.profile_name == provider.profile_name)
+                                .and_then(|selected| {
+                                    selected
+                                        .models
+                                        .iter()
+                                        .find(|entry| entry.request_model == model.request_model)
+                                        .map(|entry| {
+                                            entry
+                                                .info
+                                                .features
+                                                .on_connection(&selected.info.features)
+                                        })
+                                })
+                                .unwrap_or_default(),
+                            profile_name: Some(provider.profile_name.as_str()),
+                            protocol: &provider.protocol,
+                            base_url: &provider.base_url,
+                            model: &model.request_model,
+                        }),
+                        fusion_hints: crate::fusion_hints::hints_for(
+                            &provider.profile_name,
+                            &model.request_model,
+                        ),
+                        fusion_analyst_capable: model.capabilities.structured_output
+                            && provider.protocol.encodes_response_format(),
+                    }
                 })
             })
             .collect()
@@ -401,6 +461,66 @@ mod pricing_policy_tests {
             Some(expected)
         );
         assert!(registry.profile_pricing_config("other-profile").is_none());
+    }
+
+    #[test]
+    fn model_listing_inherits_source_mode_but_keeps_explicit_unknown() {
+        let mut profile = crate::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|profile| profile.profile_name == "anthropic")
+            .expect("pinned Anthropic preset");
+        profile.pricing.billing_mode = None;
+        let model = profile
+            .models
+            .iter()
+            .find(|model| model.request_model == "claude-opus-4-6")
+            .expect("pinned Anthropic model")
+            .request_model
+            .clone();
+        profile
+            .models
+            .iter_mut()
+            .find(|entry| entry.request_model == model)
+            .unwrap()
+            .metadata
+            .pricing = None;
+        let registry = ModelRegistry::from_config(crate::ClientConfig {
+            providers: vec![profile.clone()],
+        })
+        .expect("registry with inherited SDK profile");
+        let listed = registry
+            .available_models()
+            .into_iter()
+            .find(|entry| entry.request_model == model)
+            .expect("listed model");
+        assert_eq!(
+            listed
+                .metadata
+                .pricing
+                .expect("source pricing metadata")
+                .billing_mode,
+            ModelBillingMode::PerToken
+        );
+
+        profile.pricing.billing_mode = Some(ModelBillingMode::Unknown);
+        let registry = ModelRegistry::from_config(crate::ClientConfig {
+            providers: vec![profile],
+        })
+        .expect("registry with explicit unknown mode");
+        let listed = registry
+            .available_models()
+            .into_iter()
+            .find(|entry| entry.request_model == model)
+            .expect("listed model");
+        assert_eq!(
+            listed
+                .metadata
+                .pricing
+                .expect("explicit pricing metadata")
+                .billing_mode,
+            ModelBillingMode::Unknown
+        );
     }
 }
 

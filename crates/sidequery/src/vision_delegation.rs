@@ -803,7 +803,7 @@ fn rewrite_blocks_for_nonvision(
         match block {
             ContentBlock::Image { source } => {
                 rewritten.push(ContentBlock::Text {
-                    text: placeholder(&fingerprint_for_source(&source)?),
+                    text: placeholder(&fingerprint_for_source(&source)?), citations: None,
                 });
             }
             ContentBlock::Document { source } if !documents_supported => {
@@ -903,7 +903,7 @@ fn build_messages(packet: &VisionPacket, batch: &[DelegationMedia]) -> Vec<Conve
             MessageRole::User => ConversationMessage::user(MessageId::new(), text),
             MessageRole::Assistant => ConversationMessage::Assistant {
                 id: MessageId::new(),
-                content: vec![ContentBlock::Text { text }],
+                content: vec![ContentBlock::Text { text, citations: None }],
                 stop_reason: None,
             },
             MessageRole::System => continue,
@@ -914,7 +914,7 @@ fn build_messages(packet: &VisionPacket, batch: &[DelegationMedia]) -> Vec<Conve
         text: format!(
             "Current user request:\n{}\n\nAnalyze the attached images and answer in JSON only.",
             truncate_head_tail(&packet.current_user_text, CURRENT_TEXT_LIMIT)
-        ),
+        ), citations: None,
     }];
     for item in batch {
         let mut label = format!("{} ({})", item.label, item.fingerprint);
@@ -926,7 +926,7 @@ fn build_messages(packet: &VisionPacket, batch: &[DelegationMedia]) -> Vec<Conve
                 label.push_str(&format!("\nTool summary: {summary}"));
             }
         }
-        content.push(ContentBlock::Text { text: label });
+        content.push(ContentBlock::Text { text: label, citations: None });
         content.push(item.block.clone());
     }
     messages.push(ConversationMessage::User {
@@ -1589,7 +1589,7 @@ mod tests {
             user_message(vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
                 content: "tool output".into(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: Some(vec![serde_json::json!({
                     "type": "image_url",
@@ -1757,7 +1757,7 @@ mod tests {
             ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
                 content: String::new(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: Some(vec![serde_json::json!({
                     "type": "image",
@@ -1774,7 +1774,7 @@ mod tests {
             panic!("expected user");
         };
         assert!(
-            matches!(&content[0], ContentBlock::Text { text } if text.contains("see media analysis"))
+            matches!(&content[0], ContentBlock::Text { text, .. } if text.contains("see media analysis"))
         );
         let ContentBlock::ToolResult {
             content_blocks: Some(blocks),

@@ -38,25 +38,30 @@
 //! is built at boot only behind an OPT-IN toggle; the default remains the
 //! always-allow `NoOpPermissionGate`.
 
-use crate::classifier::{reason_allows_classifier, AutoModeClassifierVerdict};
+use crate::classifier::{AutoModeClassifierVerdict, reason_allows_classifier};
 use crate::defaults_per_tool::tool_default;
 use crate::gate::{
-    AutoModePrompt, HandoffReview, MatchedAskRule, PermissionAbort, PermissionCheckContext,
-    PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionOutcome,
-    PermissionResolution, PromptDefault,
+    AutoModePrompt, ClassifierOnlyOnBlock, ClassifierOnlyOutcome, ClassifierOnlyPolicy,
+    ClassifierOnlyReviewRequest, HandoffReview, MatchedAskRule, ModToolCheckDecision,
+    ModToolCheckVerdict, PermissionAbort, PermissionCheckContext, PermissionDecision,
+    PermissionDecisionSource, PermissionGate, PermissionOutcome, PermissionResolution,
+    PromptDefault,
 };
 use crate::headless_gate::headless_deny_message;
 use crate::layers::{
-    apply_context_layers, fold_permission_layers, parse_permission_layers, FoldedPermissionContext,
-    LayerFoldInputs, PermissionLayer,
+    FoldedPermissionContext, LayerFoldInputs, PermissionLayer, apply_context_layers,
+    fold_permission_layers, parse_permission_layers,
 };
 use crate::mode::PermissionMode;
+use crate::policy::PermissionCheckPhase;
 use crate::policy::PermissionPolicy;
 use crate::result::{
     ClassifierKind, PermissionDecisionReason, PermissionMetadata, PermissionResult,
+    SandboxOverrideReason,
 };
 use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue};
 use async_trait::async_trait;
+use lingxi_core::host::permission_gate as core_permission;
 use lingxi_core::host::permission_gate::PermissionRequestSource;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -97,8 +102,587 @@ struct LivePermissionState {
     additional_working_dirs: crate::working_dirs::AdditionalWorkingDirs,
 }
 
+fn classifier_deny_rules(
+    buckets: &HashMap<PermissionRuleSource, Vec<PermissionRule>>,
+) -> Vec<String> {
+    let mut sources: Vec<_> = buckets.iter().collect();
+    sources.sort_by_key(|(source, _)| std::cmp::Reverse(source.priority()));
+    let mut rules = Vec::new();
+    for (source, entries) in sources {
+        if matches!(
+            source,
+            PermissionRuleSource::Command | PermissionRuleSource::ToolsNarrowing
+        ) {
+            continue;
+        }
+        for entry in entries {
+            if entry
+                .value
+                .rule_content
+                .as_deref()
+                .is_some_and(|content| content.starts_with("prompt:"))
+            {
+                continue;
+            }
+            let rule = entry.value.to_rule_string();
+            if !rules.contains(&rule) {
+                rules.push(rule);
+            }
+        }
+    }
+    rules
+}
+
 fn directory_update_null_byte_reason(update_type: &str, directory: &str) -> String {
     format!("{update_type} carries a directory containing a null byte: {directory}")
+}
+
+fn core_permission_mode(mode: PermissionMode) -> core_permission::PermissionToolCheckMode {
+    match mode {
+        PermissionMode::Default => core_permission::PermissionToolCheckMode::Default,
+        PermissionMode::Plan => core_permission::PermissionToolCheckMode::Plan,
+        PermissionMode::AcceptEdits => core_permission::PermissionToolCheckMode::AcceptEdits,
+        PermissionMode::BypassPermissions => {
+            core_permission::PermissionToolCheckMode::BypassPermissions
+        }
+        PermissionMode::DontAsk => core_permission::PermissionToolCheckMode::DontAsk,
+        PermissionMode::Bubble => core_permission::PermissionToolCheckMode::Bubble,
+        PermissionMode::Auto => core_permission::PermissionToolCheckMode::Auto,
+    }
+}
+
+fn permission_mode_from_core(mode: core_permission::PermissionToolCheckMode) -> PermissionMode {
+    match mode {
+        core_permission::PermissionToolCheckMode::Default => PermissionMode::Default,
+        core_permission::PermissionToolCheckMode::Plan => PermissionMode::Plan,
+        core_permission::PermissionToolCheckMode::AcceptEdits => PermissionMode::AcceptEdits,
+        core_permission::PermissionToolCheckMode::BypassPermissions => {
+            PermissionMode::BypassPermissions
+        }
+        core_permission::PermissionToolCheckMode::DontAsk => PermissionMode::DontAsk,
+        core_permission::PermissionToolCheckMode::Bubble => PermissionMode::Bubble,
+        core_permission::PermissionToolCheckMode::Auto => PermissionMode::Auto,
+    }
+}
+
+fn permission_rule_source_to_core(
+    source: PermissionRuleSource,
+) -> core_permission::PermissionToolCheckRuleSource {
+    use core_permission::PermissionToolCheckRuleSource as C;
+    match source {
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User) => C::UserSettings,
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project) => {
+            C::ProjectSettings
+        }
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local) => {
+            C::LocalSettings
+        }
+        PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed) => {
+            C::ManagedPolicy
+        }
+        PermissionRuleSource::FlagSettings => C::FlagSettings,
+        PermissionRuleSource::CliArg => C::CliArg,
+        PermissionRuleSource::Command => C::Command,
+        PermissionRuleSource::Session => C::Session,
+        PermissionRuleSource::ToolsNarrowing => C::ToolsNarrowing,
+        PermissionRuleSource::McpServerPolicy => C::McpServerPolicy,
+    }
+}
+
+fn permission_rule_source_from_core(
+    source: core_permission::PermissionToolCheckRuleSource,
+) -> PermissionRuleSource {
+    use core_permission::PermissionToolCheckRuleSource as C;
+    match source {
+        C::UserSettings => PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User),
+        C::ProjectSettings => {
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project)
+        }
+        C::LocalSettings => {
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local)
+        }
+        C::ManagedPolicy => {
+            PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed)
+        }
+        C::FlagSettings => PermissionRuleSource::FlagSettings,
+        C::CliArg => PermissionRuleSource::CliArg,
+        C::Command => PermissionRuleSource::Command,
+        C::Session => PermissionRuleSource::Session,
+        C::ToolsNarrowing => PermissionRuleSource::ToolsNarrowing,
+        C::McpServerPolicy => PermissionRuleSource::McpServerPolicy,
+    }
+}
+
+fn permission_rule_to_core(rule: &PermissionRule) -> core_permission::PermissionToolCheckRule {
+    core_permission::PermissionToolCheckRule {
+        tool_name: rule.value.tool_name.clone(),
+        rule_content: rule.value.rule_content.clone(),
+        behavior: match rule.behavior {
+            PermissionBehavior::Allow => core_permission::PermissionToolCheckBehavior::Allow,
+            PermissionBehavior::Deny => core_permission::PermissionToolCheckBehavior::Deny,
+            PermissionBehavior::Ask => core_permission::PermissionToolCheckBehavior::Ask,
+        },
+        source: permission_rule_source_to_core(rule.source),
+    }
+}
+
+fn permission_rule_from_core(rule: &core_permission::PermissionToolCheckRule) -> PermissionRule {
+    PermissionRule {
+        value: crate::rule::PermissionRuleValue {
+            tool_name: rule.tool_name.clone(),
+            rule_content: rule.rule_content.clone(),
+        },
+        behavior: match rule.behavior {
+            core_permission::PermissionToolCheckBehavior::Allow => PermissionBehavior::Allow,
+            core_permission::PermissionToolCheckBehavior::Deny => PermissionBehavior::Deny,
+            core_permission::PermissionToolCheckBehavior::Ask => PermissionBehavior::Ask,
+        },
+        source: permission_rule_source_from_core(rule.source),
+    }
+}
+
+fn permission_reason_to_core(
+    reason: &PermissionDecisionReason,
+) -> core_permission::PermissionToolCheckReason {
+    use core_permission::PermissionToolCheckReason as C;
+    match reason {
+        PermissionDecisionReason::MatchedRule { rule } => C::MatchedRule {
+            rule: permission_rule_to_core(rule),
+        },
+        PermissionDecisionReason::PermissionMode { mode } => C::PermissionMode {
+            mode: core_permission_mode(*mode),
+        },
+        PermissionDecisionReason::SubcommandResults { reasons } => C::SubcommandResults {
+            reasons: reasons
+                .iter()
+                .map(|(command, result)| {
+                    (command.clone(), Box::new(permission_result_to_core(result)))
+                })
+                .collect(),
+        },
+        PermissionDecisionReason::PermissionPromptTool { tool_name } => C::PermissionPromptTool {
+            tool_name: tool_name.clone(),
+        },
+        PermissionDecisionReason::ClassifierApproved { classifier, score } => {
+            C::ClassifierApproved {
+                classifier: match classifier {
+                    ClassifierKind::Yolo => core_permission::PermissionToolCheckClassifier::Yolo,
+                    ClassifierKind::Bash => core_permission::PermissionToolCheckClassifier::Bash,
+                    ClassifierKind::Transcript => {
+                        core_permission::PermissionToolCheckClassifier::Transcript
+                    }
+                },
+                score: *score,
+            }
+        }
+        PermissionDecisionReason::ClassifierRejected {
+            classifier,
+            score,
+            reason,
+        } => C::ClassifierRejected {
+            classifier: match classifier {
+                ClassifierKind::Yolo => core_permission::PermissionToolCheckClassifier::Yolo,
+                ClassifierKind::Bash => core_permission::PermissionToolCheckClassifier::Bash,
+                ClassifierKind::Transcript => {
+                    core_permission::PermissionToolCheckClassifier::Transcript
+                }
+            },
+            score: *score,
+            reason: reason.clone(),
+        },
+        PermissionDecisionReason::HookOverride {
+            hook_id,
+            source,
+            reason,
+        } => C::HookOverride {
+            hook_id: hook_id.clone(),
+            source: source.clone(),
+            reason: reason.clone(),
+        },
+        PermissionDecisionReason::AsyncAgent { reason } => C::AsyncAgent {
+            reason: reason.clone(),
+        },
+        PermissionDecisionReason::SandboxOverride { reason } => C::SandboxOverride {
+            reason: match reason {
+                SandboxOverrideReason::ExcludedCommand => {
+                    core_permission::PermissionToolCheckSandboxOverride::ExcludedCommand
+                }
+                SandboxOverrideReason::DangerouslyDisableSandbox => {
+                    core_permission::PermissionToolCheckSandboxOverride::DangerouslyDisableSandbox
+                }
+            },
+        },
+        PermissionDecisionReason::WorkingDirectory { reason } => C::WorkingDirectory {
+            reason: reason.clone(),
+        },
+        PermissionDecisionReason::SafetyCheck {
+            reason,
+            classifier_approvable,
+            circuit_breaker,
+        } => C::SafetyCheck {
+            reason: reason.clone(),
+            classifier_approvable: *classifier_approvable,
+            circuit_breaker: circuit_breaker.map(|breaker| match breaker {
+                crate::result::SafetyCircuitBreaker::BackgroundOperator => {
+                    core_permission::PermissionToolCheckCircuitBreaker::BackgroundOperator
+                }
+                crate::result::SafetyCircuitBreaker::DangerousRemoval => {
+                    core_permission::PermissionToolCheckCircuitBreaker::DangerousRemoval
+                }
+                crate::result::SafetyCircuitBreaker::IsolatePeerMachines => {
+                    core_permission::PermissionToolCheckCircuitBreaker::IsolatePeerMachines
+                }
+                crate::result::SafetyCircuitBreaker::OutsideReadsBlocked => {
+                    core_permission::PermissionToolCheckCircuitBreaker::OutsideReadsBlocked
+                }
+                crate::result::SafetyCircuitBreaker::RestrictedMode => {
+                    core_permission::PermissionToolCheckCircuitBreaker::RestrictedMode
+                }
+                crate::result::SafetyCircuitBreaker::SuspiciousWindowsPath => {
+                    core_permission::PermissionToolCheckCircuitBreaker::SuspiciousWindowsPath
+                }
+            }),
+        },
+        PermissionDecisionReason::Other { reason } => C::Other {
+            reason: reason.clone(),
+        },
+        PermissionDecisionReason::DenialLimitExceeded => C::DenialLimitExceeded,
+        PermissionDecisionReason::AutoModeFallback => C::AutoModeFallback,
+        PermissionDecisionReason::BypassPermissions => C::BypassPermissions,
+    }
+}
+
+fn permission_reason_from_core(
+    reason: &core_permission::PermissionToolCheckReason,
+) -> PermissionDecisionReason {
+    use core_permission::PermissionToolCheckReason as C;
+    match reason {
+        C::MatchedRule { rule } => PermissionDecisionReason::MatchedRule {
+            rule: permission_rule_from_core(rule),
+        },
+        C::PermissionMode { mode } => PermissionDecisionReason::PermissionMode {
+            mode: permission_mode_from_core(*mode),
+        },
+        C::SubcommandResults { reasons } => PermissionDecisionReason::SubcommandResults {
+            reasons: reasons
+                .iter()
+                .map(|(command, result)| {
+                    (
+                        command.clone(),
+                        Box::new(permission_result_from_core(result)),
+                    )
+                })
+                .collect(),
+        },
+        C::PermissionPromptTool { tool_name } => PermissionDecisionReason::PermissionPromptTool {
+            tool_name: tool_name.clone(),
+        },
+        C::ClassifierApproved { classifier, score } => {
+            PermissionDecisionReason::ClassifierApproved {
+                classifier: match classifier {
+                    core_permission::PermissionToolCheckClassifier::Yolo => ClassifierKind::Yolo,
+                    core_permission::PermissionToolCheckClassifier::Bash => ClassifierKind::Bash,
+                    core_permission::PermissionToolCheckClassifier::Transcript => {
+                        ClassifierKind::Transcript
+                    }
+                },
+                score: *score,
+            }
+        }
+        C::ClassifierRejected {
+            classifier,
+            score,
+            reason,
+        } => PermissionDecisionReason::ClassifierRejected {
+            classifier: match classifier {
+                core_permission::PermissionToolCheckClassifier::Yolo => ClassifierKind::Yolo,
+                core_permission::PermissionToolCheckClassifier::Bash => ClassifierKind::Bash,
+                core_permission::PermissionToolCheckClassifier::Transcript => {
+                    ClassifierKind::Transcript
+                }
+            },
+            score: *score,
+            reason: reason.clone(),
+        },
+        C::HookOverride {
+            hook_id,
+            source,
+            reason,
+        } => PermissionDecisionReason::HookOverride {
+            hook_id: hook_id.clone(),
+            source: source.clone(),
+            reason: reason.clone(),
+        },
+        C::AsyncAgent { reason } => PermissionDecisionReason::AsyncAgent {
+            reason: reason.clone(),
+        },
+        C::SandboxOverride { reason } => PermissionDecisionReason::SandboxOverride {
+            reason: match reason {
+                core_permission::PermissionToolCheckSandboxOverride::ExcludedCommand => {
+                    SandboxOverrideReason::ExcludedCommand
+                }
+                core_permission::PermissionToolCheckSandboxOverride::DangerouslyDisableSandbox => {
+                    SandboxOverrideReason::DangerouslyDisableSandbox
+                }
+            },
+        },
+        C::WorkingDirectory { reason } => PermissionDecisionReason::WorkingDirectory {
+            reason: reason.clone(),
+        },
+        C::SafetyCheck {
+            reason,
+            classifier_approvable,
+            circuit_breaker,
+        } => PermissionDecisionReason::SafetyCheck {
+            reason: reason.clone(),
+            classifier_approvable: *classifier_approvable,
+            circuit_breaker: circuit_breaker.map(|breaker| match breaker {
+                core_permission::PermissionToolCheckCircuitBreaker::BackgroundOperator => {
+                    crate::result::SafetyCircuitBreaker::BackgroundOperator
+                }
+                core_permission::PermissionToolCheckCircuitBreaker::DangerousRemoval => {
+                    crate::result::SafetyCircuitBreaker::DangerousRemoval
+                }
+                core_permission::PermissionToolCheckCircuitBreaker::IsolatePeerMachines => {
+                    crate::result::SafetyCircuitBreaker::IsolatePeerMachines
+                }
+                core_permission::PermissionToolCheckCircuitBreaker::OutsideReadsBlocked => {
+                    crate::result::SafetyCircuitBreaker::OutsideReadsBlocked
+                }
+                core_permission::PermissionToolCheckCircuitBreaker::RestrictedMode => {
+                    crate::result::SafetyCircuitBreaker::RestrictedMode
+                }
+                core_permission::PermissionToolCheckCircuitBreaker::SuspiciousWindowsPath => {
+                    crate::result::SafetyCircuitBreaker::SuspiciousWindowsPath
+                }
+            }),
+        },
+        C::Other { reason } => PermissionDecisionReason::Other {
+            reason: reason.clone(),
+        },
+        C::DenialLimitExceeded => PermissionDecisionReason::DenialLimitExceeded,
+        C::AutoModeFallback => PermissionDecisionReason::AutoModeFallback,
+        C::BypassPermissions => PermissionDecisionReason::BypassPermissions,
+    }
+}
+
+fn permission_result_to_core(
+    result: &PermissionResult,
+) -> core_permission::PermissionToolCheckResult {
+    use core_permission::PermissionToolCheckResult as C;
+    let metadata = |metadata: &PermissionMetadata| core_permission::PermissionToolCheckMetadata {
+        matched_rules: metadata.matched_rules.clone(),
+        permission_suggestions: metadata.permission_suggestions.clone(),
+        blocked_path: metadata.blocked_path.clone(),
+    };
+    match result {
+        PermissionResult::Allow {
+            reason,
+            updated_input,
+            update_destination,
+            metadata: result_metadata,
+        } => C::Allow {
+            reason: permission_reason_to_core(reason),
+            updated_input: updated_input.clone(),
+            update_destination: update_destination.map(|destination| match destination {
+                crate::result::PermissionUpdateDestination::UserSettings => {
+                    core_permission::PermissionToolCheckUpdateDestination::UserSettings
+                }
+                crate::result::PermissionUpdateDestination::ProjectSettings => {
+                    core_permission::PermissionToolCheckUpdateDestination::ProjectSettings
+                }
+                crate::result::PermissionUpdateDestination::LocalSettings => {
+                    core_permission::PermissionToolCheckUpdateDestination::LocalSettings
+                }
+                crate::result::PermissionUpdateDestination::Session => {
+                    core_permission::PermissionToolCheckUpdateDestination::Session
+                }
+                crate::result::PermissionUpdateDestination::CliArg => {
+                    core_permission::PermissionToolCheckUpdateDestination::CliArg
+                }
+            }),
+            metadata: metadata(result_metadata),
+        },
+        PermissionResult::Deny {
+            reason,
+            explanation,
+            metadata: result_metadata,
+        } => C::Deny {
+            reason: permission_reason_to_core(reason),
+            explanation: explanation.clone(),
+            metadata: metadata(result_metadata),
+        },
+        PermissionResult::Ask {
+            reason,
+            prompt,
+            pending_classifier_check,
+            metadata: result_metadata,
+        } => C::Ask {
+            reason: permission_reason_to_core(reason),
+            prompt: core_permission::PermissionToolCheckPrompt {
+                title: prompt.title.clone(),
+                message: prompt.message.clone(),
+                options: prompt.options.clone(),
+            },
+            pending_classifier_check: pending_classifier_check.as_ref().map(|pending| {
+                core_permission::PermissionToolCheckPendingClassifier {
+                    classifier: match pending.classifier {
+                        ClassifierKind::Yolo => {
+                            core_permission::PermissionToolCheckClassifier::Yolo
+                        }
+                        ClassifierKind::Bash => {
+                            core_permission::PermissionToolCheckClassifier::Bash
+                        }
+                        ClassifierKind::Transcript => {
+                            core_permission::PermissionToolCheckClassifier::Transcript
+                        }
+                    },
+                    request_id: pending.request_id,
+                    started_at: pending.started_at.clone(),
+                }
+            }),
+            metadata: metadata(result_metadata),
+        },
+    }
+}
+
+/// Capture the raw mode-less rule/safety result used by a PreToolUse allow.
+/// This is intentionally not the ordinary ToolCheck mapper: a hook allow that
+/// finds an Ask proceeds to the full permission pipeline, where classification
+/// happens after Mod, just as Native `LNo` hands it to `canUseTool`.
+fn hook_allow_preflight_tool_check_evaluation(
+    name: &str,
+    result: &PermissionResult,
+    effective_mode: PermissionMode,
+    ctx: &PermissionCheckContext,
+) -> core_permission::PermissionToolCheckEvaluation {
+    let verdict = match result {
+        PermissionResult::Allow { reason, .. } => ModToolCheckVerdict {
+            decision: ModToolCheckDecision::Allow,
+            rule: mod_check_rule(
+                reason,
+                PermissionBehavior::Allow,
+                ctx.matched_ask_rule.as_ref(),
+            ),
+            reason: serialize_decision_reason(reason),
+        },
+        PermissionResult::Deny {
+            reason,
+            explanation,
+            ..
+        } => ModToolCheckVerdict {
+            decision: ModToolCheckDecision::Deny,
+            rule: mod_check_rule(reason, PermissionBehavior::Deny, None),
+            reason: Some(
+                explanation
+                    .clone()
+                    .unwrap_or_else(|| deny_reason_string(reason, name)),
+            ),
+        },
+        PermissionResult::Ask { reason, prompt, .. } => ModToolCheckVerdict {
+            decision: ModToolCheckDecision::Ask,
+            rule: mod_check_rule(
+                reason,
+                PermissionBehavior::Ask,
+                ctx.matched_ask_rule.as_ref(),
+            ),
+            reason: Some(match reason {
+                PermissionDecisionReason::MatchedRule { .. } => format!(
+                    "LingXi requested permissions to use {name}, but you haven't granted it yet."
+                ),
+                _ => prompt.message.clone(),
+            }),
+        },
+    };
+    core_permission::PermissionToolCheckEvaluation {
+        result: permission_result_to_core(result),
+        effective_mode: core_permission_mode(effective_mode),
+        verdict: ModToolCheckVerdict {
+            reason: verdict.reason.filter(|reason| !reason.is_empty()),
+            ..verdict
+        },
+        ceiling: ctx.tool_check_ceiling,
+    }
+}
+
+fn permission_result_from_core(
+    result: &core_permission::PermissionToolCheckResult,
+) -> PermissionResult {
+    use core_permission::PermissionToolCheckResult as C;
+    let metadata = |metadata: &core_permission::PermissionToolCheckMetadata| PermissionMetadata {
+        matched_rules: metadata.matched_rules.clone(),
+        permission_suggestions: metadata.permission_suggestions.clone(),
+        blocked_path: metadata.blocked_path.clone(),
+    };
+    match result {
+        C::Allow {
+            reason,
+            updated_input,
+            update_destination,
+            metadata: result_metadata,
+        } => PermissionResult::Allow {
+            reason: permission_reason_from_core(reason),
+            updated_input: updated_input.clone(),
+            update_destination: update_destination.map(|destination| match destination {
+                core_permission::PermissionToolCheckUpdateDestination::UserSettings => {
+                    crate::result::PermissionUpdateDestination::UserSettings
+                }
+                core_permission::PermissionToolCheckUpdateDestination::ProjectSettings => {
+                    crate::result::PermissionUpdateDestination::ProjectSettings
+                }
+                core_permission::PermissionToolCheckUpdateDestination::LocalSettings => {
+                    crate::result::PermissionUpdateDestination::LocalSettings
+                }
+                core_permission::PermissionToolCheckUpdateDestination::Session => {
+                    crate::result::PermissionUpdateDestination::Session
+                }
+                core_permission::PermissionToolCheckUpdateDestination::CliArg => {
+                    crate::result::PermissionUpdateDestination::CliArg
+                }
+            }),
+            metadata: metadata(result_metadata),
+        },
+        C::Deny {
+            reason,
+            explanation,
+            metadata: result_metadata,
+        } => PermissionResult::Deny {
+            reason: permission_reason_from_core(reason),
+            explanation: explanation.clone(),
+            metadata: metadata(result_metadata),
+        },
+        C::Ask {
+            reason,
+            prompt,
+            pending_classifier_check,
+            metadata: result_metadata,
+        } => PermissionResult::Ask {
+            reason: permission_reason_from_core(reason),
+            prompt: crate::result::PermissionPrompt {
+                title: prompt.title.clone(),
+                message: prompt.message.clone(),
+                options: prompt.options.clone(),
+            },
+            pending_classifier_check: pending_classifier_check.as_ref().map(|pending| {
+                crate::result::PendingClassifierCheck {
+                    classifier: match pending.classifier {
+                        core_permission::PermissionToolCheckClassifier::Yolo => {
+                            ClassifierKind::Yolo
+                        }
+                        core_permission::PermissionToolCheckClassifier::Bash => {
+                            ClassifierKind::Bash
+                        }
+                        core_permission::PermissionToolCheckClassifier::Transcript => {
+                            ClassifierKind::Transcript
+                        }
+                    },
+                    request_id: pending.request_id,
+                    started_at: pending.started_at.clone(),
+                }
+            }),
+            metadata: metadata(result_metadata),
+        },
+    }
 }
 
 impl LivePermissionState {
@@ -581,114 +1165,12 @@ impl PolicyPermissionGate {
     /// (`ask_with_mode(Default)`) is filtered out below — leaving exactly the
     /// rule + safety walks. The session's real mode is still returned for
     /// auto-mode bookkeeping.
-    /// Shared impl behind [`PermissionGate::check_after_hook_allow`] and its
-    /// rich-outcome counterpart. The `lin` re-check of a
-    /// hook `allow`: deny rule → deny; ask rule/safety → delegate to the inner
-    /// transport (prompt / headless deny) carrying the dispatch context (real
-    /// tool_use_id) enriched with the ask's serialized `decision_reason`, so the
-    /// stdio `can_use_tool` is byte-faithful (was a fresh UUID + no reason); no
-    /// verdict → the hook's allow stands.
-    async fn check_after_hook_allow_impl(
-        &self,
-        name: &str,
-        input: &Value,
-        ctx: &PermissionCheckContext,
-    ) -> PermissionOutcome {
-        let (mode, verdict) = self.rule_or_safety_verdict(
-            name,
-            input,
-            ctx.workspace_lease_token,
-            &self.fold_call_context(ctx),
-        );
-        match verdict {
-            Some(PermissionResult::Deny {
-                reason,
-                explanation,
-                ..
-            }) => {
-                let msg = explanation.unwrap_or_else(|| deny_reason_string(&reason, name));
-                tracing::warn!(
-                    target: "permission",
-                    "Hook returned 'allow' for {name}, but deny rule overrides: {msg}"
-                );
-                PermissionOutcome::Deny { reason: msg }
-            }
-            Some(PermissionResult::Ask {
-                ref reason,
-                ref metadata,
-                ..
-            }) => {
-                tracing::warn!(
-                    target: "permission",
-                    "Hook returned 'allow' for {name}, but ask rule/safety check requires full permission pipeline"
-                );
-                // Re-check stays MODE-LESS (`rule_or_safety_verdict` evaluated
-                // under `PermissionMode::Default`) — the oracle's post-hook-allow
-                // handler hands the ask to the permission pipeline WITHOUT a mode
-                // backstop, so we must not re-run the auto-mode classifier here
-                // (HOOKALLOW-01). We DO carry the same control-request metadata the
-                // normal Ask delegation builds so the stdio `can_use_tool` payload
-                // matches, and apply any `updatedPermissions` the host allow
-                // returns to the live session (parity with `setToolPermissionContext`).
-                let mut ctx2 = ctx.clone();
-                ctx2.decision_reason = serialize_decision_reason(reason);
-                ctx2.decision_reason_type = decision_reason_type(reason).map(str::to_string);
-                ctx2.classifier_approvable = classifier_approvable(reason);
-                ctx2.matched_ask_rule = matched_ask_rule(reason);
-                if metadata.permission_suggestions.is_some() {
-                    ctx2.permission_suggestions = metadata.permission_suggestions.clone();
-                }
-                if metadata.blocked_path.is_some() {
-                    ctx2.blocked_path = metadata.blocked_path.clone();
-                }
-                let outcome = self.check_prompt_transport(name, input, &ctx2).await;
-                match self.consume_auto_outcome(outcome, &ctx2).await {
-                    PermissionOutcome::Allow {
-                        updated_input,
-                        permission_updates,
-                        decision_classification,
-                    } => {
-                        if !permission_updates.is_empty() {
-                            self.apply_permission_updates(&permission_updates);
-                        }
-                        PermissionOutcome::Allow {
-                            updated_input,
-                            permission_updates,
-                            // This branch exists only because the resolver
-                            // required an interactive ask. A host that omits
-                            // the optional classification still represents a
-                            // temporary user grant, not a standing hook allow.
-                            decision_classification: decision_classification.or(Some(
-                                lingxi_core::host::permission_gate::ToolDecisionClassification::UserTemporary,
-                            )),
-                        }
-                    }
-                    PermissionOutcome::AllowAuto { updated_input } => {
-                        PermissionOutcome::AllowAuto { updated_input }
-                    }
-                    PermissionOutcome::Deny { reason } => PermissionOutcome::Deny { reason },
-                }
-            }
-            _ => {
-                self.record_auto_mode_non_deny(mode);
-                PermissionOutcome::Allow {
-                    updated_input: None,
-                    permission_updates: Vec::new(),
-                    decision_classification: None,
-                }
-            }
-        }
-    }
-
-    fn flatten_permission_outcome(outcome: PermissionOutcome) -> PermissionDecision {
-        match outcome {
-            PermissionOutcome::Allow { .. } | PermissionOutcome::AllowAuto { .. } => {
-                PermissionDecision::Allow
-            }
-            PermissionOutcome::Deny { reason } => PermissionDecision::Deny { reason },
-        }
-    }
-
+    /// Shared evaluator for typed PreToolUse core capture and the rewritten
+    /// PermissionRequest allow path. The PreToolUse caller carries this result
+    /// through Mod arbitration before execution; an Ask remains on the ordinary
+    /// permission pipeline so the inner transport receives the real dispatch
+    /// context and the Ask's serialized reason. A rewritten PermissionRequest
+    /// allow uses the same rule/safety result but turns Ask into a hard deny.
     fn rule_or_safety_verdict(
         &self,
         name: &str,
@@ -707,6 +1189,7 @@ impl PolicyPermissionGate {
             PermissionMode::Default,
             workspace_lease_token,
             folded,
+            PermissionCheckPhase::Execution,
         );
         let verdict = match &result {
             // Deny rules + the tool's own `checkPermissions` denies. (A
@@ -810,7 +1293,14 @@ impl PolicyPermissionGate {
             // Desktop, non-file tools, relative paths, host-coordinate paths,
             // and fenced guest regions: one evaluation, byte-identical to the
             // pre-existing behavior.
-            return self.authorize_with_layers(name, input, mode, workspace_lease_token, &folded);
+            return self.authorize_with_layers(
+                name,
+                input,
+                mode,
+                workspace_lease_token,
+                &folded,
+                PermissionCheckPhase::Execution,
+            );
         };
 
         // UNION OF BOTH COORDINATE SPACES, with the lattice
@@ -831,8 +1321,14 @@ impl PolicyPermissionGate {
         // a guest path failing to match is precisely the bug being repaired.
         // Letting it veto would make the host Allow unreachable and leave
         // every write prompting.
-        let host_verdict =
-            self.authorize_with_layers(name, &rewritten, mode, workspace_lease_token, &folded);
+        let host_verdict = self.authorize_with_layers(
+            name,
+            &rewritten,
+            mode,
+            workspace_lease_token,
+            &folded,
+            PermissionCheckPhase::Execution,
+        );
         // COST, accepted: a file-tool call whose path actually needs
         // translation walks the rule set twice and deep-clones the tool input
         // (a `Write`'s `content` included). Both are inherent to joining two
@@ -849,8 +1345,14 @@ impl PolicyPermissionGate {
         if Self::coordinate_rank(&host_verdict) == Self::RANK_DECIDED_DENY {
             return host_verdict;
         }
-        let guest_verdict =
-            self.authorize_with_layers(name, input, mode, workspace_lease_token, &folded);
+        let guest_verdict = self.authorize_with_layers(
+            name,
+            input,
+            mode,
+            workspace_lease_token,
+            &folded,
+            PermissionCheckPhase::Execution,
+        );
         // Ties go to the GUEST form. Equal rank means both spaces decided the
         // same way, so the verdicts are interchangeable in strength — but only
         // the guest one carries paths the model actually used. `ask_plan_mutation`
@@ -923,6 +1425,7 @@ impl PolicyPermissionGate {
         mode: PermissionMode,
         workspace_lease_token: Option<u64>,
         folded: &FoldedPermissionContext,
+        phase: PermissionCheckPhase,
     ) -> PermissionResult {
         let policy = self.live_policy_with_layers(folded);
         if folded.bash_command_clamps.is_empty() {
@@ -931,6 +1434,7 @@ impl PolicyPermissionGate {
                 input,
                 mode,
                 workspace_lease_token,
+                phase,
             );
         }
         // `wTv` / `FJa` (binary @290295374) — while a `bashCommandClamp` is
@@ -941,7 +1445,13 @@ impl PolicyPermissionGate {
         // active clamp exactly as upstream is, so an unclamped session keeps
         // today's unwind semantics untouched.
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            policy.authorize_with_mode_and_workspace_lease(name, input, mode, workspace_lease_token)
+            policy.authorize_with_mode_and_workspace_lease(
+                name,
+                input,
+                mode,
+                workspace_lease_token,
+                phase,
+            )
         })) {
             Ok(result) => result,
             Err(_) => {
@@ -1030,9 +1540,10 @@ impl PolicyPermissionGate {
     /// e.sandboxNetworkLists?.(n)===void 0 && !ze && !fn && !zn`: a forced
     /// Chrome navigation, `classifierOnly()`, a `sandboxNetworkLists` /
     /// `sandboxOverride` decision reason, an edit-classification gate, and plan
-    /// mode. Only the last has a port counterpart — `zn` is `U==="plan"`, and
+    /// mode. Classifier-only metadata selects the dedicated report path before
+    /// this method, so it cannot reach the probe. `zn` is `U==="plan"`, and
     /// this is only ever called with the effective mode, which the caller has
-    /// already established is `Auto`. The rest are structurally absent.
+    /// already established is `Auto`; the other guards are structurally absent.
     ///
     /// Upstream also re-runs the probe with linked-worktree directories
     /// (`vo.decisionReason?.type==="workingDir" && UZt()` → `xMn` → `ko(Nn)`);
@@ -1054,6 +1565,7 @@ impl PolicyPermissionGate {
                 input,
                 PermissionMode::AcceptEdits,
                 workspace_lease_token,
+                PermissionCheckPhase::Execution,
             ),
             PermissionResult::Allow { .. }
         )
@@ -1249,7 +1761,8 @@ impl PolicyPermissionGate {
             PermissionResult::Allow { updated_input, .. } => {
                 self.record_auto_mode_non_deny(mode);
                 Ok(PermissionOutcome::Allow {
-                    updated_input,
+                    updated_input: updated_input
+                        .map(lingxi_core::types::utf16_json::Utf16JsonProjection::plain),
                     permission_updates: Vec::new(),
                     decision_classification: None,
                 })
@@ -1587,11 +2100,10 @@ impl PolicyPermissionGate {
         // ```
         //
         // `Sft` is [`crate::mode_policy::is_auto_mode_safe_tool`]. The three
-        // guards upstream ANDs in are all structurally absent here: `Xn` is a
-        // forced Chrome navigation, `Pe` is `classifierOnly()` (no port tool
-        // declares it), and `Le` is a `sandboxNetworkLists` decision reason —
-        // none of which this build can produce, so the predicate reduces to
-        // `Sft` alone. Upstream also resets the consecutive-denial counter here
+        // guards upstream ANDs in are absent from this ordinary path: `Xn` is a
+        // forced Chrome navigation, `Pe` is `classifierOnly()` (dispatched to
+        // its dedicated gate seam), and `Le` is a `sandboxNetworkLists` reason.
+        // The predicate here reduces to `Sft` alone. Upstream also resets the consecutive-denial counter here
         // (`if(!Ame(v))ZJ(v,D6)`), which is [`Self::record_auto_mode_non_deny`].
         if crate::mode_policy::is_auto_mode_safe_tool(name) {
             self.record_auto_mode_non_deny(mode);
@@ -1657,32 +2169,7 @@ impl PolicyPermissionGate {
             if let Some(classifier) = self.loop_classifier.get() {
                 let deny_rules = {
                     let live = self.live_state.read().unwrap_or_else(|e| e.into_inner());
-                    let mut sources: Vec<_> = live.deny_rules.iter().collect();
-                    sources.sort_by_key(|(source, _)| std::cmp::Reverse(source.priority()));
-                    let mut rules = Vec::new();
-                    for (source, entries) in sources {
-                        if matches!(
-                            source,
-                            PermissionRuleSource::Command | PermissionRuleSource::ToolsNarrowing
-                        ) {
-                            continue;
-                        }
-                        for entry in entries {
-                            if entry
-                                .value
-                                .rule_content
-                                .as_deref()
-                                .is_some_and(|content| content.starts_with("prompt:"))
-                            {
-                                continue;
-                            }
-                            let rule = entry.value.to_rule_string();
-                            if !rules.contains(&rule) {
-                                rules.push(rule);
-                            }
-                        }
-                    }
-                    rules
+                    classifier_deny_rules(&live.deny_rules)
                 };
                 classified.verdict = classifier
                     .classify(name, input, &host_context, &deny_rules)
@@ -1855,7 +2342,8 @@ impl PolicyPermissionGate {
     ) -> PermissionOutcome {
         match result {
             PermissionResult::Allow { updated_input, .. } => PermissionOutcome::Allow {
-                updated_input,
+                updated_input: updated_input
+                    .map(lingxi_core::types::utf16_json::Utf16JsonProjection::plain),
                 permission_updates: Vec::new(),
                 decision_classification: None,
             },
@@ -2079,7 +2567,7 @@ fn read_only_default_auto_allows(
     // An undecided Auto-mode subagent needs contextual approval. Its legacy
     // AllowByDefault entry must not turn classifier Pass into an approval when
     // the contextual classifier is unavailable or itself cannot decide.
-    if mode == PermissionMode::Auto && matches!(name, "Agent" | "Task") {
+    if mode == PermissionMode::Auto && name == "Agent" {
         return false;
     }
     // LINGXI DIVERGENCE, narrowly scoped to the rows that have no oracle
@@ -2127,6 +2615,97 @@ fn is_negated_path_rule(spec: &str) -> bool {
 
 #[async_trait]
 impl PermissionGate for PolicyPermissionGate {
+    async fn check_classifier_only_with_context_or_abort(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+        classifier_policy: ClassifierOnlyPolicy,
+        request: &ClassifierOnlyReviewRequest,
+    ) -> Result<ClassifierOnlyOutcome, PermissionAbort> {
+        let deny = |reason: String| ClassifierOnlyOutcome {
+            permission: PermissionOutcome::Deny { reason },
+            review: None,
+        };
+        let folded = self.fold_call_context(ctx);
+        let mode = folded
+            .mode
+            .unwrap_or_else(|| self.effective_mode_for_tool(name));
+        if mode != PermissionMode::Auto || self.auto_mode_denial_reason().is_some() {
+            return Ok(deny(format!(
+                "Only the auto-mode classifier can allow {name}: the session is not in auto mode"
+            )));
+        }
+        let mut policy = self.live_policy_with_layers(&folded);
+        // `Dz` exempts exactly these deny buckets for a flagging tool. Keep
+        // original rules in the classifier prompt, as native `Dz` only changes
+        // the explicit deny check and does not mutate the permission context.
+        let deny_rules = classifier_deny_rules(&policy.deny_rules);
+        if classifier_policy.on_block == ClassifierOnlyOnBlock::Flag {
+            policy.deny_rules.retain(|source, _| {
+                !matches!(
+                    source,
+                    PermissionRuleSource::Settings(
+                        lingxi_core::types::SettingsScope::User
+                            | lingxi_core::types::SettingsScope::Project
+                            | lingxi_core::types::SettingsScope::Local
+                    ) | PermissionRuleSource::Session
+                )
+            });
+        }
+        match policy.authorize_with_mode_and_workspace_lease(
+            name,
+            input,
+            PermissionMode::Default,
+            ctx.workspace_lease_token,
+            PermissionCheckPhase::Execution,
+        ) {
+            result @ PermissionResult::Deny { .. } => {
+                return Ok(ClassifierOnlyOutcome {
+                    permission: self.classified_result_to_outcome(result, name),
+                    review: None,
+                });
+            }
+            PermissionResult::Ask { reason, .. } if !reason_allows_classifier(&reason) => {
+                return Ok(deny(format!(
+                    "Only the auto-mode classifier can allow {name}: this call trips a check only a person may answer, and nobody is asked about this tool's calls"
+                )));
+            }
+            PermissionResult::Allow { .. } | PermissionResult::Ask { .. } => {}
+        }
+        if request.action.trim().is_empty() {
+            return Ok(deny(format!(
+                "{name} was not reviewed: it gave the auto mode classifier nothing to judge (its toAutoClassifierInput is empty), and only the classifier can allow it. This is a tool bug, not a judgment on the action."
+            )));
+        }
+        let review = match self.loop_classifier.get() {
+            Some(classifier) => classifier.classify_report(request, &deny_rules).await,
+            None => None,
+        };
+        let outcome = crate::handback_review::permission_outcome(name, classifier_policy, review);
+        // `JEt`'s no-verdict flag branch returns before counter mutation. A
+        // genuine block records `FIe` before returning the flagging allow, but
+        // never takes the ordinary denial's prompt/abort breaker fallback.
+        match outcome.review.as_ref() {
+            Some(lingxi_core::host::handback::ReportReview::Passed) => {
+                self.record_auto_mode_non_deny(mode);
+            }
+            Some(lingxi_core::host::handback::ReportReview::Blocked { .. }) => {
+                self.policy
+                    .denial_tracking
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .record_auto_deny();
+            }
+            Some(
+                lingxi_core::host::handback::ReportReview::Refused
+                | lingxi_core::host::handback::ReportReview::Unavailable { .. },
+            )
+            | None => {}
+        }
+        Ok(outcome)
+    }
+
     /// `Tbt(setToolPermissionContext, specs, mode)` — see the trait doc for why
     /// the two modes differ.
     fn set_command_input_denies(&self, specs: &[String], union: bool) {
@@ -2212,6 +2791,12 @@ impl PermissionGate for PolicyPermissionGate {
         Some(crate::read_deny_exclude_globs(&self.live_policy(), &base))
     }
 
+    fn read_path_policy_snapshot(
+        &self,
+    ) -> std::sync::Arc<dyn core_permission::ReadPathPolicySnapshot> {
+        std::sync::Arc::new(self.live_policy())
+    }
+
     fn check_noninteractive_with_allow_rules(
         &self,
         name: &str,
@@ -2260,6 +2845,212 @@ impl PermissionGate for PolicyPermissionGate {
         // tools or delegates to the prompt).
         let (mode, result) = self.effective_authorize(name, input);
         self.decide(mode, result, name, input).await
+    }
+
+    async fn check_mod_query(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+    ) -> Option<core_permission::PermissionToolCheckEvaluation> {
+        // A Mod query inspects policy under the live mode/layers. It must not
+        // consult the classifier or the inner prompt transport, and it must
+        // not mutate the current mode or denial counters.
+        let folded = self.fold_call_context(ctx);
+        let mode = folded
+            .mode
+            .unwrap_or_else(|| self.effective_mode_for_tool(name));
+        let result = self.authorize_with_layers(
+            name,
+            input,
+            mode,
+            ctx.workspace_lease_token,
+            &folded,
+            PermissionCheckPhase::ToolCheck,
+        );
+        let core_result = permission_result_to_core(&result);
+        let verdict = match &result {
+            PermissionResult::Allow { reason, .. } => ModToolCheckVerdict {
+                decision: ModToolCheckDecision::Allow,
+                rule: mod_check_rule(
+                    &reason,
+                    PermissionBehavior::Allow,
+                    ctx.matched_ask_rule.as_ref(),
+                ),
+                reason: serialize_decision_reason(&reason),
+            },
+            PermissionResult::Deny {
+                reason,
+                explanation,
+                ..
+            } => ModToolCheckVerdict {
+                decision: ModToolCheckDecision::Deny,
+                rule: mod_check_rule(&reason, PermissionBehavior::Deny, None),
+                reason: Some(
+                    explanation
+                        .clone()
+                        .unwrap_or_else(|| deny_reason_string(&reason, name)),
+                ),
+            },
+            PermissionResult::Ask { reason, prompt, .. } => {
+                let allowed_without_classifier = read_only_default_auto_allows(name, &reason, mode)
+                    || (mode == PermissionMode::Auto
+                        && reason_allows_classifier(&reason)
+                        && (self.accept_edits_fast_path(
+                            name,
+                            input,
+                            &folded,
+                            ctx.workspace_lease_token,
+                        ) || crate::mode_policy::is_auto_mode_safe_tool(name)));
+                if allowed_without_classifier {
+                    ModToolCheckVerdict {
+                        decision: ModToolCheckDecision::Allow,
+                        rule: mod_check_rule(
+                            &reason,
+                            PermissionBehavior::Allow,
+                            ctx.matched_ask_rule.as_ref(),
+                        ),
+                        reason: None,
+                    }
+                } else {
+                    ModToolCheckVerdict {
+                        decision: ModToolCheckDecision::Ask,
+                        rule: mod_check_rule(
+                            &reason,
+                            PermissionBehavior::Ask,
+                            ctx.matched_ask_rule.as_ref(),
+                        ),
+                        reason: Some(match &reason {
+                            PermissionDecisionReason::MatchedRule { .. } => format!(
+                                "LingXi requested permissions to use {name}, but you haven't granted it yet."
+                            ),
+                            _ => prompt.message.clone(),
+                        }),
+                    }
+                }
+            }
+        };
+        let mut verdict = verdict;
+        verdict.reason = verdict.reason.filter(|reason| !reason.is_empty());
+        Some(core_permission::PermissionToolCheckEvaluation {
+            result: core_result,
+            effective_mode: core_permission_mode(mode),
+            verdict,
+            ceiling: ctx.tool_check_ceiling,
+        })
+    }
+
+    async fn resolve_tool_check_execution(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+        evaluation: &core_permission::PermissionToolCheckEvaluation,
+    ) -> Result<PermissionResolution, PermissionAbort> {
+        // Finish the ToolCheck snapshot only after Mod has returned. The raw
+        // authorization, ordered subcommand result tree, and live rule citation
+        // all come from the one captured result; execution-only transforms are
+        // applied here without consulting the rule overlay a second time.
+        let folded = self.fold_call_context(ctx);
+        let mode = permission_mode_from_core(evaluation.effective_mode);
+        let result = permission_result_from_core(&evaluation.result);
+        let result = if mode == PermissionMode::DontAsk
+            && !matches!(tool_default(name), PromptDefault::AllowByDefault)
+            && matches!(&result, PermissionResult::Ask { .. })
+        {
+            PermissionResult::Deny {
+                reason: PermissionDecisionReason::PermissionMode { mode },
+                explanation: None,
+                metadata: PermissionMetadata::default(),
+            }
+        } else {
+            result
+        };
+        self.resolve_with_mode(
+            mode,
+            result,
+            name,
+            input,
+            ctx.is_non_interactive_session || folded.should_avoid_permission_prompts,
+            &|| self.accept_edits_fast_path(name, input, &folded, ctx.workspace_lease_token),
+        )
+        .await
+    }
+
+    async fn ask_tool_check_via_transport(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+        evaluation: &core_permission::PermissionToolCheckEvaluation,
+        resolution: &PermissionResolution,
+    ) -> PermissionOutcome {
+        let mode = permission_mode_from_core(evaluation.effective_mode);
+        let result = permission_result_from_core(&evaluation.result);
+        let PermissionResult::Ask {
+            reason, metadata, ..
+        } = result
+        else {
+            return PermissionOutcome::Deny {
+                reason: format!(
+                    "Permission to use {name} cannot be prompted from a non-Ask ToolCheck result"
+                ),
+            };
+        };
+        let mut prompt_context = ctx.clone();
+        if let PermissionResolution::AskWithContext {
+            decision_reason_type,
+            decision_reason,
+        } = resolution
+        {
+            if decision_reason_type.is_some() {
+                prompt_context.decision_reason_type = decision_reason_type.clone();
+            }
+            if decision_reason.is_some() {
+                prompt_context.decision_reason = decision_reason.clone();
+            }
+        }
+        if prompt_context.decision_reason_type.is_none() {
+            prompt_context.decision_reason_type = decision_reason_type(&reason).map(str::to_string);
+        }
+        if prompt_context.decision_reason.is_none() {
+            prompt_context.decision_reason = serialize_decision_reason(&reason);
+        }
+        prompt_context.classifier_approvable = classifier_approvable(&reason);
+        prompt_context.matched_ask_rule = matched_ask_rule(&reason);
+        prompt_context.auto_mode_prompt =
+            self.auto_prompt_for_ask(mode, name, input, &reason, &prompt_context);
+        if metadata.permission_suggestions.is_some() {
+            prompt_context.permission_suggestions = metadata.permission_suggestions;
+        }
+        if metadata.blocked_path.is_some() {
+            prompt_context.blocked_path = metadata.blocked_path;
+        }
+
+        // Execution-stage classification already ran in
+        // `resolve_tool_check_execution`. Do not re-authorize or re-run the
+        // classifier here; carry the captured result's prompt metadata directly
+        // to the same transport that `decide_outcome_with_context` would reach.
+        let outcome = self
+            .consume_auto_outcome(
+                self.check_prompt_transport(name, input, &prompt_context)
+                    .await,
+                &prompt_context,
+            )
+            .await;
+        match &outcome {
+            PermissionOutcome::Allow {
+                permission_updates, ..
+            } => {
+                self.record_auto_mode_non_deny(mode);
+                if !permission_updates.is_empty() {
+                    self.apply_permission_updates(permission_updates);
+                }
+            }
+            PermissionOutcome::AllowAuto { .. } => self.record_auto_mode_non_deny(mode),
+            PermissionOutcome::Deny { .. } => {}
+        }
+        outcome
     }
 
     /// As [`Self::check`], but forwards the originating subagent/teammate
@@ -2389,9 +3180,10 @@ impl PermissionGate for PolicyPermissionGate {
     /// if(U.shouldBlock){ refused → …; unavailable → kae(…); else → flagged } return null
     /// ```
     ///
-    /// The `handback` kinds (`send`/`flagged`/`withheld`) have no port
-    /// counterpart, so only the mode gate and the nothing-to-review gate are
-    /// applied. Whatever the review concludes, the work is still DELIVERED:
+    /// Callers skip this completed-work review for admitted `send`/`flagged`
+    /// reports; `withheld` callers omit unsent final text and can still review
+    /// performed work. This method applies the mode and nothing-to-review gates.
+    /// Whatever the review concludes, the work is still DELIVERED:
     /// this returns copy to prepend, never a denial.
     async fn review_subagent_handoff(
         &self,
@@ -2451,8 +3243,14 @@ impl PermissionGate for PolicyPermissionGate {
         let mode = folded
             .mode
             .unwrap_or_else(|| self.effective_mode_for_tool(name));
-        let result =
-            self.authorize_with_layers(name, input, mode, ctx.workspace_lease_token, &folded);
+        let result = self.authorize_with_layers(
+            name,
+            input,
+            mode,
+            ctx.workspace_lease_token,
+            &folded,
+            PermissionCheckPhase::Execution,
+        );
         self.decide_outcome_with_context(mode, result, name, input, ctx, &|| {
             self.accept_edits_fast_path(name, input, &folded, ctx.workspace_lease_token)
         })
@@ -2498,54 +3296,37 @@ impl PermissionGate for PolicyPermissionGate {
             .await;
     }
 
-    /// A PreToolUse / PermissionRequest hook `allow` skips the PROMPT but still
-    /// applies rule-based deny/ask (claude-code `resolveHookPermissionDecision` +
-    /// `checkRuleBasedPermissions`): a hook cannot override an explicit deny
-    /// rule or the active mode's mutation backstop. So run `authorize` and map
-    /// `Deny → Deny` (deny rules + mode still bind) but `Ask → Allow` (the hook
-    /// approved, so the would-be prompt is skipped) and `Allow → Allow`. Unlike
-    /// `check`, an `Ask` NEVER delegates to the inner prompt transport here — the
-    /// hook already resolved the prompt.
-    /// claude-code `lin` — resolve a **PreToolUse** hook `allow`.
-    ///
-    /// `lin` re-runs the rule/safety check ([`Self::rule_or_safety_verdict`],
-    /// the `_pt` analog) UNCONDITIONALLY — there is no "only if the hook rewrote
-    /// the input" gate — and then:
-    ///
-    /// * `deny` ⇒ the deny rule OVERRIDES the hook
-    ///   (`"…but deny rule overrides: ${u.message}"`);
-    /// * `ask`  ⇒ the call goes to the FULL permission pipeline
-    ///   (`"…but ask rule/safety check requires full permission pipeline"`), i.e.
-    ///   it PROMPTS — headless resolves that to a deny via the inner gate;
-    /// * no verdict ⇒ the hook's allow stands, prompt skipped.
-    ///
-    /// The third arm is why the mode layer must be subtracted: an ordinary
-    /// Default-mode mutating call has no rule verdict at all, so the hook allow
-    /// is honoured. Feeding the mode-backstop ask in here instead would deny
-    /// almost every hook-rescued call.
-    async fn check_after_hook_allow(&self, name: &str, input: &Value) -> PermissionDecision {
-        Self::flatten_permission_outcome(
-            self.check_after_hook_allow_impl(name, input, &PermissionCheckContext::default())
-                .await,
-        )
-    }
-
-    async fn check_after_hook_allow_ctx(
+    async fn resolve_after_hook_allow_mod_core(
         &self,
         name: &str,
         input: &Value,
         ctx: &PermissionCheckContext,
-    ) -> PermissionDecision {
-        Self::flatten_permission_outcome(self.check_after_hook_allow_impl(name, input, ctx).await)
-    }
-
-    async fn check_after_hook_allow_outcome_ctx(
-        &self,
-        name: &str,
-        input: &Value,
-        ctx: &PermissionCheckContext,
-    ) -> PermissionOutcome {
-        self.check_after_hook_allow_impl(name, input, ctx).await
+    ) -> Result<core_permission::HookAllowModCoreEvaluation, PermissionAbort> {
+        let folded = self.fold_call_context(ctx);
+        let (mode, verdict) =
+            self.rule_or_safety_verdict(name, input, ctx.workspace_lease_token, &folded);
+        match verdict {
+            Some(result) => {
+                let evaluation =
+                    hook_allow_preflight_tool_check_evaluation(name, &result, mode, ctx);
+                let resolution = self
+                    .resolve_with_mode(PermissionMode::Default, result, name, input, true, &|| {
+                        false
+                    })
+                    .await?;
+                Ok(core_permission::HookAllowModCoreEvaluation {
+                    resolution,
+                    evaluation: Some(evaluation),
+                })
+            }
+            None => Ok(core_permission::HookAllowModCoreEvaluation {
+                resolution: PermissionResolution::Allow {
+                    rule_source: None,
+                    classifier_approved: false,
+                },
+                evaluation: None,
+            }),
+        }
     }
 
     /// claude-code `Fxy` + `epr` — resolve a **PermissionRequest** (headless
@@ -2658,6 +3439,7 @@ impl PermissionGate for PolicyPermissionGate {
             PermissionMode::Plan,
             ctx.workspace_lease_token,
             &folded,
+            PermissionCheckPhase::Execution,
         );
         self.resolve_with_mode(
             PermissionMode::Plan,
@@ -2709,8 +3491,14 @@ impl PermissionGate for PolicyPermissionGate {
         let mode = folded
             .mode
             .unwrap_or_else(|| self.effective_mode_for_tool(name));
-        let result =
-            self.authorize_with_layers(name, input, mode, ctx.workspace_lease_token, &folded);
+        let result = self.authorize_with_layers(
+            name,
+            input,
+            mode,
+            ctx.workspace_lease_token,
+            &folded,
+            PermissionCheckPhase::Execution,
+        );
         // An `avoid_prompts` LAYER is the per-call twin of the flat
         // `is_non_interactive_session` field (`shouldAvoidPermissionPrompts`).
         self.resolve_with_mode(
@@ -3145,6 +3933,46 @@ fn rule_settings_source(reason: &PermissionDecisionReason) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Native `Ast` (`tool.check`) reports a direct rule first, then the first
+/// same-behavior rule found by walking `subcommandResults` in insertion order.
+/// `matchedAskRule` is a final fallback for non-deny decisions; the Rust port
+/// only uses it when an upstream caller supplied that fact explicitly.
+fn mod_check_rule(
+    reason: &PermissionDecisionReason,
+    behavior: PermissionBehavior,
+    matched_ask_rule: Option<&MatchedAskRule>,
+) -> Option<String> {
+    let direct_or_nested = match reason {
+        // Native gives a direct decision reason priority without rechecking the
+        // rule's behavior; mode transforms can retain the matched rule reason.
+        PermissionDecisionReason::MatchedRule { rule } => Some(rule.value.to_rule_string()),
+        PermissionDecisionReason::SubcommandResults { reasons } => {
+            reasons.values().find_map(|result| {
+                let (child_behavior, child_reason) = match result.as_ref() {
+                    PermissionResult::Allow { reason, .. } => (PermissionBehavior::Allow, reason),
+                    PermissionResult::Deny { reason, .. } => (PermissionBehavior::Deny, reason),
+                    PermissionResult::Ask { reason, .. } => (PermissionBehavior::Ask, reason),
+                };
+                (child_behavior == behavior)
+                    .then(|| mod_check_rule(child_reason, behavior, None))
+                    .flatten()
+            })
+        }
+        _ => None,
+    };
+
+    direct_or_nested.or_else(|| {
+        (behavior != PermissionBehavior::Deny)
+            .then_some(matched_ask_rule)
+            .flatten()
+            .map(|rule| PermissionRuleValue {
+                tool_name: rule.tool_name.clone(),
+                rule_content: rule.rule_content.clone(),
+            })
+            .map(|rule| rule.to_rule_string())
+    })
 }
 
 #[cfg(test)]

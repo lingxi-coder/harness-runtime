@@ -878,7 +878,7 @@ mod command_arm_tests {
             assert_eq!(r.stdout, "{bad");
             assert_eq!(
                 r.stderr,
-                "hook response is not valid JSON: key must be a string at line 1 column 2"
+                "hook response is not valid JSON: invalid exact JSON at byte 1: expected JSON string"
             );
             assert!(r.response.is_none());
         }
@@ -1870,10 +1870,11 @@ mod command_arm_tests {
             .await;
 
         assert_eq!(agg.decision, Some(HookDecision::Block));
-        assert!(agg
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("timed out")));
+        assert!(
+            agg.reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("timed out"))
+        );
     }
 
     #[tokio::test]
@@ -1929,7 +1930,10 @@ mod command_arm_tests {
             )
             .await;
         assert_eq!(agg.decision, None, "post decisions never gate");
-        assert_eq!(agg.additional_contexts, vec!["warm the new model"]);
+        assert_eq!(
+            agg.additional_contexts,
+            vec![crate::response::ExactHookText::from_text("warm the new model")]
+        );
     }
 
     #[tokio::test]
@@ -2554,6 +2558,75 @@ mod command_arm_tests {
         let (_marker, body) = build_envelope_body(&ev, &ctx).expect("must serialize");
         assert!(body.contains(r#""action":"cancel""#), "{body}");
     }
+    #[tokio::test]
+    async fn subagent_stop_command_uses_published_child_path_cwd_and_last_message() {
+        let child_worktree = tempfile::tempdir().unwrap();
+        let child_cwd = child_worktree.path().to_path_buf();
+        let process = MockRunner::ok(output("", "", 0));
+        let mut hook = command_hook();
+        hook.events = vec![HookEventType::SubagentStop];
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let executor = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_process_runner(process.clone(), Arc::new(StubSandbox));
+        let session = lingxi_core::types::SessionId::new();
+        let child = lingxi_core::types::AgentId::new();
+        executor.publish_agent_prompt_transcript(
+            session,
+            child,
+            crate::HookModelSelection {
+                model: "child-model".into(),
+                model_profile: Some("child-profile".into()),
+            },
+            crate::PromptHookTranscript::default(),
+            crate::AgentStopMetadata {
+                agent_transcript_path: "/tmp/child/subagents/agent-real-child.jsonl".into(),
+                cwd: child_cwd.clone(),
+                last_assistant_message: Some("child final answer".into()),
+                depth: Some(3),
+                ..Default::default()
+            },
+        );
+        executor
+            .execute_excluding_agent(
+                HookEvent::SubagentStop {
+                    agent_id: child,
+                    agent_type: "reviewer".into(),
+                    status: "completed".into(),
+                },
+                HookContext {
+                    session_id: session,
+                    cwd: "/tmp/parent-workspace".into(),
+                    last_assistant_message: Some("parent final answer".into()),
+                    agent_transcript_path: Some("/tmp/parent.jsonl".into()),
+                    ..Default::default()
+                },
+                child,
+            )
+            .await;
+        let payload: serde_json::Value =
+            serde_json::from_str(process.recorded_stdin.lock().unwrap().as_ref().unwrap()).unwrap();
+        assert_eq!(
+            payload["agent_transcript_path"],
+            "/tmp/child/subagents/agent-real-child.jsonl"
+        );
+        assert_eq!(payload["last_assistant_message"], "child final answer");
+        assert_eq!(payload["cwd"], child_cwd.to_string_lossy().as_ref());
+        assert_eq!(
+            process
+                .recorded_cwd
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .as_deref(),
+            Some(child_cwd.as_path())
+        );
+    }
 }
 
 // ============================================================================
@@ -2588,12 +2661,12 @@ mod async_path_tests {
 
     #[derive(Default)]
     struct AsyncRecordingSink {
-        seen: StdMutex<Vec<serde_json::Value>>,
+        seen: StdMutex<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     }
 
     #[async_trait]
     impl HookAttachmentSink for AsyncRecordingSink {
-        async fn record(&self, attachment: serde_json::Value) {
+        async fn record(&self, attachment: lingxi_core::types::utf16_json::Utf16JsonProjection) {
             self.seen.lock().unwrap().push(attachment);
         }
     }
@@ -2906,16 +2979,23 @@ mod async_path_tests {
         let agg = exec.execute(pre_event(), HookContext::default()).await;
         assert!(agg.hook_attachments.is_empty());
 
-        let (got_id, got) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        let envelope = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("completion must publish before timeout")
             .expect("completion channel stays open");
+        let got_id = envelope.hook_id;
+        let got = envelope.result;
+        let hook_event = envelope.hook_event;
         assert_eq!(got_id, hook_id);
-        assert_eq!(got.stdout, "async complete\n");
+        assert_eq!(hook_event.as_deref(), Some("PreToolUse"));
+        // The deferred consumer receives the formatted output, while the run
+        // attachment retains the process's original stdout.
+        assert_eq!(got.stdout, "async complete");
         let seen = sink.seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0]["type"], "hook_success");
-        assert_eq!(seen[0]["content"], "async complete");
+        assert_eq!(seen[0].value["type"], "hook_success");
+        assert_eq!(seen[0].value["content"], got.stdout);
+        assert_eq!(seen[0].value["stdout"], "async complete\n");
     }
 
     #[tokio::test]
@@ -2952,11 +3032,11 @@ mod async_path_tests {
             .await;
         assert!(agg.hook_attachments.is_empty());
 
-        let (got_id, _got) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        let envelope = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("completion must publish before timeout")
             .expect("completion channel stays open");
-        assert_eq!(got_id, hook_id);
+        assert_eq!(envelope.hook_id, hook_id);
         let envs = runner.recorded_env.lock().unwrap().clone();
         assert_eq!(envs.len(), 1);
         assert_eq!(
@@ -2995,17 +3075,18 @@ mod async_path_tests {
         assert!(agg.hook_attachments.is_empty());
         ran.notified().await;
 
-        let (got_id, got) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        let envelope = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("timeout result must publish")
             .expect("completion channel stays open");
-        assert_eq!(got_id, hook_id);
+        assert_eq!(envelope.hook_id, hook_id);
+        let got = envelope.result;
         assert!(matches!(got.outcome, HookOutcome::Timeout));
         let seen = sink.seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0]["type"], "hook_cancelled");
-        assert_eq!(seen[0]["timedOut"], true);
-        assert_eq!(seen[0]["timeoutMs"], 10);
+        assert_eq!(seen[0].value["type"], "hook_cancelled");
+        assert_eq!(seen[0].value["timedOut"], true);
+        assert_eq!(seen[0].value["timeoutMs"], 10);
     }
 
     /// (2) + (3) The registry records the in-flight handle and publishes the
@@ -3040,8 +3121,9 @@ mod async_path_tests {
 
         // Release the hook; its result must land on completion_tx keyed by id.
         gate.notify_one();
-        let (got_id, got) = rx.recv().await.expect("completion must publish");
-        assert_eq!(got_id, hook_id);
+        let envelope = rx.recv().await.expect("completion must publish");
+        assert_eq!(envelope.hook_id, hook_id);
+        let got = envelope.result;
         assert!(matches!(got.outcome, HookOutcome::Success));
         assert_eq!(got.exit_code, Some(0));
     }
@@ -3066,8 +3148,9 @@ mod async_path_tests {
 
         let agg = exec.execute(pre_event(), HookContext::default()).await;
         assert!(agg.all_results.is_empty());
-        let (got_id, got) = rx.recv().await.expect("completion must publish");
-        assert_eq!(got_id, hook_id);
+        let envelope = rx.recv().await.expect("completion must publish");
+        assert_eq!(envelope.hook_id, hook_id);
+        let got = envelope.result;
         assert!(matches!(got.outcome, HookOutcome::Success));
         assert!(
             registry.read().await.all_hooks().is_empty(),
@@ -3204,9 +3287,9 @@ mod async_path_tests {
 
         // The async hook still RAN (fire-and-forget) — its completion lands on
         // the channel keyed by its own id, and it was never in the aggregate.
-        let (got_id, _got) = rx.recv().await.expect("async hook completion publishes");
+        let envelope = rx.recv().await.expect("async hook completion publishes");
         assert_eq!(
-            got_id, async_id,
+            envelope.hook_id, async_id,
             "the backgrounded completion is the async hook's, separate from the aggregate",
         );
 
@@ -3432,25 +3515,27 @@ mod async_path_tests {
 
         // The eventual output folds back on completion_tx, keyed by hook id and
         // mapped through the command-hook contract.
-        let (got_id, got) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        let envelope = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("fold-back must publish before the timeout")
             .expect("completion channel stays open");
-        assert_eq!(got_id, hook_id);
+        assert_eq!(envelope.hook_id, hook_id);
+        let got = envelope.result;
         assert!(matches!(got.outcome, HookOutcome::Success));
         assert_eq!(
             got.response
                 .as_ref()
-                .and_then(|r| r.additional_context.as_deref()),
+                .and_then(|r| r.additional_context.as_ref())
+                .map(|text| text.display.as_str()),
             Some("async done"),
             "the eventual additionalContext must survive the fold-back mapping"
         );
         let seen = sink.seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "only the eventual completion is persisted");
-        assert_eq!(seen[0]["type"], "hook_success");
-        assert_eq!(seen[0]["content"], "");
-        assert_eq!(seen[0]["stdout"], got.stdout);
-        assert_eq!(seen[0]["exitCode"], 0);
+        assert_eq!(seen[0].value["type"], "hook_success");
+        assert_eq!(seen[0].value["content"], "");
+        assert_eq!(seen[0].value["stdout"], got.stdout);
+        assert_eq!(seen[0].value["exitCode"], 0);
     }
 
     #[tokio::test]
@@ -3579,7 +3664,7 @@ mod async_path_tests {
         assert_eq!(agg.decision, Some(HookDecision::Block));
         assert_eq!(agg.reason.as_deref(), Some("[hook.sh]: first blocker"));
         assert!(
-            agg.system_messages.iter().any(|m| m == "second ran"),
+            agg.system_messages.iter().any(|m| m.display == "second ran"),
             "the later hook's systemMessage must survive the earlier Block: {:?}",
             agg.system_messages,
         );
@@ -4591,6 +4676,7 @@ mod http_agent_dispatch_tests {
         let spawner = Arc::new(RecordingSpawner {
             recorded: Mutex::new(Vec::new()),
             result: Mutex::new(Some(Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: lingxi_core::types::AgentId::new(),
                 content: json!(r#"{"decision":"approve"}"#),
                 usage: SubagentUsage::default(),
@@ -4610,21 +4696,60 @@ mod http_agent_dispatch_tests {
             Arc::new(RwLock::new(registry)),
             Arc::new(UnusedHttp),
             Arc::new(UnusedRuntime),
-        )
-        .with_agent_spawner(spawner.clone());
+        );
+
+        let unbound = exec
+            .execute(
+                pre_event(),
+                HookContext {
+                    inherit: Some(dummy_inherit()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(matches!(
+            unbound.all_results[0].1.outcome,
+            HookOutcome::Error
+        ));
+        assert!(spawner.recorded.lock().unwrap().is_empty());
+        let binding: Arc<dyn SubagentSpawner> = spawner.clone();
+        let weak = Arc::downgrade(&binding);
+        exec.attach_agent_spawner(weak.clone());
+        drop(binding);
+        assert_eq!(Arc::strong_count(&spawner), 1, "the hook executor borrows its owner");
 
         // The Agent arm needs the inheritance bundle on the context.
         let ctx = HookContext {
             inherit: Some(dummy_inherit()),
+            model_selection: Some(crate::registry::HookModelSelection {
+                model: "child-model".into(),
+                model_profile: Some("profile-b".into()),
+            }),
+            agent_id: Some(lingxi_core::types::AgentId::new()),
+            agent_depth: Some(3),
+            permission_mode: Some("plan".into()),
+            session_id: lingxi_core::types::SessionId::new(),
             ..Default::default()
         };
-        let agg = exec.execute(pre_event(), ctx).await;
+        let agg = exec.execute(pre_event(), ctx.clone()).await;
 
         // The Agent arm reached the spawner with the hook's agent_type and a
         // prompt that spliced the template + the serialized payload.
         let recorded = spawner.recorded.lock().unwrap();
         assert_eq!(recorded.len(), 1, "the Agent arm must reach the spawner");
         assert_eq!(recorded[0].subagent_type, "general-purpose");
+        assert_eq!(
+            recorded[0].parent_model_override.as_deref(),
+            Some("child-model")
+        );
+        assert_eq!(
+            recorded[0].parent_model_profile_override.as_deref(),
+            Some("profile-b")
+        );
+        assert_eq!(recorded[0].creator_agent_id, ctx.agent_id);
+        assert_eq!(recorded[0].depth, 4);
+        assert_eq!(recorded[0].parent_permission_mode.as_deref(), Some("plan"));
+        assert_eq!(recorded[0].origin_session_id, Some(ctx.session_id));
         assert!(
             recorded[0].prompt.starts_with("vet this"),
             "prompt template is spliced ahead of the payload",
@@ -4640,6 +4765,12 @@ mod http_agent_dispatch_tests {
         assert_eq!(agg.decision, Some(HookDecision::Approve));
         let (_, r) = &agg.all_results[0];
         assert!(matches!(r.outcome, HookOutcome::Success));
+        assert_eq!(Arc::strong_count(&spawner), 1);
+        drop(spawner);
+        assert!(weak.upgrade().is_none(), "the hook binding cannot retain the spawner graph");
+        let expired = exec.execute(pre_event(), ctx).await;
+        assert!(matches!(expired.all_results[0].1.outcome, HookOutcome::Error));
+        assert!(expired.all_results[0].1.stderr.contains("agent executor not wired"));
     }
 }
 
@@ -4774,8 +4905,78 @@ mod prompt_dispatch_tests {
         }
     }
 
+    struct AggregateOnlyGuard {
+        checks: std::sync::atomic::AtomicUsize,
+        current_checks: usize,
+    }
+
+    impl crate::attachment::HookPublicationGuard for AggregateOnlyGuard {
+        fn is_current(&self) -> bool {
+            self.checks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                < self.current_checks
+        }
+
+        fn generation_cancellation_token(&self) -> Option<lingxi_core::host::CancellationToken> {
+            None
+        }
+
+        fn publish_if_current<'a>(
+            &'a self,
+            _publication: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            panic!("private aggregate preparation must not publish side effects");
+        }
+
+        fn commit_if_current<'a>(
+            &'a self,
+            _mutation: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            panic!("private aggregate preparation must not reserve a durable lease");
+        }
+    }
+
     #[tokio::test]
-    async fn parent_subagent_stop_consumes_only_matching_child_live_history() {
+    async fn sinkless_hook_output_keeps_generation_checks_without_a_durable_lease() {
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(HookRegistry::new())),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        );
+        let hook = prompt_hook();
+        let identity = attachment_identity(&pre_event());
+        let result = HookResult {
+            outcome: HookOutcome::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            response: Some(HookResponse {
+                decision: Some(HookDecision::Defer),
+                ..Default::default()
+            }),
+        };
+        // Cover a live generation, expiry before preparation, and expiry while
+        // the private outputs are being prepared.
+        for (current_checks, expected_output) in [(2, true), (0, false), (1, false)] {
+            let guard = AggregateOnlyGuard {
+                checks: std::sync::atomic::AtomicUsize::new(0),
+                current_checks,
+            };
+            let mut aggregate = AggregateHookResult::default();
+            let outputs = exec
+                .publish_run_attachment(&mut aggregate, &hook, &identity, &result, 0, Some(&guard))
+                .await;
+            assert_eq!(outputs.is_some(), expected_output);
+            assert_eq!(
+                aggregate.hook_attachments.len(),
+                usize::from(expected_output),
+                "expired private outputs must not enter the aggregate"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn parent_subagent_stop_consumes_matching_child_history_and_route() {
         let runner = Arc::new(RecordingRunner {
             recorded: Mutex::new(Vec::new()),
             result: Mutex::new(Some(Ok(r#"{"ok":true,"reason":"child complete"}"#.into()))),
@@ -4783,6 +4984,11 @@ mod prompt_dispatch_tests {
         let mut registry = HookRegistry::new();
         let mut hook = prompt_hook();
         hook.events = vec![HookEventType::SubagentStop];
+        hook.executor = DefHookExecutor::Prompt {
+            prompt: "Child complete? $ARGUMENTS".into(),
+            model: None,
+            continue_on_block: false,
+        };
         registry.register(hook);
         let exec = HookExecutorImpl::new(
             Arc::new(RwLock::new(registry)),
@@ -4802,8 +5008,28 @@ mod prompt_dispatch_tests {
             ..Default::default()
         };
         let child_snapshot = snapshot("child-only unpersisted evidence");
-        exec.publish_agent_prompt_transcript(session, child, child_snapshot.clone());
-        exec.publish_agent_prompt_transcript(session, other, snapshot("other child"));
+        let parent_route = crate::HookModelSelection {
+            model: "shared-model".into(),
+            model_profile: Some("left".into()),
+        };
+        let child_route = crate::HookModelSelection {
+            model: "shared-model".into(),
+            model_profile: Some("right".into()),
+        };
+        exec.publish_agent_prompt_transcript(
+            session,
+            child,
+            child_route.clone(),
+            child_snapshot.clone(),
+            Default::default(),
+        );
+        exec.publish_agent_prompt_transcript(
+            session,
+            other,
+            parent_route.clone(),
+            snapshot("other child"),
+            Default::default(),
+        );
         exec.execute_excluding_agent(
             HookEvent::SubagentStop {
                 agent_id: child,
@@ -4813,12 +5039,23 @@ mod prompt_dispatch_tests {
             HookContext {
                 session_id: session,
                 prompt_transcript: Some(snapshot("parent must not leak")),
+                model_selection: Some(parent_route),
+                permission_mode: Some("plan".into()),
                 ..Default::default()
             },
             child,
         )
         .await;
         let calls = runner.recorded.lock().unwrap();
+        assert!(
+            calls[0].model.is_none(),
+            "the default evaluator route is exercised"
+        );
+        assert_eq!(calls[0].model_selection.as_ref(), Some(&child_route));
+        assert!(
+            calls[0].prompt.contains(r#""permission_mode":"plan""#),
+            "the parent still owns the hook's base permission metadata"
+        );
         assert_eq!(
             calls[0].transcript.as_ref().unwrap().messages,
             child_snapshot.messages
@@ -4826,9 +5063,10 @@ mod prompt_dispatch_tests {
         assert_eq!(calls[0].transcript.as_ref().unwrap().last_usage_tokens, 321);
         drop(calls);
         assert!(exec.take_agent_prompt_transcript(session, child).is_none());
-        assert!(exec
-            .take_agent_prompt_transcript(lingxi_core::types::SessionId::new(), other)
-            .is_none());
+        assert!(
+            exec.take_agent_prompt_transcript(lingxi_core::types::SessionId::new(), other)
+                .is_none()
+        );
         exec.clear_session_hooks(session).await;
         assert!(exec.take_agent_prompt_transcript(session, other).is_none());
     }
@@ -4848,7 +5086,19 @@ mod prompt_dispatch_tests {
         )
         .with_prompt_runner(runner.clone());
 
-        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        let selection = crate::registry::HookModelSelection {
+            model: "child-model".into(),
+            model_profile: Some("profile-b".into()),
+        };
+        let agg = exec
+            .execute(
+                pre_event(),
+                HookContext {
+                    model_selection: Some(selection.clone()),
+                    ..Default::default()
+                },
+            )
+            .await;
 
         // The Prompt arm reached the runner with the substituted prompt + the
         // serialized event payload + the model override.
@@ -4866,6 +5116,11 @@ mod prompt_dispatch_tests {
             "the serialized event payload is spliced into $ARGUMENTS",
         );
         assert_eq!(recorded[0].model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(recorded[0].model_selection.as_ref(), Some(&selection));
+        assert!(
+            !recorded[0].prompt.contains("child-model"),
+            "route authority stays outside the event payload"
+        );
         drop(recorded);
         // The runner's `{ok:false}` verdict surfaces as a Block decision.
         assert_eq!(agg.decision, Some(HookDecision::Block));

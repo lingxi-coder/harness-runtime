@@ -184,6 +184,64 @@ pub trait FileSystem: Send + Sync {
         self.create_new_file(&path.to_string_lossy()).await
     }
 
+    /// Write contents through the exclusive, no-follow handle that allocated
+    /// the leaf. Unsupported hosts fail rather than create and reopen a file.
+    async fn write_new_file_rooted_no_follow(
+        &self,
+        _root: &Path,
+        _relative: &Path,
+        _content: &str,
+    ) -> Result<(), FsError> {
+        Err(FsError::Io(
+            "exclusive rooted content writes are unsupported by this filesystem".into(),
+        ))
+    }
+
+    /// Validate an existing regular, single-link leaf through a rooted handle,
+    /// without reading its contents. Unsupported hosts fail closed.
+    async fn validate_file_rooted_single_link(
+        &self,
+        _root: &Path,
+        _relative: &Path,
+    ) -> Result<(), FsError> {
+        Err(FsError::Io(
+            "rooted single-link validation is unsupported".into(),
+        ))
+    }
+
+    /// Append and sync the allocated file and its containing directory before
+    /// a recipient acknowledges consumption of a durable journal entry.
+    async fn append_file_rooted_durable(
+        &self,
+        _root: &Path,
+        _relative: &Path,
+        _content: &str,
+    ) -> Result<(), FsError> {
+        Err(FsError::Io("durable rooted appends are unsupported".into()))
+    }
+
+    /// Sync an existing regular file without following symlinks below root.
+    async fn sync_file_rooted_no_follow(
+        &self,
+        _root: &Path,
+        _relative: &Path,
+    ) -> Result<(), FsError> {
+        Err(FsError::Io(
+            "rooted file synchronization is unsupported".into(),
+        ))
+    }
+
+    /// Truncate and sync a regular file after its journal has proved that its
+    /// suffix is an incomplete append. This never creates the target.
+    async fn truncate_file_rooted_no_follow(
+        &self,
+        _root: &Path,
+        _relative: &Path,
+        _length: u64,
+    ) -> Result<(), FsError> {
+        Err(FsError::Io("rooted file truncation is unsupported".into()))
+    }
+
     /// Capture a stable root-directory identity when the platform supports
     /// handle-relative filesystem operations. Virtual filesystems return
     /// `None` and retain their existing path-based behavior.

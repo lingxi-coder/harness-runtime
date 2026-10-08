@@ -12,6 +12,7 @@ pub mod api_key_helper;
 #[cfg(not(loom))]
 pub mod callback;
 pub mod credential_provider;
+pub mod environment;
 pub mod handle;
 pub mod limits;
 pub mod login;

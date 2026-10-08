@@ -1,7 +1,7 @@
 //! LLM-driven memory selector — routes through [`SideQueryClient`] (Plan 08).
 //!
 //! Closes spec gap **C1**: §6.3 memory selector now issues a real side
-//! query (Haiku-class model, JSON structured output) instead of the
+//! query (the live session's model and profile, JSON structured output) instead of the
 //! deterministic stub shipped in Plan 04. The selector is invoked once per
 //! turn (in parallel with the main API call) and returns a small set of
 //! memory file paths to surface in the next prompt.
@@ -16,8 +16,6 @@ const MAX_SELECTOR_DESCRIPTION_CHARS: usize = 200;
 
 /// Selects which available memory files are relevant to the current turn.
 pub struct MemorySelector {
-    /// Model identifier used for the side query.
-    pub selector_model: String,
     /// Hard cap on how many files are returned per call.
     pub max_selected: usize,
     client: Arc<dyn SideQueryClient>,
@@ -26,11 +24,11 @@ pub struct MemorySelector {
 impl MemorySelector {
     /// Build a selector that issues side queries through `client`.
     ///
-    /// Engine defaults: Haiku-class model, 5 files per turn.
+    /// Select at most five files per turn. The caller supplies the live route
+    /// for each selection so model switches also affect memory queries.
     #[must_use]
     pub fn new(client: Arc<dyn SideQueryClient>) -> Self {
         Self {
-            selector_model: "claude-haiku-4-5".into(),
             max_selected: 5,
             client,
         }
@@ -42,6 +40,8 @@ impl MemorySelector {
     /// JSON object `{ "filenames": ["..."] }` of basenames. The result is
     /// intersected with `available`, deduplicated against `already`, and
     /// truncated to [`Self::max_selected`].
+    /// `model` and `profile` identify the current session route, including an
+    /// explicit profile when several providers offer the same model identifier.
     ///
     /// # Errors
     ///
@@ -50,6 +50,8 @@ impl MemorySelector {
     pub async fn select_relevant(
         &self,
         query: &str,
+        model: &str,
+        profile: Option<&str>,
         available: &[MemoryFile],
         recent_tools: &[String],
         already: &HashSet<PathBuf>,
@@ -65,8 +67,8 @@ impl MemorySelector {
         let prompt = build_selector_prompt(query, &candidates, recent_tools);
         let req = SideQueryRequest {
             model_attempt: None,
-            model: self.selector_model.clone(),
-            profile: None,
+            model: model.to_string(),
+            profile: profile.map(str::to_string),
             system_prompt: Some("You select memory files relevant to the query.".into()),
             messages: vec![lingxi_core::types::ConversationMessage::user(
                 lingxi_core::types::MessageId::new(),
@@ -311,6 +313,54 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingClient(std::sync::Mutex<Vec<(String, Option<String>)>>);
+
+    #[async_trait]
+    impl SideQueryClient for RecordingClient {
+        async fn query(&self, req: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
+            self.0.lock().unwrap().push((req.model, req.profile));
+            Ok(SideQueryResponse {
+                text: None,
+                structured: Some(serde_json::json!({ "filenames": ["guide.md"] })),
+                tool_calls: Vec::new(),
+                usage: cost::Usage::default(),
+                stop_reason: Some("end_turn".into()),
+                retry_count: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn selector_preserves_each_invocations_model_and_profile() {
+        let client = Arc::new(RecordingClient::default());
+        let selector = MemorySelector::new(client.clone());
+        let available = vec![memory_file("/project/guide.md")];
+        let routes = [
+            ("gpt-4o", Some("openai")),
+            ("gemini-2.5-pro", Some("google")),
+            ("shared-model", Some("gateway-a")),
+            ("shared-model", Some("gateway-b")),
+            ("custom-model", None),
+        ];
+
+        for (model, profile) in routes {
+            let selected = selector
+                .select_relevant("query", model, profile, &available, &[], &HashSet::new())
+                .await
+                .unwrap();
+            assert_eq!(selected, vec![PathBuf::from("/project/guide.md")]);
+        }
+
+        assert_eq!(
+            *client.0.lock().unwrap(),
+            routes
+                .into_iter()
+                .map(|(model, profile)| (model.to_string(), profile.map(str::to_string)))
+                .collect::<Vec<_>>()
+        );
+    }
+
     fn memory_file(path: &str) -> MemoryFile {
         MemoryFile {
             path: PathBuf::from(path),
@@ -367,7 +417,14 @@ mod tests {
             memory_file("/project/shared.md"),
         ];
         let selected = selector
-            .select_relevant("query", &available, &[], &HashSet::new())
+            .select_relevant(
+                "query",
+                "test-model",
+                None,
+                &available,
+                &[],
+                &HashSet::new(),
+            )
             .await
             .unwrap();
         assert!(
@@ -386,7 +443,14 @@ mod tests {
             memory_file("/project/shared.md"),
         ];
         let selected = selector
-            .select_relevant("query", &available, &[], &HashSet::new())
+            .select_relevant(
+                "query",
+                "test-model",
+                None,
+                &available,
+                &[],
+                &HashSet::new(),
+            )
             .await
             .unwrap();
         assert_eq!(selected, vec![PathBuf::from("/project/shared.md")]);

@@ -1,0 +1,350 @@
+{
+  "version": "2.1.288",
+  "native_sha256": "bbe93063f7a0879a1021b2891e5c9354e5b3b98433e32efe6750f7710afed750",
+  "sourceByteRanges": [
+    {
+      "label": "actual Vfe beta identity",
+      "start": 180411726,
+      "end": 180411779,
+      "sha256": "ed82709f2c172ad02f3c1d478050ae36d0df80713115830f266fb807ccdb0796"
+    },
+    {
+      "label": "actual W2e beta identity",
+      "start": 180411245,
+      "end": 180411308,
+      "sha256": "b624e98470fadcf6f0476ccf1c3e7b107e7425a018b0df3f7c46da240eba94ac"
+    },
+    {
+      "label": "actual cEe beta identity",
+      "start": 180412789,
+      "end": 180412860,
+      "sha256": "0137bd5c2d938b1b8446f9e20e6b7b079f472202345bac1f2911701cfee40956"
+    },
+    {
+      "label": "actual aY= beta identity",
+      "start": 180411576,
+      "end": 180411638,
+      "sha256": "96047551c6fc8aad0839681a60c9b58d164614b55322a222b086d2856c734eaf"
+    },
+    {
+      "label": "actual uv= beta identity",
+      "start": 180412004,
+      "end": 180412072,
+      "sha256": "d039abb6c96435910658ba63af366d2c087b98ddee4cb730eece196b336840eb"
+    },
+    {
+      "label": "actual APIError construction and message bytes",
+      "start": 178900549,
+      "end": 178901435,
+      "sha256": "531a21ec593b29b07fe7760c39e800c88559611aedebef98436456455c4bd0f7"
+    },
+    {
+      "label": "actual capability boundaries",
+      "start": 186225291,
+      "end": 186225516,
+      "sha256": "8447893643bca60c0235f3f9ebe07bd6e69d5ec04affaa96ccf3b5d40e59add3"
+    },
+    {
+      "label": "actual context predicates",
+      "start": 186225571,
+      "end": 186225870,
+      "sha256": "c57ab5b3bc328c9c868e17304657f15a3f3873fefd276104377bf430ea8eab28"
+    },
+    {
+      "label": "actual thinking signature copy",
+      "start": 186226441,
+      "end": 186226832,
+      "sha256": "b0f85c41e84bcd8adbb524cf4d93ea83e3994c2e3e4165923fc5955dac504746"
+    },
+    {
+      "label": "actual signature guard",
+      "start": 187976123,
+      "end": 187976243,
+      "sha256": "5024a6b405efd3984915797de224cd0b2db5ef19ba90925d9a996d1ffafc1a29"
+    },
+    {
+      "label": "actual prefix mismatch and declined guard",
+      "start": 187975190,
+      "end": 187975546,
+      "sha256": "f510a961730e592fbf667b112273cc4ef36304dd1e1055c14ef2b04b0d42c1ea"
+    },
+    {
+      "label": "actual context, credit, organization and output-filter guards",
+      "start": 187958797,
+      "end": 187959484,
+      "sha256": "344c20fe2f8eba47b77717796a3afa0b5d97ae2a6015450cb0a330039614296c"
+    },
+    {
+      "label": "actual encrypted-content and advisor guards",
+      "start": 187968045,
+      "end": 187968669,
+      "sha256": "e823931391425135677794935dd160c5d89a005e283ec4aab4796c4fb36b99f6"
+    },
+    {
+      "label": "actual mid-system recognition",
+      "start": 186227854,
+      "end": 186228635,
+      "sha256": "0c96681508b02705fd88c0772adaa301a01d57ac8cde2e51a9676b779ea4ae59"
+    },
+    {
+      "label": "actual mid-system guard",
+      "start": 187972418,
+      "end": 187972577,
+      "sha256": "5ebd32356befc2ed3a857cc90ffa54cc828378c21c73f15d00f8cf133bebcec3"
+    },
+    {
+      "label": "actual fast-mode guard",
+      "start": 188948219,
+      "end": 188948343,
+      "sha256": "cf2d8ee7af6f157c246dd0d359eb2bfea14153d7cd03166c0e80b69b3cbb67ae"
+    },
+    {
+      "label": "actual structured error envelope test",
+      "start": 181200785,
+      "end": 181200892,
+      "sha256": "aefe48c343003d28caa1b9c7e28b8763145d4291ab6e2ce6ae5cd8f7286c9fde"
+    },
+    {
+      "label": "actual DLP and policy guards",
+      "start": 181197518,
+      "end": 181197700,
+      "sha256": "4b090c6f53b0f974a4e363bec6623438dea6fec43fb34a5282748a20e54fb798"
+    },
+    {
+      "label": "actual error-code extraction",
+      "start": 181198111,
+      "end": 181198206,
+      "sha256": "135d7e9cf7e698a3847cb0c55c651c0f53deed16b74986302e8fc3e5c8d94f55"
+    },
+    {
+      "label": "actual disabled guard",
+      "start": 187954907,
+      "end": 187954932,
+      "sha256": "3abceaa189560b59a961f7c23ee405e1c71c4cdac6a6fa391d22b5b84d77fb66"
+    },
+    {
+      "label": "actual disabled provider guard",
+      "start": 187955261,
+      "end": 187955292,
+      "sha256": "02a5bb3e902c0ab9c1b84295a74f1a55b9315f41b8da4fb2cb2012b333a61c56"
+    },
+    {
+      "label": "actual first-line error extraction",
+      "start": 187967216,
+      "end": 187967364,
+      "sha256": "095fdf2eb7f88f40e5e469c0bde85c5291e907f20ad2d21e7f754898443f6954"
+    },
+    {
+      "label": "actual beta header matching",
+      "start": 187972378,
+      "end": 187972418,
+      "sha256": "84681afe9ac5ebc8fa90c6348e34afdf07db5c235a17b35cb7a6e16cc47ad510"
+    },
+    {
+      "label": "actual display validation pattern",
+      "start": 187969306,
+      "end": 187969372,
+      "sha256": "c811fa61f4b99657a7f4cb54378f2dda43dceb41e319db300cb228f6a3bfbdbe"
+    },
+    {
+      "label": "actual kMe and SMe named beta policy",
+      "start": 187969875,
+      "end": 187970437,
+      "sha256": "8fc96af1544f757f040638b715cb52f4bdfbfb686e6366ec8d442afab31f0e70"
+    },
+    {
+      "label": "actual complete GGt composition",
+      "start": 188935319,
+      "end": 188935435,
+      "sha256": "79423c5ca6d86383f2123a810c72615a01c1c0df3329702465b273f99544e3de"
+    },
+    {
+      "label": "actual earlier first-party token-count repair",
+      "start": 189031078,
+      "end": 189031448,
+      "sha256": "832c93229c96633e4b94e2d85eba3414532cbaad6a2526407d77fef53aff5255"
+    },
+    {
+      "label": "actual named beta callback",
+      "start": 189031448,
+      "end": 189031748,
+      "sha256": "f6208f53937c4b23ff34e1b51a7b6fb4b03e8dcf0028e7e52c1af51e02116a18"
+    },
+    {
+      "label": "actual immediate conversation and model latch commit",
+      "start": 188981214,
+      "end": 188981428,
+      "sha256": "7b41517cc536ac446225c0c01822646d2f05158ec234aabbc289f4fa92a22295"
+    },
+    {
+      "label": "actual invalid-beta predicate",
+      "start": 187969765,
+      "end": 187969875,
+      "sha256": "338f0a9ebd05771a0412cdbf9cbcd0b0b909fdc90e48313c48ce08a6899d6462"
+    },
+    {
+      "label": "native bare-wire identity branch",
+      "start": 181784578,
+      "end": 181786220,
+      "sha256": "a8dc62504ed57584f9cccb54b1547685454072f959957ed49d49561ebb7eda22"
+    },
+    {
+      "label": "native date identity suffix",
+      "start": 181786220,
+      "end": 181786266,
+      "sha256": "10ac7a6ea7ab70a7311b875d00a3c631bd07c2a8d2a9768d3978c33faf5085e7"
+    },
+    {
+      "label": "native context identity suffix",
+      "start": 179326607,
+      "end": 179326654,
+      "sha256": "32eb47e4582ab40a0b243fbc75909690c07f66515540006db5b6f15480bdb9ad"
+    },
+    {
+      "label": "actual speed/model recognition",
+      "start": 188948343,
+      "end": 188948553,
+      "sha256": "831ffabebf68f524f4da90477e38f1bb3a3457dbe3ae768de59479c152cb7dd8"
+    },
+    {
+      "label": "actual rejection, rearm and history lookup",
+      "start": 181686360,
+      "end": 181687201,
+      "sha256": "06ab8d94dc684bf9c94cfd88da67f5103541dc015b04ce54479a49f5d3b6e823"
+    },
+    {
+      "label": "actual host fast-state reset",
+      "start": 181683912,
+      "end": 181685296,
+      "sha256": "1d566eb94a73a8f70e6a5b09b2eba1280076c9bbef3c58be303a50d5867dfceb"
+    },
+    {
+      "label": "complete actual IR composition",
+      "start": 189000043,
+      "end": 189000144,
+      "sha256": "3ed0e15ca783bc632977f71082f487665c3f25b32959033daf0868840d52bfa2"
+    }
+  ],
+  "states": [
+    {
+      "operation": "reject",
+      "blocked": false,
+      "ever": false,
+      "expected": {
+        "blocked": true,
+        "ever": true,
+        "recognized": true
+      }
+    },
+    {
+      "operation": "reject",
+      "blocked": false,
+      "ever": true,
+      "expected": {
+        "blocked": true,
+        "ever": true,
+        "recognized": true
+      }
+    },
+    {
+      "operation": "reject",
+      "blocked": true,
+      "ever": false,
+      "expected": {
+        "blocked": true,
+        "ever": true,
+        "recognized": true
+      }
+    },
+    {
+      "operation": "reject",
+      "blocked": true,
+      "ever": true,
+      "expected": {
+        "blocked": true,
+        "ever": true,
+        "recognized": true
+      }
+    },
+    {
+      "operation": "rearm",
+      "blocked": false,
+      "ever": false,
+      "expected": {
+        "blocked": false,
+        "ever": false,
+        "recognized": false
+      }
+    },
+    {
+      "operation": "rearm",
+      "blocked": false,
+      "ever": true,
+      "expected": {
+        "blocked": false,
+        "ever": true,
+        "recognized": true
+      }
+    },
+    {
+      "operation": "rearm",
+      "blocked": true,
+      "ever": false,
+      "expected": {
+        "blocked": false,
+        "ever": false,
+        "recognized": false
+      }
+    },
+    {
+      "operation": "rearm",
+      "blocked": true,
+      "ever": true,
+      "expected": {
+        "blocked": false,
+        "ever": true,
+        "recognized": true
+      }
+    },
+    {
+      "operation": "reset",
+      "blocked": false,
+      "ever": false,
+      "expected": {
+        "blocked": false,
+        "ever": false,
+        "recognized": false
+      }
+    },
+    {
+      "operation": "reset",
+      "blocked": false,
+      "ever": true,
+      "expected": {
+        "blocked": false,
+        "ever": false,
+        "recognized": false
+      }
+    },
+    {
+      "operation": "reset",
+      "blocked": true,
+      "ever": false,
+      "expected": {
+        "blocked": false,
+        "ever": false,
+        "recognized": false
+      }
+    },
+    {
+      "operation": "reset",
+      "blocked": true,
+      "ever": true,
+      "expected": {
+        "blocked": false,
+        "ever": false,
+        "recognized": false
+      }
+    }
+  ]
+}

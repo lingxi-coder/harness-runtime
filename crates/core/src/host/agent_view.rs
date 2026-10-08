@@ -14,13 +14,13 @@
 //! ```
 //!
 //! So agent view is **enabled** (the default) unless the
-//! `CLAUDE_CODE_DISABLE_AGENT_VIEW` env var is truthy OR the `disableAgentView`
+//! product agent-view disable environment is truthy OR the `disableAgentView`
 //! setting is `true`. When enabled, the command list registers the redefined
 //! background-session-copy `/fork` (`vAd`) plus `/subtask` (`RAd`); when
 //! disabled, it falls back to the legacy subagent-spawn `/fork` (`SAd`) and no
 //! `/subtask`.
 //!
-//! **Wired here:** the `CLAUDE_CODE_DISABLE_AGENT_VIEW` env half of `I2i()`.
+//! **Wired here:** the product environment half of `I2i()`.
 //! The `settings.disableAgentView === true` half is a documented seam — the
 //! schema key round-trips via the engine settings model; composition roots
 //! that resolve it at boot pass the combined result to
@@ -29,14 +29,14 @@
 
 use crate::host::env::is_env_truthy;
 
-/// `CLAUDE_CODE_DISABLE_AGENT_VIEW` — the env override half of `I2i()`.
-pub const DISABLE_AGENT_VIEW_ENV: &str = "CLAUDE_CODE_DISABLE_AGENT_VIEW";
+/// Product env override half of `I2i()`.
+pub const DISABLE_AGENT_VIEW_ENV: &str = branding::DISABLE_AGENT_VIEW_ENV;
 
 /// `vO()` — is agent view enabled? Wires the env half of `I2i()`; a caller that
 /// has resolved the `disableAgentView` setting should AND its own result via
 /// [`is_enabled_with_setting`].
 ///
-/// Returns `true` (the default) unless `CLAUDE_CODE_DISABLE_AGENT_VIEW` is
+/// Returns `true` (the default) unless the product disable environment is
 /// truthy.
 #[must_use]
 pub fn is_enabled() -> bool {

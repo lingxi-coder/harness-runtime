@@ -1,24 +1,30 @@
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 
+use futures::StreamExt as _;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
+use llm_runtime::model::retry_scope::ModelCallRetryScope;
 use llm_runtime::{HistoryEvent, LlmError};
 use tokio_util::sync::CancellationToken;
 
+use super::super::hooks_impl::ModPromptScreen;
 use super::{
-    is_env_truthy, llm_response_to_pumped_turn, loop_state, prepare, token_aborted,
-    QueuedPromptInput, StepExit, StreamingIterationDisposition, TurnLoopState,
+    is_env_truthy, llm_response_to_pumped_turn, loop_state, prepare, pumped_assistant_message,
+    token_aborted, QueuedPromptInput, StepExit, StreamingIterationDisposition, TurnLoopState,
 };
 use crate::conversation::{
     assistant_usage_value, classify_api_error, output_accounting_impl, ApiErrorEnvelope,
     ConversationOrchestrator, ConversationOutcome, ModelCallPath, OutgoingHistoryRewriter,
-    INTERRUPT_MESSAGE, INTERRUPT_MESSAGE_FOR_TOOL_USE,
+    PreparedContextAnnouncements, INTERRUPT_MESSAGE, INTERRUPT_MESSAGE_FOR_TOOL_USE,
 };
 use crate::error::OrchestratorError;
+use crate::mod_turn_step::{TurnStepDecoder, TurnStepEncoder};
 use crate::streaming_loop::ExecutorPump;
 use crate::turn_loop::{
     call_api_with_ptl_recovery, surface_prompt_too_long, surface_rapid_refill_thrashing,
     PtlCallOutcome, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
 };
+use hooks::attachment::HookPublicationGuard;
 
 pub(super) struct StreamingTurnDriver<'a> {
     pub(super) orch: &'a ConversationOrchestrator,
@@ -29,6 +35,8 @@ pub(super) struct StreamingTurnDriver<'a> {
     pub(super) transient_rewake: bool,
     pub(super) in_human_turn: bool,
     pub(super) queued_inputs: Option<Vec<QueuedPromptInput>>,
+    pub(super) row_token: Option<String>,
+    pub(super) projected_content: Option<super::projected_content::ProjectedUserContent>,
 }
 
 struct PreparedStreamingIteration {
@@ -51,14 +59,50 @@ enum OpenedModelStream {
     Recovered(crate::streaming_loop::PumpedTurn),
 }
 
+/// Only a host-classified external delivery enters `session.receive` before
+/// prompt admission. Composer and plugin prompts have their own events; an
+/// unclassified local continuation must not be relabeled as bridge input.
+fn external_receive_kind(origin: &serde_json::Value) -> Option<&str> {
+    match origin.get("kind").and_then(serde_json::Value::as_str)? {
+        kind @ ("bridge" | "task-notification" | "scheduled-trigger" | "peer"
+        | "peer-send-message" | "projects-relay" | "slack-ping") => Some(kind),
+        _ => None,
+    }
+}
+
+async fn append_recovered_assistant_row(
+    orch: &ConversationOrchestrator,
+    pumped: &mut crate::streaming_loop::PumpedTurn,
+    assistant_id: MessageId,
+) {
+    let raw = pumped_assistant_message(pumped, assistant_id);
+    // Session switching, clear, and resume share the turn gate with this
+    // recovered output. Do not bind recovery acceptance to a fresh executor
+    // generation fence that did not produce the row.
+    let accepted = orch.append_streamed_query_row(&raw, None).await;
+    if let ConversationMessage::Assistant { content, .. } = accepted {
+        // Native's query row is the append-through result. q/D reconstructs
+        // source ToolUse identity/input; `query_history` remains the separate
+        // pre-query snapshot used by W1.
+        pumped.assistant_blocks = content;
+    }
+}
+
 struct OpenedStreamingIteration<'a> {
     opened: OpenedModelStream,
     exec: crate::streaming_executor::StreamingToolExecutor<'a>,
+    /// Exact query request messages frozen before the stream opened. Streaming
+    /// tool dispatch uses this even when its executor starts queued work later.
+    query_history: Vec<ConversationMessage>,
+    retry_scope: ModelCallRetryScope,
     model: String,
     model_profile: Option<String>,
     outgoing_history_rewriter: Option<Arc<dyn OutgoingHistoryRewriter>>,
     turn_reminders: Vec<ConversationMessage>,
+    guarded_async_hook_reminders: Vec<(MessageId, Arc<dyn HookPublicationGuard>)>,
+    context_announcements: PreparedContextAnnouncements,
     wire_tools: Vec<serde_json::Value>,
+    skip_global_cache_for_system_prompt: bool,
     deferred_reminder: Option<ConversationMessage>,
     date_change_reminder: Option<ConversationMessage>,
     assistant_id: MessageId,
@@ -66,7 +110,10 @@ struct OpenedStreamingIteration<'a> {
     partial_finalize_notice_id: Option<MessageId>,
     turn_id: String,
     display_hook_active: bool,
+    turn_step_hook_active: bool,
+    mod_model_state: Option<Arc<StdMutex<Option<(String, Option<String>)>>>>,
     api_call_started: std::time::Instant,
+    stream_started: tokio::time::Instant,
     api_success_message_count: u32,
     api_success_message_tokens: u64,
     did_fall_back_to_non_streaming: bool,
@@ -77,10 +124,13 @@ struct OpenedStreamingIteration<'a> {
 enum OpenStreamingOutcome<'a> {
     Opened(OpenedStreamingIteration<'a>),
     Complete(MessageId),
+    ModelFallback,
 }
 
 struct PumpedStreamingIteration<'a> {
     pumped: crate::streaming_loop::PumpedTurn,
+    settlement: crate::streaming_loop::StreamToolSettlement,
+    next_mod_response: Option<OpenedStreamingIteration<'a>>,
     exec: crate::streaming_executor::StreamingToolExecutor<'a>,
     model: String,
     model_profile: Option<String>,
@@ -94,6 +144,9 @@ struct PumpedStreamingIteration<'a> {
     api_success_message_count: u32,
     api_success_message_tokens: u64,
     did_fall_back_to_non_streaming: bool,
+    /// PTL/529 rows passed through session.append before W1 dispatch, so the
+    /// terminal per-block writer must not dispatch the hook again.
+    assistant_session_append_dispatched: bool,
     pre_batch_mcp_tool_count: usize,
     cost_receipt: Option<cost::CostResponseReceipt>,
 }
@@ -101,13 +154,434 @@ struct PumpedStreamingIteration<'a> {
 enum PumpStreamingOutcome<'a> {
     Pumped(PumpedStreamingIteration<'a>),
     Complete(MessageId),
+    ModelFallback,
 }
 
-struct FinalizedStreamingIteration {
+enum StreamErrorFallback<'a> {
+    Recovered {
+        pumped: crate::streaming_loop::PumpedTurn,
+        executor: crate::streaming_executor::StreamingToolExecutor<'a>,
+        cost_receipt: Option<cost::CostResponseReceipt>,
+    },
+    Declined(MessageId),
+}
+
+type ModStepFrame = (
+    Result<HistoryEvent, LlmError>,
+    tokio::sync::oneshot::Sender<()>,
+);
+
+enum PendingModStepOutput {
+    Event(HistoryEvent),
+    Thinking(String),
+}
+
+async fn send_mod_step_output(
+    sender: &tokio::sync::mpsc::Sender<ModStepFrame>,
+    output: &Arc<dyn lingxi_core::host::OutputStream>,
+    pending: Vec<PendingModStepOutput>,
+) -> Result<(), hooks::mods::ModError> {
+    for item in pending {
+        match item {
+            PendingModStepOutput::Thinking(text) => output.emit_thinking(&text, None).await,
+            PendingModStepOutput::Event(event) => {
+                let terminal = matches!(
+                    event,
+                    HistoryEvent::MessageStop | HistoryEvent::Completed { .. }
+                );
+                let (ack, received) = tokio::sync::oneshot::channel();
+                sender.send((Ok(event), ack)).await.map_err(|_| {
+                    hooks::mods::ModError::Unavailable("turn.step consumer closed".into())
+                })?;
+                if !terminal {
+                    received.await.map_err(|_| {
+                        hooks::mods::ModError::Unavailable("turn.step consumer closed".into())
+                    })?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mod_turn_step_stream(
+    host: Arc<hooks::mods::ModHost>,
+    api: Arc<dyn crate::conversation::StreamingApiClient>,
+    output: Arc<dyn lingxi_core::host::OutputStream>,
+    main_api: Arc<dyn crate::conversation::OrchestratorApiClient>,
+    model_policy: Option<Arc<dyn hooks::mods::ModSettingsReader>>,
+    input: serde_json::Value,
+    model_profile: Option<String>,
+    system_prompt: Option<
+        lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+    >,
+    snapshot: Vec<ConversationMessage>,
+    guarded_async_hook_reminders: Vec<(
+        MessageId,
+        Arc<dyn hooks::attachment::HookPublicationGuard>,
+    )>,
+    wire_tools: Vec<serde_json::Value>,
+    skip_global_cache_for_system_prompt: bool,
+    query_source: String,
+    output_observation: Option<output_accounting_impl::MainOutputObservation>,
+    retry_scope: ModelCallRetryScope,
+    request_capture: llm_runtime::prompt_cache::RequestCapture,
+) -> (
+    futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>,
+    Arc<StdMutex<Option<(String, Option<String>)>>>,
+) {
+    let wire = Arc::new(StdMutex::new(TurnStepEncoder::default()));
+    let model = input["model"].as_str().unwrap_or_default().to_owned();
+    let original_effort = input["effort"].as_str().map(str::to_owned);
+    let decoder = Arc::new(StdMutex::new(TurnStepDecoder::new(model.clone())));
+    let effective_model = Arc::new(StdMutex::new(None));
+    let physical_error = Arc::new(StdMutex::new(None::<LlmError>));
+    let observation = Arc::new(StdMutex::new(output_observation));
+    let publication_guards = Arc::new(StdMutex::new(guarded_async_hook_reminders));
+    let (sender, receiver) = tokio::sync::mpsc::channel::<ModStepFrame>(1);
+    let worker_sender = sender.clone();
+    let worker_wire = wire.clone();
+    let worker_decoder = decoder.clone();
+    let worker_model = effective_model.clone();
+    let worker_error = physical_error.clone();
+    tokio::spawn(async move {
+        let finish_wire = worker_wire.clone();
+        let requested_model = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let source_requested = requested_model.clone();
+        let pending_output = Arc::new(StdMutex::new(Vec::<PendingModStepOutput>::new()));
+        let fallback_api = api.clone();
+        let fallback_model = model.clone();
+        let fallback_profile = model_profile.clone();
+        let fallback_system = system_prompt.clone();
+        let fallback_snapshot = snapshot.clone();
+        let fallback_publication_guards = publication_guards.clone();
+        let fallback_tools = wire_tools.clone();
+        let fallback_query_source = query_source.clone();
+        let fallback_observation = observation.clone();
+        let fallback_output = output.clone();
+        let fallback_retry_scope = retry_scope.clone();
+        let fallback_request_capture = request_capture.clone();
+        let source_retry_scope = retry_scope.clone();
+        let source_request_capture = request_capture.clone();
+        let source = move |forwarded: serde_json::Value| {
+            let api = api.clone();
+            let main_api = main_api.clone();
+            let model_policy = model_policy.clone();
+            let original_model = model.clone();
+            let original_effort = original_effort.clone();
+            let model_profile = model_profile.clone();
+            let system_prompt = system_prompt.clone();
+            let snapshot = snapshot.clone();
+            let publication_guards = publication_guards.clone();
+            let wire_tools = wire_tools.clone();
+            let query_source = query_source.clone();
+            let observation = observation.clone();
+            let wire = worker_wire.clone();
+            let effective_model = worker_model.clone();
+            let physical_error = worker_error.clone();
+            let requested_model = source_requested.clone();
+            let retry_scope = source_retry_scope.clone();
+            let request_capture = source_request_capture.clone();
+            async move {
+                let requested = forwarded["model"].as_str().unwrap_or_default().to_owned();
+                let resolved = main_api
+                    .resolve_media_route(&requested, model_profile.as_deref())
+                    .or_else(|_| main_api.resolve_media_route(&requested, None))
+                    .ok();
+                let resolved_model = resolved.as_ref().map_or(requested.as_str(), |route| {
+                    route.main.request_model.as_str()
+                });
+                let denied = if let Some(policy) = model_policy.as_ref() {
+                    policy.model_allowed(resolved_model).await? == Some(false)
+                } else {
+                    false
+                };
+                let model = if denied {
+                    tracing::warn!(requested, "turn.step model rewrite denied by policy");
+                    original_model
+                } else {
+                    requested
+                };
+                let profile = if denied {
+                    model_profile
+                } else {
+                    resolved
+                        .map(|route| route.main.profile_name)
+                        .or(model_profile)
+                };
+                let effort_override = forwarded["effort"]
+                    .as_str()
+                    .filter(|effort| Some(*effort) != original_effort.as_deref());
+                *effective_model.lock().unwrap() = Some((model.clone(), profile.clone()));
+                requested_model.store(true, std::sync::atomic::Ordering::Release);
+                let mut snapshot = snapshot;
+                let mut turn_reminders = Vec::new();
+                let mut guarded_reminders = publication_guards
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+                    &mut snapshot,
+                    &mut turn_reminders,
+                    &mut guarded_reminders,
+                );
+                let request_dispatch_admission =
+                    crate::prompt::async_hook_response::request_dispatch_admission(
+                        &snapshot,
+                        &guarded_reminders,
+                    );
+                let stream = retry_scope
+                    .run(request_capture.scope(api.stream_with_effort_override(
+                        &model,
+                        profile.as_deref(),
+                        system_prompt.as_ref(),
+                        snapshot,
+                        wire_tools,
+                        effort_override,
+                        &query_source,
+                        skip_global_cache_for_system_prompt,
+                        request_dispatch_admission,
+                    )))
+                    .await
+                    .map_err(|error| {
+                        *physical_error.lock().unwrap() = Some(error.clone());
+                        hooks::mods::ModError::Hook(error.to_string())
+                    })?;
+                let observation = observation
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(output_accounting_impl::MainOutputObservation::fork);
+                let stream = output_accounting_impl::account_stream(stream, observation);
+                let chunk_wire = wire.clone();
+                let result_wire = wire.clone();
+                let source_refs = Arc::new(StdMutex::new(Vec::new()));
+                let chunk_refs = source_refs.clone();
+                let response_events = Arc::new(StdMutex::new(Vec::new()));
+                let stream = stream.then(move |item| {
+                    let response_events = response_events.clone();
+                    let chunk_wire = chunk_wire.clone();
+                    let chunk_refs = chunk_refs.clone();
+                    let physical_error = physical_error.clone();
+                    async move {
+                        match item {
+                            Ok(event) => {
+                                let stopped = matches!(event, HistoryEvent::MessageStop);
+                                if matches!(event, HistoryEvent::Completed { .. }) {
+                                    response_events.lock().unwrap().clear();
+                                } else {
+                                    response_events.lock().unwrap().push(event.clone());
+                                }
+                                let streamed_response = if stopped {
+                                    let events =
+                                        std::mem::take(&mut *response_events.lock().unwrap());
+                                    llm_runtime::stream_accumulator::accumulate_stream_salvaging(
+                                        futures::stream::iter(events.into_iter().map(Ok)).boxed(),
+                                    )
+                                    .await
+                                    .ok()
+                                } else {
+                                    None
+                                };
+                                let held = {
+                                    let mut wire = chunk_wire.lock().unwrap();
+                                    let held = wire.push(event).clone();
+                                    if let Some(response) = streamed_response {
+                                        wire.note_stream_response(held.reference, response);
+                                    }
+                                    held
+                                };
+                                chunk_refs.lock().unwrap().push(held.reference);
+                                Ok(hooks::mods::ModUtf16ValueProjection::from_core_projection(
+                                    held.chunk,
+                                )?)
+                            }
+                            Err(error) => {
+                                *physical_error.lock().unwrap() = Some(error.clone());
+                                Err(hooks::mods::ModError::Hook(error.to_string()))
+                            }
+                        }
+                    }
+                });
+                let turn_id = forwarded["turnId"].as_str().unwrap_or_default().to_owned();
+                let index = forwarded["index"].as_u64().unwrap_or_default() as u32;
+                Ok(hooks::mods::ModStreamSource::new(stream, move || {
+                    let references = source_refs.lock().unwrap().clone();
+                    let result = result_wire.lock().unwrap().result_for_references(
+                        &turn_id,
+                        index,
+                        &references,
+                    );
+                    hooks::mods::ModUtf16ValueProjection::from_core_projection(result)
+                }))
+            }
+        };
+        let output_requested = requested_model.clone();
+        let output_pending = pending_output.clone();
+        let on_chunk = move |chunk: hooks::mods::ModUtf16ValueProjection| {
+            let wire = wire.clone();
+            let decoder = worker_decoder.clone();
+            let sender = worker_sender.clone();
+            let output = output.clone();
+            let requested_model = output_requested.clone();
+            let pending_output = output_pending.clone();
+            async move {
+                let chunk = chunk.into_core_projection()?;
+                let mut actions = Vec::new();
+                if chunk.value.get("kind").and_then(serde_json::Value::as_str) == Some("thinking") {
+                    if let Some(text) = chunk.value.get("text").and_then(serde_json::Value::as_str)
+                    {
+                        actions.push(PendingModStepOutput::Thinking(text.to_owned()));
+                    }
+                }
+                let events = {
+                    let wire = wire.lock().unwrap();
+                    decoder.lock().unwrap().consume(&chunk, &wire)
+                };
+                actions.extend(events.into_iter().map(PendingModStepOutput::Event));
+                if !requested_model.load(std::sync::atomic::Ordering::Acquire) {
+                    let mut immediate = Vec::new();
+                    for action in actions {
+                        if matches!(
+                            action,
+                            PendingModStepOutput::Event(HistoryEvent::Completed { .. })
+                        ) {
+                            pending_output.lock().unwrap().push(action);
+                        } else {
+                            immediate.push(action);
+                        }
+                    }
+                    return send_mod_step_output(&sender, &output, immediate).await;
+                }
+                let mut ready = std::mem::take(&mut *pending_output.lock().unwrap());
+                ready.extend(actions);
+                send_mod_step_output(&sender, &output, ready).await
+            }
+        };
+        let outcome = host
+            .dispatch_turn_step_stream(input, source, on_chunk)
+            .await;
+        match outcome {
+            Ok(_) => {
+                let tail = {
+                    let wire = finish_wire.lock().unwrap();
+                    decoder.lock().unwrap().finish(&wire)
+                };
+                let mut ready = std::mem::take(&mut *pending_output.lock().unwrap());
+                ready.extend(tail.into_iter().map(PendingModStepOutput::Event));
+                let _ = send_mod_step_output(&sender, &fallback_output, ready).await;
+            }
+            Err(error) => {
+                if !requested_model.load(std::sync::atomic::Ordering::Acquire) {
+                    // Native `Jn` holds only complete assistant records before
+                    // a request; stream events already reached the consumer.
+                    // A failed chain without a request drops those held records.
+                    pending_output.lock().unwrap().clear();
+                    let mut fallback_snapshot = fallback_snapshot;
+                    let mut fallback_reminders = Vec::new();
+                    let mut fallback_guards = fallback_publication_guards
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .clone();
+                    crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+                        &mut fallback_snapshot,
+                        &mut fallback_reminders,
+                        &mut fallback_guards,
+                    );
+                    let request_dispatch_admission =
+                        crate::prompt::async_hook_response::request_dispatch_admission(
+                            &fallback_snapshot,
+                            &fallback_guards,
+                        );
+                    let stream = fallback_retry_scope
+                        .run(fallback_request_capture.scope(
+                            fallback_api.stream_with_effort_override(
+                                &fallback_model,
+                                fallback_profile.as_deref(),
+                                fallback_system.as_ref(),
+                                fallback_snapshot,
+                                fallback_tools,
+                                None,
+                                &fallback_query_source,
+                                skip_global_cache_for_system_prompt,
+                                request_dispatch_admission,
+                            ),
+                        ))
+                        .await;
+                    match stream {
+                        Ok(stream) => {
+                            let observation = fallback_observation
+                                .lock()
+                                .unwrap()
+                                .as_ref()
+                                .map(output_accounting_impl::MainOutputObservation::fork);
+                            let mut stream =
+                                output_accounting_impl::account_stream(stream, observation);
+                            while let Some(item) = stream.next().await {
+                                let terminal = matches!(
+                                    item,
+                                    Ok(HistoryEvent::MessageStop | HistoryEvent::Completed { .. })
+                                );
+                                let (ack, received) = tokio::sync::oneshot::channel();
+                                if sender.send((item, ack)).await.is_err() {
+                                    return;
+                                }
+                                if !terminal && received.await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            let (ack, _) = tokio::sync::oneshot::channel();
+                            let _ = sender.send((Err(error), ack)).await;
+                        }
+                    }
+                    return;
+                }
+                let pending = std::mem::take(&mut *pending_output.lock().unwrap());
+                if send_mod_step_output(&sender, &fallback_output, pending)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                let typed = physical_error.lock().unwrap().take().unwrap_or_else(|| {
+                    LlmError::StreamInterrupted {
+                        message: error.to_string(),
+                    }
+                });
+                let (ack, _) = tokio::sync::oneshot::channel();
+                let _ = sender.send((Err(typed), ack)).await;
+            }
+        }
+    });
+    let stream = futures::stream::unfold(
+        (receiver, None::<tokio::sync::oneshot::Sender<()>>),
+        |(mut receiver, previous_ack)| async move {
+            if let Some(ack) = previous_ack {
+                let _ = ack.send(());
+            }
+            let (item, ack) = receiver.recv().await?;
+            Some((item, (receiver, Some(ack))))
+        },
+    )
+    .fuse()
+    .boxed();
+    (stream, effective_model)
+}
+
+enum FinalizedStreamingIteration<'a> {
+    Complete(MessageId),
+    Finalized(FinalizedStreamingData<'a>),
+}
+
+struct FinalizedStreamingData<'a> {
     pumped: crate::streaming_loop::PumpedTurn,
+    next_mod_response: Option<OpenedStreamingIteration<'a>>,
     assistant_id: MessageId,
     tool_prevent_continuation: bool,
-    post_tool_batch_calls: Vec<hooks::events::PostToolBatchCall>,
+    post_tool_batch_dispatch: crate::turn_loop::PostToolBatchDispatch,
     pre_batch_mcp_tool_count: usize,
     partial_finalize: Option<crate::streaming_loop::PartialFinalizeCause>,
     partial_finalize_notice_id: Option<MessageId>,
@@ -123,53 +597,97 @@ impl StreamingTurnDriver<'_> {
         pumped: &crate::streaming_loop::PumpedTurn,
         duration: std::time::Duration,
     ) -> Option<cost::CostResponseReceipt> {
-        let usage = pumped.usage.as_ref()?;
+        let usage = pumped.usage.as_ref();
+        if usage.is_none() && !pumped.native_server_fallback_quote {
+            return None;
+        }
         orch.model_runtime.cost_tracker.as_ref()?;
         let scope =
             cost_scope.expect("a wired cost tracker captured its scope before stream dispatch");
-        let cost_usage = crate::cost_wiring::llm_usage_to_cost_usage(usage);
-        let quote = pumped
-            .cost_quote
-            .as_ref()
-            .and_then(crate::cost_wiring::frozen_cost_quote);
-        let model_ref = quote.as_ref().map_or_else(
-            || crate::cost_wiring::model_ref_from_string(model, model_profile),
-            |(model_ref, _)| model_ref.clone(),
-        );
-        Some(scope.submit_model_response_with_quote(
+        let cost_usage = usage
+            .map(crate::cost_wiring::llm_usage_to_cost_usage)
+            .unwrap_or_default();
+        let native_quote = if pumped.cost_quote_observed {
+            pumped.native_server_fallback_quote
+        } else {
+            usage.is_some_and(|usage| {
+                usage
+                    .provider_metadata
+                    .get("stream")
+                    .is_some_and(crate::cost_wiring::has_native_fallback_quote)
+            })
+        };
+        let (quoted_model, pricing) =
+            crate::cost_wiring::response_pricing(pumped.cost_quote.as_ref(), native_quote);
+        let model_ref = quoted_model.unwrap_or_else(|| {
+            let billing_model = if native_quote {
+                pumped
+                    .native_cost_model
+                    .as_deref()
+                    .or_else(|| {
+                        usage.and_then(|usage| {
+                            usage
+                                .provider_metadata
+                                .get("stream")
+                                .and_then(crate::cost_wiring::native_fallback_cost_model)
+                        })
+                    })
+                    .or(pumped.served_model.as_deref())
+                    .unwrap_or(model)
+            } else {
+                model
+            };
+            crate::cost_wiring::model_ref_from_string(billing_model, model_profile)
+        });
+        Some(scope.submit_model_response_with_pricing(
             cost::CostModelResponse {
                 model_ref,
                 usage: cost_usage,
                 duration,
                 retries: orch.streaming_api.last_retry_count(),
-                cache_read_input_tokens: usage.counts().cache_read_tokens,
-                cache_creation_input_tokens: usage.counts().cache_write_tokens,
+                cache_read_input_tokens: usage.map_or(0, |usage| usage.counts().cache_read_tokens),
+                cache_creation_input_tokens:
+                    usage.map_or(0, |usage| usage.counts().cache_write_tokens),
                 is_batch_request: false,
                 bus: orch.model_runtime.analytics_bus.clone(),
             },
-            quote.map(|(_, amount)| amount),
+            pricing,
+            if usage.is_some_and(|usage| usage.report.usage.is_some()) {
+                cost::CostResponseMeasurement::Observed
+            } else {
+                cost::CostResponseMeasurement::Missing
+            },
         ))
     }
 
     async fn prepare_iteration(
         orch: &ConversationOrchestrator,
-        system_prompt: &Option<String>,
+        system_prompt: &Option<
+            lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        >,
         user_cancel: &Option<CancellationToken>,
         loop_state: &mut TurnLoopState,
         in_human_turn: bool,
+        previous_step: Option<&prepare::PreparedTurnStep>,
     ) -> Result<PrepareStreamingOutcome, OrchestratorError> {
         // Shared per-step preparation. The token goes IN rather than racing
         // this call from outside: streaming must not be dropped mid-flight by a
         // `select!`, because that discards in-flight tool results (see the
         // DEFERRED-3 note on `run_turn_streaming_inputs_locked`).
-        let prepared = orch
-            .prepare_turn_step(
+        let is_regular_user_prompt = orch.regular_user_prompt_for_model_step().await;
+        let prepared = if let Some(previous) = previous_step {
+            orch.reprepare_model_fallback(system_prompt.as_ref(), user_cancel.as_ref(), previous)
+                .await?
+        } else {
+            orch.prepare_turn_step(
                 ModelCallPath::Streaming,
-                system_prompt.as_deref(),
+                system_prompt.as_ref(),
                 in_human_turn,
+                is_regular_user_prompt,
                 user_cancel.as_ref(),
             )
-            .await?;
+            .await?
+        };
 
         // Capture the originating cost scope so a later session switch cannot
         // redirect observed usage to the active session. This used to be read
@@ -230,7 +748,8 @@ impl StreamingTurnDriver<'_> {
                 )
                 .await;
             let cost = orch.snapshot_cost_real().await;
-            orch.output.emit_end_turn("blocking_limit", &cost).await;
+            orch.mark_mod_turn_error();
+            orch.emit_turn_terminal("blocking_limit", &cost).await;
             return Ok(PrepareStreamingOutcome::Complete(id));
         }
         // Past the preempt: this step's snapshot WILL be sent, so the
@@ -264,7 +783,7 @@ impl StreamingTurnDriver<'_> {
         // turnId:r, index:0, …}` initialization. The `turn_id` is a fresh
         // per-turn UUID (`newTurn(){…; r=randomUUID()}`). Best-effort +
         // no-op when unregistered, so existing flows are byte-identical.
-        let turn_id = uuid::Uuid::new_v4().to_string();
+        let turn_id = loop_state.mod_turn_id.clone();
         orch.fire_message_display(&turn_id, assistant_id).await;
 
         // P2-04 (MessageDisplay `displayContent`): a registered
@@ -293,9 +812,12 @@ impl StreamingTurnDriver<'_> {
     async fn open_iteration<'a>(
         orch: &'a ConversationOrchestrator,
         prepared: PreparedStreamingIteration,
-        system_prompt: &Option<String>,
+        system_prompt: &Option<
+            lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        >,
         user_cancel: &Option<CancellationToken>,
         loop_state: &mut TurnLoopState,
+        retry_scope: &ModelCallRetryScope,
     ) -> Result<OpenStreamingOutcome<'a>, OrchestratorError> {
         let PreparedStreamingIteration {
             step,
@@ -308,22 +830,41 @@ impl StreamingTurnDriver<'_> {
         } = prepared;
 
         let prepare::PreparedTurnStep {
-            snapshot,
-            model,
-            model_profile,
+            mut snapshot,
+            mut model,
+            mut model_profile,
             outgoing_history_rewriter,
-            turn_reminders,
+            mut turn_reminders,
+            mut guarded_async_hook_reminders,
+            context_announcements,
             wire_tools,
+            skip_global_cache_for_system_prompt,
             deferred_reminder,
             date_change_reminder,
         } = step;
+        crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+            &mut snapshot,
+            &mut turn_reminders,
+            &mut guarded_async_hook_reminders,
+        );
+        let query_history = snapshot.clone();
 
         let mut exec = match &user_cancel {
-            Some(token) => crate::streaming_executor::StreamingToolExecutor::new_with_user_cancel(
-                orch,
-                token.clone(),
-            ),
-            None => crate::streaming_executor::StreamingToolExecutor::new(orch),
+            Some(token) => {
+                crate::streaming_executor::StreamingToolExecutor::try_new_with_user_cancel(
+                    orch,
+                    query_history.clone(),
+                    token.clone(),
+                )
+                .await?
+            }
+            None => {
+                crate::streaming_executor::StreamingToolExecutor::try_new(
+                    orch,
+                    query_history.clone(),
+                )
+                .await?
+            }
         };
         // Hold `tool_result` frames until the collection point below can
         // release them in RECEIVED order, with a cancelled tool's synthetic
@@ -336,6 +877,7 @@ impl StreamingTurnDriver<'_> {
         // instead of `Duration::ZERO`. Paired with
         // `orch.streaming_api.last_retry_count()` at the billing site below.
         let api_call_started = std::time::Instant::now();
+        let stream_started = tokio::time::Instant::now();
 
         // tengu_api_success `messageCount:n` / `messageTokens:r`: capture from
         // the OUTGOING snapshot BEFORE it is moved into `.stream(...)`.
@@ -351,24 +893,128 @@ impl StreamingTurnDriver<'_> {
         }
         let mut cost_receipt = None;
         let output_observation = orch.capture_main_output().await?;
+        let mut first_output_observation = Some(output_observation);
         // Either an open stream to pump, or a turn already RECOVERED from a
         // connect-phase prompt-too-long (#1, see the ContextOverflow arm).
-        let stream_result = orch
-            .streaming_api
-            .stream(
-                &model,
-                model_profile.as_deref(),
-                system_prompt.as_deref(),
+        let mod_host = if let Some(registry) = &orch.lifecycle_runtime.hook_registry {
+            registry
+                .read()
+                .await
+                .mod_host()
+                .filter(|host| host.has_event("turn.step"))
+        } else {
+            None
+        };
+        crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+            &mut snapshot,
+            &mut turn_reminders,
+            &mut guarded_async_hook_reminders,
+        );
+        let turn_step_hook_active = mod_host.is_some();
+        let mut mod_model_state = None;
+        let stream_result = if let Some(host) = mod_host {
+            let mut input = serde_json::json!({
+                "turnId":turn_id,
+                "index":loop_state.turn_count.saturating_sub(1),
+                "model":model,
+                "messageCount":snapshot.len(),
+            });
+            if let Some(effort) = orch
+                .model_runtime
+                .current_effort
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+            {
+                input["effort"] = serde_json::json!(effort);
+            }
+            let (mut stream, effective_model) = mod_turn_step_stream(
+                host,
+                orch.streaming_api.clone(),
+                orch.output.clone(),
+                orch.api.clone(),
+                orch.mod_settings_reader.clone(),
+                input,
+                model_profile.clone(),
+                system_prompt.clone(),
                 snapshot,
+                guarded_async_hook_reminders.clone(),
                 wire_tools.clone(),
-            )
-            .await;
+                skip_global_cache_for_system_prompt,
+                crate::config::sanitize_query_source(&orch.config.query_source).to_owned(),
+                first_output_observation.take().flatten(),
+                retry_scope.clone(),
+                orch.model_runtime.prompt_cache_capture.clone(),
+            );
+            mod_model_state = Some(effective_model.clone());
+            // Poll one item before returning so connect-phase provider errors
+            // still reach prompt-too-long and model-fallback handling below.
+            let first = stream.next().await;
+            if let Some((forwarded_model, forwarded_profile)) =
+                effective_model.lock().unwrap().clone()
+            {
+                model = forwarded_model;
+                model_profile = forwarded_profile;
+            }
+            crate::server_fallback::record_request_route(crate::query_model::ModelRoute {
+                model: model.clone(),
+                profile: model_profile.clone(),
+            });
+            match first {
+                Some(Ok(event)) => Ok(futures::stream::once(async move { Ok(event) })
+                    .chain(stream)
+                    .boxed()),
+                Some(Err(error)) => Err(error),
+                None => Ok(stream),
+            }
+        } else {
+            crate::server_fallback::record_request_route(crate::query_model::ModelRoute {
+                model: model.clone(),
+                profile: model_profile.clone(),
+            });
+            crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+                &mut snapshot,
+                &mut turn_reminders,
+                &mut guarded_async_hook_reminders,
+            );
+            let request_dispatch_admission =
+                crate::prompt::async_hook_response::request_dispatch_admission(
+                    &snapshot,
+                    &guarded_async_hook_reminders,
+                );
+            retry_scope
+                .run(
+                    orch.model_runtime
+                        .prompt_cache_capture
+                        .scope(orch.streaming_api.stream(
+                            &model,
+                            model_profile.as_deref(),
+                            system_prompt.as_ref(),
+                            snapshot,
+                            wire_tools.clone(),
+                            crate::config::sanitize_query_source(&orch.config.query_source),
+                            skip_global_cache_for_system_prompt,
+                            request_dispatch_admission,
+                        )),
+                )
+                .await
+                .map(|stream| {
+                    output_accounting_impl::account_stream(
+                        stream,
+                        first_output_observation.take().flatten(),
+                    )
+                })
+        };
         orch.persist_thinking_signature_strip_latch().await;
+        if stream_result.is_err() {
+            if let Some(reason) = retry_scope.take_model_fallback_request() {
+                Self::advance_model(orch, loop_state, &model, model_profile.as_deref(), reason)
+                    .await?;
+                return Ok(OpenStreamingOutcome::ModelFallback);
+            }
+        }
         let opened = match stream_result {
-            Ok(s) => OpenedModelStream::Stream(output_accounting_impl::account_stream(
-                s,
-                output_observation,
-            )),
+            Ok(s) => OpenedModelStream::Stream(s),
             // #1 (main-loop parity): a connect-phase 413 / prompt-too-long
             // surfaces HERE as `LlmError::ContextOverflow` — the adapter's
             // `drive_stream` returns `Err` on connect status >= 400, so it
@@ -407,12 +1053,20 @@ impl StreamingTurnDriver<'_> {
                     &mut recov_snapshot,
                     deferred_reminder.as_ref(),
                     date_change_reminder.as_ref(),
-                    &turn_reminders,
+                    &mut turn_reminders,
+                    &mut guarded_async_hook_reminders,
+                    &context_announcements,
+                    false,
                 )
                 .await;
-                match call_api_with_ptl_recovery(
+                crate::server_fallback::record_request_route(crate::query_model::ModelRoute {
+                    model: recov_model.clone(),
+                    profile: recov_profile.clone(),
+                });
+                let recovered = call_api_with_ptl_recovery(
                     orch,
-                    system_prompt.as_deref(),
+                    system_prompt.as_ref(),
+                    skip_global_cache_for_system_prompt,
                     &recov_model,
                     recov_profile.as_deref(),
                     recov_snapshot,
@@ -421,17 +1075,28 @@ impl StreamingTurnDriver<'_> {
                     None,
                     deferred_reminder.clone(),
                     date_change_reminder.clone(),
-                    &turn_reminders,
+                    turn_reminders.clone(),
+                    &mut guarded_async_hook_reminders,
+                    &context_announcements,
                     cost_scope.as_ref(),
                 )
-                .await?
-                {
-                    PtlCallOutcome::Response(resp) => {
+                .await?;
+                let mut no_snapshot = Vec::new();
+                crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+                    &mut no_snapshot,
+                    &mut turn_reminders,
+                    &mut guarded_async_hook_reminders,
+                );
+                match recovered {
+                    PtlCallOutcome::Response {
+                        response: resp,
+                        request_history,
+                    } => {
                         // Replay the recovered non-streaming response exactly
                         // like the 529 fallback below: emit text live, rebuild
                         // a fresh executor, register its tool_uses, and flow on
                         // as the turn's `pumped` result.
-                        let pumped_from_recovery = llm_response_to_pumped_turn(&resp);
+                        let mut pumped_from_recovery = llm_response_to_pumped_turn(&resp);
                         cost_receipt = Self::begin_stream_cost_response(
                             orch,
                             cost_scope.as_ref(),
@@ -441,6 +1106,12 @@ impl StreamingTurnDriver<'_> {
                             api_call_started.elapsed(),
                         );
                         orch.check_output_accounting()?;
+                        append_recovered_assistant_row(
+                            orch,
+                            &mut pumped_from_recovery,
+                            assistant_id,
+                        )
+                        .await;
 
                         // P2-04: when a `MessageDisplay` hook is active the
                         // completed-message pass below is the single on-screen
@@ -448,28 +1119,42 @@ impl StreamingTurnDriver<'_> {
                         // direct whole-body emit here to avoid double display.
                         if !display_hook_active {
                             for blk in &pumped_from_recovery.assistant_blocks {
-                                if let ContentBlock::Text { text } = blk {
+                                if let Some(text) = blk.visible_text() {
                                     orch.output.emit_text(text).await;
                                 }
                             }
                         }
                         exec = match &user_cancel {
-                            Some(token) => {
-                                crate::streaming_executor::StreamingToolExecutor::new_with_user_cancel(
-                                    orch,
-                                    token.clone(),
-                                )
-                            }
-                            None => crate::streaming_executor::StreamingToolExecutor::new(orch),
+                            Some(token) => crate::streaming_executor::StreamingToolExecutor::try_new_with_user_cancel(
+                                orch,
+                                request_history.clone(),
+                                token.clone(),
+                            ).await?,
+                            None => crate::streaming_executor::StreamingToolExecutor::try_new(orch, request_history.clone()).await?,
                         };
+                        let assistant_message =
+                            pumped_assistant_message(&pumped_from_recovery, assistant_id);
+                        let mut prior_tool_uses = Vec::new();
                         for tu in &pumped_from_recovery.tool_uses {
-                            exec.add_tool(
+                            exec.add_tool_with_context_owned(
                                 tu.id.clone(),
                                 tu.name.clone(),
                                 tu.input.clone(),
                                 tu.provider_id.clone(),
                                 assistant_id,
-                            );
+                                crate::turn_loop::ToolUseDispatchFacts {
+                                    query_history: request_history.clone(),
+                                    assistant_message: assistant_message.clone(),
+                                    same_turn_tool_uses: prior_tool_uses.clone(),
+                                },
+                            )
+                            .await?;
+                            prior_tool_uses.push(ContentBlock::ToolUse {
+                                id: tu.id.clone(),
+                                name: tu.name.clone(),
+                                input: tu.input.clone(),
+                                provider_id: tu.provider_id.clone(),
+                            });
                         }
                         OpenedModelStream::Recovered(pumped_from_recovery)
                     }
@@ -488,7 +1173,8 @@ impl StreamingTurnDriver<'_> {
                             )
                             .await;
                         let cost = orch.snapshot_cost_real().await;
-                        orch.output.emit_end_turn("prompt_too_long", &cost).await;
+                        orch.mark_mod_turn_error();
+                        orch.emit_turn_terminal("prompt_too_long", &cost).await;
                         return Ok(OpenStreamingOutcome::Complete(id));
                     }
                     PtlCallOutcome::BlockingLimit => {
@@ -508,7 +1194,8 @@ impl StreamingTurnDriver<'_> {
                             )
                             .await;
                         let cost = orch.snapshot_cost_real().await;
-                        orch.output.emit_end_turn("blocking_limit", &cost).await;
+                        orch.mark_mod_turn_error();
+                        orch.emit_turn_terminal("blocking_limit", &cost).await;
                         return Ok(OpenStreamingOutcome::Complete(id));
                     }
                     PtlCallOutcome::RapidRefillBreaker => {
@@ -528,9 +1215,8 @@ impl StreamingTurnDriver<'_> {
                             )
                             .await;
                         let cost = orch.snapshot_cost_real().await;
-                        orch.output
-                            .emit_end_turn("rapid_refill_breaker", &cost)
-                            .await;
+                        orch.mark_mod_turn_error();
+                        orch.emit_turn_terminal("rapid_refill_breaker", &cost).await;
                         return Ok(OpenStreamingOutcome::Complete(id));
                     }
                 }
@@ -558,7 +1244,8 @@ impl StreamingTurnDriver<'_> {
                 )
                 .await;
                 let cost = orch.snapshot_cost_real().await;
-                orch.output.emit_end_turn("model_error", &cost).await;
+                orch.mark_mod_turn_error();
+                orch.emit_turn_terminal("model_error", &cost).await;
                 return Ok(OpenStreamingOutcome::Complete(id));
             }
         };
@@ -566,11 +1253,16 @@ impl StreamingTurnDriver<'_> {
         Ok(OpenStreamingOutcome::Opened(OpenedStreamingIteration {
             opened,
             exec,
+            query_history,
+            retry_scope: retry_scope.clone(),
             model,
             model_profile,
             outgoing_history_rewriter,
             turn_reminders,
+            guarded_async_hook_reminders,
+            context_announcements,
             wire_tools,
+            skip_global_cache_for_system_prompt,
             deferred_reminder,
             date_change_reminder,
             assistant_id,
@@ -578,7 +1270,10 @@ impl StreamingTurnDriver<'_> {
             partial_finalize_notice_id,
             turn_id,
             display_hook_active,
+            turn_step_hook_active,
+            mod_model_state,
             api_call_started,
+            stream_started,
             api_success_message_count,
             api_success_message_tokens,
             did_fall_back_to_non_streaming,
@@ -594,22 +1289,22 @@ impl StreamingTurnDriver<'_> {
         outgoing_history_rewriter: Option<&Arc<dyn OutgoingHistoryRewriter>>,
         deferred_reminder: Option<&ConversationMessage>,
         date_change_reminder: Option<&ConversationMessage>,
-        turn_reminders: &[ConversationMessage],
+        turn_reminders: &mut Vec<ConversationMessage>,
+        guarded_async_hook_reminders: &mut Vec<(MessageId, Arc<dyn HookPublicationGuard>)>,
+        context_announcements: &PreparedContextAnnouncements,
         wire_tools: &[serde_json::Value],
-        system_prompt: &Option<String>,
+        skip_global_cache_for_system_prompt: bool,
+        system_prompt: &Option<
+            lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        >,
         user_cancel: &Option<CancellationToken>,
         display_hook_active: bool,
         assistant_id: MessageId,
         cost_scope: Option<&cost::CostSessionScope>,
         api_call_started: std::time::Instant,
-    ) -> Result<
-        (
-            crate::streaming_loop::PumpedTurn,
-            crate::streaming_executor::StreamingToolExecutor<'a>,
-            Option<cost::CostResponseReceipt>,
-        ),
-        OrchestratorError,
-    > {
+        retry_scope: &ModelCallRetryScope,
+        failed_stream_outlasted_timeout: bool,
+    ) -> Result<StreamErrorFallback<'a>, OrchestratorError> {
         // Seed: a streaming overload counts as 1 toward the consecutive
         // 529 budget (LlmError::Overloaded = 529).  Other in-band errors
         // (e.g. ProviderInternal) seed 0 — matching TS
@@ -618,11 +1313,14 @@ impl StreamingTurnDriver<'_> {
             error,
             OrchestratorError::Streaming(LlmError::Overloaded { .. })
         ));
+        // The current stream decision already recorded this body overload in
+        // the shared ledger. The seed initializes only the nonstream driver's
+        // local view; configure() merges it with the existing count.
 
         // Re-snapshot history for the non-streaming call (the partial
         // stream never touched session.history, so it is still the same
         // snapshot we used for the stream — no reset needed).
-        let (non_stream_snapshot_raw, non_stream_model, non_stream_profile) = {
+        let (non_stream_snapshot_raw, mut non_stream_model, mut non_stream_profile) = {
             let s = orch.session.lock().await;
             (
                 s.model_context_history(),
@@ -630,6 +1328,10 @@ impl StreamingTurnDriver<'_> {
                 s.model_profile.clone(),
             )
         };
+        if let Some(route) = crate::query_model::current() {
+            non_stream_model = route.model;
+            non_stream_profile = route.profile;
+        }
         let mut non_stream_snapshot = orch
             .rewrite_outgoing_history(non_stream_snapshot_raw, outgoing_history_rewriter)
             .await?;
@@ -641,6 +1343,9 @@ impl StreamingTurnDriver<'_> {
             deferred_reminder,
             date_change_reminder,
             turn_reminders,
+            guarded_async_hook_reminders,
+            context_announcements,
+            false,
         )
         .await;
         let tools_for_fallback = wire_tools.to_vec();
@@ -652,15 +1357,55 @@ impl StreamingTurnDriver<'_> {
         }
 
         let mut output_observation = orch.capture_main_output().await?;
-        let resp = orch
-            .api
-            .messages_create_seeded(
-                &non_stream_model,
-                non_stream_profile.as_deref(),
-                system_prompt.as_deref(),
-                non_stream_snapshot,
-                tools_for_fallback,
-                seed,
+        crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+            &mut non_stream_snapshot,
+            turn_reminders,
+            guarded_async_hook_reminders,
+        );
+        let request_dispatch_admission =
+            crate::prompt::async_hook_response::request_dispatch_admission(
+                &non_stream_snapshot,
+                guarded_async_hook_reminders,
+            );
+        crate::server_fallback::record_request_route(crate::query_model::ModelRoute {
+            model: non_stream_model.clone(),
+            profile: non_stream_profile.clone(),
+        });
+        let request_history = non_stream_snapshot.clone();
+        let mut resp = retry_scope
+            .run(
+                orch.model_runtime
+                    .prompt_cache_capture
+                    .scope(
+                        orch.api
+                            .messages_create(crate::OrchestratorApiRequest::Main({
+                                let mut request = llm_runtime::MessagesCreateRequest::new(
+                                    &non_stream_model,
+                                    non_stream_profile.as_deref(),
+                                    system_prompt.as_ref().cloned(),
+                                    non_stream_snapshot,
+                                    tools_for_fallback,
+                                );
+                                request.opts.skip_global_cache_for_system_prompt =
+                                    skip_global_cache_for_system_prompt;
+                                request.opts.request_dispatch_admission =
+                                    request_dispatch_admission;
+                                request.opts.query_source = Some(
+                                    crate::config::sanitize_query_source(&orch.config.query_source)
+                                        .to_string(),
+                                );
+                                request.opts.initial_consecutive_overloaded = Some(seed);
+                                request.opts.failed_stream_outlasted_timeout =
+                                    failed_stream_outlasted_timeout;
+                                request.opts.fallback = orch
+                                    .config
+                                    .fallback_model
+                                    .as_deref()
+                                    .map(llm_runtime::FallbackPolicy::from_models_csv)
+                                    .unwrap_or(llm_runtime::FallbackPolicy::Disabled);
+                                request
+                            })),
+                    ),
             )
             .await
             .map_err(OrchestratorError::ApiCall)?;
@@ -670,9 +1415,54 @@ impl StreamingTurnDriver<'_> {
             let _ = observation.finish();
         }
 
+        let server_fallback_events = resp.server_fallback_events();
+        let mut handled_server_fallback_events = 0;
+        for info in &server_fallback_events {
+            if !matches!(info.event.reason.as_str(), "refusal" | "sticky") {
+                continue;
+            }
+            match crate::server_fallback::handle(orch, info, false).await? {
+                crate::server_fallback::ServerFallbackAdmission::Applied => {
+                    handled_server_fallback_events += 1;
+                    if matches!(info.event.reason.as_str(), "refusal" | "sticky") {
+                        resp.model =
+                            lingxi_core::host::refusal_server_control::resolve_received_model(
+                                Some(&info.lane.model),
+                                &info.event.to_model,
+                            );
+                    }
+                }
+                crate::server_fallback::ServerFallbackAdmission::Declined => {
+                    let rejected = llm_response_to_pumped_turn(&resp);
+                    if let Some(receipt) = Self::begin_stream_cost_response(
+                        orch,
+                        cost_scope,
+                        &resp.model,
+                        non_stream_profile.as_deref(),
+                        &rejected,
+                        api_call_started.elapsed(),
+                    ) {
+                        let settlement = receipt.settle().await;
+                        orch.model_runtime
+                            .api_calls_recorded
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if let Err(error) = settlement.persistence_result() {
+                            orch.note_cost_settlement_failure(error).await;
+                        }
+                    }
+                    orch.record_prompt_cache_usage(&resp.usage).await;
+                    crate::server_fallback::flush_pending_notice(orch).await;
+                    let (message_id, _) =
+                        crate::server_fallback::surface_declined(orch, info).await;
+                    return Ok(StreamErrorFallback::Declined(message_id));
+                }
+            }
+        }
+
         // Convert HistoryResponse → PumpedTurn so the rest of the streaming
         // turn loop can proceed identically.
-        let pumped_from_fallback = llm_response_to_pumped_turn(&resp);
+        let mut pumped_from_fallback = llm_response_to_pumped_turn(&resp);
+        pumped_from_fallback.handled_server_fallback_events = handled_server_fallback_events;
         let cost_receipt = Self::begin_stream_cost_response(
             orch,
             cost_scope,
@@ -683,6 +1473,7 @@ impl StreamingTurnDriver<'_> {
         );
 
         orch.check_output_accounting()?;
+        append_recovered_assistant_row(orch, &mut pumped_from_fallback, assistant_id).await;
 
         // Emit text blocks from the non-streaming response to the output
         // stream, mirroring the batched path (turn_loop.rs step 4:
@@ -694,10 +1485,13 @@ impl StreamingTurnDriver<'_> {
         // completed-message pass renders the (possibly substituted) text
         // once, so skip the direct emit to avoid double display.
         for blk in &pumped_from_fallback.assistant_blocks {
-            match blk {
-                ContentBlock::Text { text } if !display_hook_active => {
+            if let Some(text) = blk.visible_text() {
+                if !display_hook_active {
                     orch.output.emit_text(text).await;
                 }
+                continue;
+            }
+            match blk {
                 ContentBlock::Thinking {
                     thinking,
                     signature,
@@ -722,41 +1516,124 @@ impl StreamingTurnDriver<'_> {
         // tool_uses by the post-stream drive loop below (this is the
         // ONLY path that still `add_tool`s after the stream — the
         // normal path registers mid-stream).
-        let mut exec = match user_cancel {
-            Some(token) => crate::streaming_executor::StreamingToolExecutor::new_with_user_cancel(
-                orch,
-                token.clone(),
-            ),
-            None => crate::streaming_executor::StreamingToolExecutor::new(orch),
+        let mut exec = match user_cancel.as_ref() {
+            Some(token) => {
+                crate::streaming_executor::StreamingToolExecutor::try_new_with_user_cancel(
+                    orch,
+                    request_history.clone(),
+                    token.clone(),
+                )
+                .await?
+            }
+            None => {
+                crate::streaming_executor::StreamingToolExecutor::try_new(
+                    orch,
+                    request_history.clone(),
+                )
+                .await?
+            }
         };
+        let assistant_message = pumped_assistant_message(&pumped_from_fallback, assistant_id);
+        let mut prior_tool_uses = Vec::new();
         for tu in &pumped_from_fallback.tool_uses {
-            exec.add_tool(
+            exec.add_tool_with_context_owned(
                 tu.id.clone(),
                 tu.name.clone(),
                 tu.input.clone(),
                 tu.provider_id.clone(),
                 assistant_id,
-            );
+                crate::turn_loop::ToolUseDispatchFacts {
+                    query_history: request_history.clone(),
+                    assistant_message: assistant_message.clone(),
+                    same_turn_tool_uses: prior_tool_uses.clone(),
+                },
+            )
+            .await?;
+            prior_tool_uses.push(ContentBlock::ToolUse {
+                id: tu.id.clone(),
+                name: tu.name.clone(),
+                input: tu.input.clone(),
+                provider_id: tu.provider_id.clone(),
+            });
         }
 
-        Ok((pumped_from_fallback, exec, cost_receipt))
+        Ok(StreamErrorFallback::Recovered {
+            pumped: pumped_from_fallback,
+            executor: exec,
+            cost_receipt,
+        })
     }
 
     async fn pump_iteration<'a>(
         orch: &'a ConversationOrchestrator,
         prepared: PreparedStreamingIteration,
-        system_prompt: &Option<String>,
+        system_prompt: &Option<
+            lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        >,
         user_cancel: &Option<CancellationToken>,
         loop_state: &mut TurnLoopState,
+    ) -> Result<PumpStreamingOutcome<'a>, OrchestratorError> {
+        let primary = loop_state
+            .selected_route
+            .as_ref()
+            .map_or(prepared.step.model.as_str(), |route| route.model.as_str());
+        let has_fallback = orch.config.fallback_model.as_deref().is_some_and(|models| {
+            crate::query_model::configured_chain(models, primary).len() > loop_state.fallback_index
+        });
+        let retry_scope = if has_fallback {
+            ModelCallRetryScope::default().with_model_fallback()
+        } else {
+            ModelCallRetryScope::default()
+        };
+        let opened = match Self::open_iteration(
+            orch,
+            prepared,
+            system_prompt,
+            user_cancel,
+            loop_state,
+            &retry_scope,
+        )
+        .await?
+        {
+            OpenStreamingOutcome::Opened(iteration) => iteration,
+            OpenStreamingOutcome::Complete(message_id) => {
+                return Ok(PumpStreamingOutcome::Complete(message_id));
+            }
+            OpenStreamingOutcome::ModelFallback => return Ok(PumpStreamingOutcome::ModelFallback),
+        };
+        Self::pump_opened_iteration(
+            orch,
+            opened,
+            system_prompt,
+            user_cancel,
+            loop_state,
+            retry_scope,
+        )
+        .await
+    }
+
+    async fn pump_opened_iteration<'a>(
+        orch: &'a ConversationOrchestrator,
+        opened_iteration: OpenedStreamingIteration<'a>,
+        system_prompt: &Option<
+            lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        >,
+        user_cancel: &Option<CancellationToken>,
+        loop_state: &mut TurnLoopState,
+        retry_scope: ModelCallRetryScope,
     ) -> Result<PumpStreamingOutcome<'a>, OrchestratorError> {
         let OpenedStreamingIteration {
             opened,
             mut exec,
+            query_history,
             model,
             model_profile,
             outgoing_history_rewriter,
-            turn_reminders,
+            mut turn_reminders,
+            mut guarded_async_hook_reminders,
+            context_announcements,
             wire_tools,
+            skip_global_cache_for_system_prompt,
             deferred_reminder,
             date_change_reminder,
             assistant_id,
@@ -764,24 +1641,25 @@ impl StreamingTurnDriver<'_> {
             partial_finalize_notice_id,
             turn_id,
             display_hook_active,
+            turn_step_hook_active,
+            mod_model_state,
             api_call_started,
+            stream_started,
             api_success_message_count,
             api_success_message_tokens,
             mut did_fall_back_to_non_streaming,
             cost_scope,
             mut cost_receipt,
-        } = match Self::open_iteration(orch, prepared, system_prompt, user_cancel, loop_state)
-            .await?
-        {
-            OpenStreamingOutcome::Opened(iteration) => iteration,
-            OpenStreamingOutcome::Complete(message_id) => {
-                return Ok(PumpStreamingOutcome::Complete(message_id));
-            }
-        };
+            retry_scope: _,
+        } = opened_iteration;
+        let mut assistant_session_append_dispatched =
+            matches!(&opened, OpenedModelStream::Recovered(_));
         // Polling the stream can start tool execution immediately. Snapshot
         // the live MCP count before that point so a tool-triggered registry
         // refresh can be compared after PostToolBatch, as in the oracle.
         let pre_batch_mcp_tool_count = orch.filtered_mcp_tool_count().await;
+        let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
+        settlement.publication_guard = Some(Arc::new(exec.publication_fence()));
 
         // 3. Pump the stream (with mid-stream 529 → non-streaming fallback OR
         //    the cc 2.1.199 partial-finalize, whichever applies).
@@ -812,8 +1690,8 @@ impl StreamingTurnDriver<'_> {
         // #1: a connect-phase prompt-too-long already recovered above (its
         // recovered non-streaming response was replayed) skips the pump; an
         // open stream is pumped as before.
-        let pumped = match opened {
-            OpenedModelStream::Recovered(pumped_from_recovery) => pumped_from_recovery,
+        let (pumped, remaining) = match opened {
+            OpenedModelStream::Recovered(pumped_from_recovery) => (pumped_from_recovery, None),
             OpenedModelStream::Stream(first_stream) => {
                 // cc 2.1.198 mid-response transient retry (`query.ts` stream
                 // loop @219649648): on a transient network drop (ECONNRESET /
@@ -827,24 +1705,39 @@ impl StreamingTurnDriver<'_> {
                 // clean, so the retry reuses `exec` and re-snapshots history.
                 let mut cur_stream = first_stream;
                 let mut mid_stream_retries: u32 = 0;
+                let mut stream_decision;
+                let mut stream_retry;
+                let mut stream_failed_long;
                 let pump_outcome: Result<
-                    crate::streaming_loop::PumpedTurn,
+                    (
+                        crate::streaming_loop::PumpedTurn,
+                        futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>,
+                    ),
                     crate::streaming_loop::PumpFailure,
                 > = loop {
-                    let observed_pump = crate::streaming_loop::pump_stream_with_executor_tracked(
-                        cur_stream,
-                        &orch.output,
-                        ExecutorPump {
-                            executor: &mut exec,
-                            assistant_id,
-                            user_cancel: user_cancel.as_ref(),
-                            suppress_live_text: display_hook_active,
-                        },
-                    )
-                    .await;
+                    let mut observed_pump =
+                        crate::streaming_loop::pump_stream_with_executor_tracked_remaining(
+                            cur_stream,
+                            &orch.output,
+                            ExecutorPump {
+                                executor: &mut exec,
+                                assistant_id,
+                                query_history: query_history.clone(),
+                                model_profile: model_profile.clone(),
+                                record_supersedes:
+                                    crate::streaming_loop::native_server_fallback_supersedes_enabled(
+                                        &orch.config.query_source,
+                                    ),
+                                user_cancel: user_cancel.as_ref(),
+                                suppress_live_text: display_hook_active,
+                                suppress_live_thinking: turn_step_hook_active,
+                                settlement: Some(&mut settlement),
+                            },
+                        )
+                        .await;
                     if let Err(error) = orch.check_output_accounting() {
                         let retained = match &observed_pump {
-                            Ok(pumped) => pumped,
+                            Ok((pumped, _)) => pumped,
                             Err(failure) => &failure.partial,
                         };
                         // The error must not discard known paid usage. This
@@ -857,31 +1750,135 @@ impl StreamingTurnDriver<'_> {
                             retained,
                             api_call_started.elapsed(),
                         );
+                        let already_declined = matches!(
+                            &observed_pump,
+                            Err(failure)
+                                if failure.disposition
+                                    == crate::streaming_loop::PumpFailureDisposition::ServerFallbackDeclined
+                        );
+                        if !already_declined {
+                            let partial = match &mut observed_pump {
+                                Ok((partial, _)) => partial,
+                                Err(failure) => {
+                                    failure.partial_close.close(orch.output.as_ref()).await;
+                                    &mut failure.partial
+                                }
+                            };
+                            orch.settle_stream_host_failure_attempt(
+                                &mut exec,
+                                partial,
+                                &mut settlement,
+                                assistant_id,
+                            )
+                            .await;
+                        }
                         return Err(error);
+                    }
+                    stream_decision = None;
+                    stream_retry = None;
+                    stream_failed_long = false;
+                    if let Err(failure) = &observed_pump {
+                        let cause = crate::streaming_loop::stream_failure_cause(&failure.error);
+                        stream_failed_long =
+                            llm_runtime::model::request_timeout::stream_outlasted_nonstream_timeout(
+                                stream_started.elapsed(),
+                            );
+                        if failure.progress
+                            == llm_runtime::model::stream_recovery::Progress::ThinkingOnly
+                            || matches!(
+                                cause,
+                                Some(
+                                    llm_runtime::model::stream_recovery::Cause::ServerError
+                                        | llm_runtime::model::stream_recovery::Cause::TimedOut
+                                )
+                            )
+                        {
+                            stream_decision = cause.map(|cause| {
+                                let outcome = retry_scope.decide_stream_failure(
+                                    llm_runtime::model::stream_recovery::Failure {
+                                        cause,
+                                        progress: failure.progress,
+                                        stop_reason_received: failure.partial.stop_reason.is_some(),
+                                        outlasted_non_streaming_timeout: stream_failed_long,
+                                    },
+                                    orch.config.fallback_model.as_deref().is_some_and(|models| {
+                                        crate::query_model::configured_chain(
+                                            models,
+                                            loop_state
+                                                .selected_route
+                                                .as_ref()
+                                                .map_or(model.as_str(), |route| {
+                                                    route.model.as_str()
+                                                }),
+                                        )
+                                        .len()
+                                            > loop_state.fallback_index
+                                    }),
+                                    false,
+                                    !is_env_truthy(
+                                        std::env::var(branding::DISABLE_NONSTREAMING_FALLBACK_ENV)
+                                            .ok()
+                                            .as_deref(),
+                                    ),
+                                );
+                                stream_retry = Some((cause, outcome.counts));
+                                outcome.decision
+                            });
+                        }
                     }
                     match observed_pump {
                         Ok(p) => break Ok(p),
-                        Err(f)
-                            if crate::streaming_loop::is_transient_mid_stream(&f.error)
-                                && !f.real_content_started
-                                && mid_stream_retries
-                                    < crate::streaming_loop::mid_stream_retry_cap(&f.error) =>
+                        Err(mut f)
+                            if stream_decision
+                                == Some(llm_runtime::model::stream_recovery::Decision::Retry)
+                                || (stream_decision.is_none()
+                                    && crate::streaming_loop::is_transient_mid_stream(
+                                        &f.error,
+                                    )
+                                    && !f.real_content_started
+                                    && mid_stream_retries
+                                        < crate::streaming_loop::mid_stream_retry_cap(
+                                            &f.error,
+                                        )
+                                    && retry_scope.take_stream_retry()) =>
                         {
+                            f.partial_close.close(orch.output.as_ref()).await;
+                            if let Some(usage) = f.partial.usage.as_ref() {
+                                orch.record_prompt_cache_usage(usage).await;
+                            }
                             mid_stream_retries += 1;
                             // Exponential backoff + jitter (binary `sle`).
-                            let base = llm_runtime::model::retry::scaled_base_delay_ms(
-                                mid_stream_retries - 1,
-                                None,
-                            );
-                            tokio::time::sleep(llm_runtime::model::retry::jittered_delay(base))
-                                .await;
+                            let delay = match stream_retry {
+                                Some((llm_runtime::model::stream_recovery::Cause::Stalled, _)) => {
+                                    std::time::Duration::ZERO
+                                }
+                                Some((
+                                    llm_runtime::model::stream_recovery::Cause::ConnectionLost
+                                    | llm_runtime::model::stream_recovery::Cause::Truncated,
+                                    counts,
+                                )) => std::time::Duration::from_millis(
+                                    100 * u64::from(counts.after_thinking_only),
+                                ),
+                                _ => {
+                                    let attempt = stream_retry
+                                        .map_or(mid_stream_retries, |(_, counts)| {
+                                            counts.after_thinking_only
+                                        });
+                                    let base = llm_runtime::model::retry::scaled_base_delay_ms(
+                                        attempt.saturating_sub(1),
+                                        None,
+                                    );
+                                    llm_runtime::model::retry::jittered_delay(base)
+                                }
+                            };
+                            tokio::time::sleep(delay).await;
                             tracing::warn!(
                                 attempt = mid_stream_retries,
                                 "mid-response transient stream error — retrying streaming request"
                             );
                             // Re-snapshot history (+ additional context) for
                             // the retry — same pattern as the 529 fallback.
-                            let (re_snapshot_raw, re_model, re_profile) = {
+                            let (re_snapshot_raw, mut re_model, mut re_profile) = {
                                 let s = orch.session.lock().await;
                                 (
                                     s.model_context_history(),
@@ -889,6 +1886,10 @@ impl StreamingTurnDriver<'_> {
                                     s.model_profile.clone(),
                                 )
                             };
+                            if let Some(route) = crate::query_model::current() {
+                                re_model = route.model;
+                                re_profile = route.profile;
+                            }
                             let mut re_snapshot = orch
                                 .rewrite_outgoing_history(
                                     re_snapshot_raw,
@@ -899,7 +1900,10 @@ impl StreamingTurnDriver<'_> {
                                 &mut re_snapshot,
                                 deferred_reminder.as_ref(),
                                 date_change_reminder.as_ref(),
-                                &turn_reminders,
+                                &mut turn_reminders,
+                                &mut guarded_async_hook_reminders,
+                                &context_announcements,
+                                false,
                             )
                             .await;
                             if let Some(scope) = cost_scope.as_ref() {
@@ -910,17 +1914,46 @@ impl StreamingTurnDriver<'_> {
                                 })?;
                             }
                             let output_observation = orch.capture_main_output().await?;
-                            let retry_stream = orch
-                                .streaming_api
-                                .stream(
-                                    &re_model,
-                                    re_profile.as_deref(),
-                                    system_prompt.as_deref(),
-                                    re_snapshot,
-                                    wire_tools.clone(),
-                                )
+                            crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+                                &mut re_snapshot,
+                                &mut turn_reminders,
+                                &mut guarded_async_hook_reminders,
+                            );
+                            let request_dispatch_admission =
+                                crate::prompt::async_hook_response::request_dispatch_admission(
+                                    &re_snapshot,
+                                    &guarded_async_hook_reminders,
+                                );
+                            let retry_stream = retry_scope
+                                .run(orch.model_runtime.prompt_cache_capture.scope(
+                                    orch.streaming_api.stream(
+                                        &re_model,
+                                        re_profile.as_deref(),
+                                        system_prompt.as_ref(),
+                                        re_snapshot,
+                                        wire_tools.clone(),
+                                        crate::config::sanitize_query_source(
+                                            &orch.config.query_source,
+                                        ),
+                                        skip_global_cache_for_system_prompt,
+                                        request_dispatch_admission,
+                                    ),
+                                ))
                                 .await;
                             orch.persist_thinking_signature_strip_latch().await;
+                            if retry_stream.is_err() {
+                                if let Some(reason) = retry_scope.take_model_fallback_request() {
+                                    Self::advance_model(
+                                        orch,
+                                        loop_state,
+                                        &re_model,
+                                        re_profile.as_deref(),
+                                        reason,
+                                    )
+                                    .await?;
+                                    return Ok(PumpStreamingOutcome::ModelFallback);
+                                }
+                            }
                             match retry_stream {
                                 Ok(s) => {
                                     cur_stream = output_accounting_impl::account_stream(
@@ -938,7 +1971,12 @@ impl StreamingTurnDriver<'_> {
                                     break Err(crate::streaming_loop::PumpFailure {
                                         error: OrchestratorError::Streaming(e),
                                         real_content_started: false,
+                                        progress:
+                                            llm_runtime::model::stream_recovery::Progress::Nothing,
+                                        partial_close: Default::default(),
                                         partial: crate::streaming_loop::PumpedTurn::default(),
+                                        disposition:
+                                            crate::streaming_loop::PumpFailureDisposition::Stream,
                                     });
                                 }
                             }
@@ -947,7 +1985,121 @@ impl StreamingTurnDriver<'_> {
                     }
                 };
                 match pump_outcome {
-                    Ok(p) => p,
+                    Ok((p, tail)) => (p, Some(tail)),
+                    Err(mut failure)
+                        if failure.disposition
+                            == crate::streaming_loop::PumpFailureDisposition::ServerFallbackDeclined =>
+                    {
+                        failure.partial_close.close(orch.output.as_ref()).await;
+                        let info = failure
+                            .partial
+                            .server_fallback_events
+                            .last()
+                            .expect("declined pump carries its server fallback observation")
+                            .clone();
+                        let declined_model =
+                            lingxi_core::host::refusal_server_control::resolve_received_model(
+                                Some(&info.lane.model),
+                                &info.event.to_model,
+                            );
+                        if let Some(receipt) = Self::begin_stream_cost_response(
+                            orch,
+                            cost_scope.as_ref(),
+                            &declined_model,
+                            Some(&info.profile),
+                            &failure.partial,
+                            api_call_started.elapsed(),
+                        ) {
+                            let settlement = receipt.settle().await;
+                            orch.model_runtime
+                                .api_calls_recorded
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            if let Err(error) = settlement.persistence_result() {
+                                orch.note_cost_settlement_failure(error).await;
+                            }
+                        }
+                        if let Some(usage) = failure.partial.usage.as_ref() {
+                            orch.record_prompt_cache_usage(usage).await;
+                        }
+                        crate::server_fallback::flush_pending_notice(orch).await;
+                        let (message_id, _) =
+                            crate::server_fallback::surface_declined(orch, &info).await;
+                        return Ok(PumpStreamingOutcome::Complete(message_id));
+                    }
+                    Err(mut failure)
+                        if stream_decision == Some(llm_runtime::model::stream_recovery::Decision::UseFallbackModel) =>
+                    {
+                        failure.partial_close.close(orch.output.as_ref()).await;
+                        // Native `abandonAttempt("chain_advance")` discards the
+                        // failed reasoning, closes its frames and rebuilds the
+                        // tool executor. Known paid usage belongs to that attempt.
+                        if let Some(receipt) = Self::begin_stream_cost_response(
+                            orch, cost_scope.as_ref(), &model, model_profile.as_deref(),
+                            &failure.partial, api_call_started.elapsed(),
+                        ) {
+                            let settlement = receipt.settle().await;
+                            orch.model_runtime.api_calls_recorded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            if let Err(error) = settlement.persistence_result() {
+                                orch.note_cost_settlement_failure(error).await;
+                            }
+                        }
+                        if let Some(usage) = failure.partial.usage.as_ref() {
+                            orch.record_prompt_cache_usage(usage).await;
+                        }
+                        // `abandonAttempt("chain_advance")` disposes the old
+                        // executor before yielding any tombstones or rebuilding
+                        // the next model attempt.
+                        let removal = exec.abandon_without_synthetics().await;
+                        if !removal.ids.is_empty() {
+                            failure.partial.tool_use_removals.push(removal);
+                        }
+                        let row_tombstones: Vec<_> = failure
+                            .partial
+                            .assistant_rows
+                            .iter()
+                            .map(crate::streaming_loop::tombstone_message_for_row)
+                            .collect();
+                        let persisted_links: Vec<_> = failure
+                            .partial
+                            .assistant_rows
+                            .iter()
+                            .filter_map(|row| row.persisted_link.clone())
+                            .collect();
+                        for tombstone in &row_tombstones {
+                            orch.output
+                                .emit_server_fallback_tombstone(tombstone, true)
+                                .await;
+                        }
+                        exec.remove_assistant_stream_rows(&persisted_links).await;
+                        let result_tombstones = settlement.discard_attempt_rows();
+                        crate::streaming_loop::clear_tombstoned_tool_result_metadata(
+                            orch,
+                            &result_tombstones,
+                        )
+                        .await;
+                        for tombstone in &result_tombstones {
+                            orch.output
+                                .emit_server_fallback_tombstone(tombstone, true)
+                                .await;
+                        }
+                        orch.output.emit_message_retracted(&assistant_id).await;
+                        Self::advance_model(
+                            orch,
+                            loop_state,
+                            &model,
+                            model_profile.as_deref(),
+                            if matches!(
+                                crate::streaming_loop::stream_failure_cause(&failure.error),
+                                Some(llm_runtime::model::stream_recovery::Cause::Overloaded)
+                            ) {
+                                "overloaded"
+                            } else {
+                                "server_error"
+                            },
+                        )
+                        .await?;
+                        return Ok(PumpStreamingOutcome::ModelFallback);
+                    }
                     // P1-04 (cc 2.1.199 partial-stream finalize, binary-verified): a
                     // finalize-class mid-stream error (server/overloaded/api error,
                     // watchdog stall, or connection close) that landed after useful
@@ -961,11 +2113,16 @@ impl StreamingTurnDriver<'_> {
                     // fallback so a completed-partial 529 keeps its streamed output
                     // instead of re-fetching; a 529 that erred before any block
                     // completed (no output) falls through to the fallback as before.
-                    Err(f)
-                        if crate::streaming_loop::partial_has_output(&f.partial)
+                    Err(mut f)
+                        if (crate::streaming_loop::partial_has_output(&f.partial)
+                            || stream_decision
+                                == Some(
+                                    llm_runtime::model::stream_recovery::Decision::KeepPartial,
+                                ))
                             && crate::streaming_loop::partial_finalize_cause(&f.error)
                                 .is_some() =>
                     {
+                        f.partial_close.close(orch.output.as_ref()).await;
                         let cause = crate::streaming_loop::partial_finalize_cause(&f.error)
                             .expect("finalize cause present (guarded above)");
                         let mut partial = f.partial;
@@ -1000,8 +2157,12 @@ impl StreamingTurnDriver<'_> {
                                     i64::try_from(blocks_yielded).unwrap_or(i64::MAX),
                                 ),
                             );
-                            // has_output is always true on this arm (partial_has_output).
-                            md.insert("has_output".into(), telemetry::AnalyticsValue::Bool(true));
+                            md.insert(
+                                "has_output".into(),
+                                telemetry::AnalyticsValue::Bool(
+                                    crate::streaming_loop::partial_has_output(&partial),
+                                ),
+                            );
                             md.insert(
                                 "synthesized_stop_reason".into(),
                                 telemetry::AnalyticsValue::String(
@@ -1023,46 +2184,95 @@ impl StreamingTurnDriver<'_> {
                         // Arm the notice + terminal-end sites below; the partial flows
                         // through the normal billing/persist/tool-drive path first.
                         partial_finalize = Some(cause);
-                        partial
+                        (partial, None)
                     }
-                    Err(f)
-                        if matches!(
-                            f.error,
-                            OrchestratorError::Streaming(
-                                LlmError::Overloaded { .. } | LlmError::ProviderInternal
+                    Err(mut f)
+                        if exec.tools.is_empty()
+                            && settlement.query_rows.is_empty()
+                            && (stream_decision
+                            == Some(
+                                llm_runtime::model::stream_recovery::Decision::RetryWithoutStreaming,
                             )
-                        ) && !is_env_truthy(
-                            std::env::var("LINGXI_DISABLE_NONSTREAMING_FALLBACK")
-                                .as_deref()
-                                .ok(),
-                        ) =>
+                            || (matches!(
+                                f.error,
+                                OrchestratorError::Streaming(
+                                    LlmError::Overloaded { .. } | LlmError::ProviderInternal
+                                )
+                                ) && stream_decision.is_none()
+                                && !is_env_truthy(
+                                    std::env::var(branding::DISABLE_NONSTREAMING_FALLBACK_ENV)
+                                        .as_deref()
+                                        .ok(),
+                                )
+                                && retry_scope.take_non_streaming_fallback())) =>
                     {
+                        f.partial_close.close(orch.output.as_ref()).await;
+                        // The opened stream may already have written cache
+                        // tokens at message_start. Record it before the
+                        // replacement request overwrites its captured prefix.
+                        if let Some(usage) = f.partial.usage.as_ref() {
+                            orch.record_prompt_cache_usage(usage).await;
+                        }
                         did_fall_back_to_non_streaming = true;
-                        let (pumped_from_fallback, replacement_exec, fallback_cost_receipt) =
-                            Self::fallback_after_stream_error(
+                        let failed_stream_outlasted_timeout = stream_failed_long
+                            && matches!(f.error, OrchestratorError::Streaming(
+                                LlmError::Overloaded { .. } | LlmError::ProviderInternal | LlmError::ProviderTimeout { .. }
+                            ));
+                        match Self::fallback_after_stream_error(
                                 orch,
                                 f.error,
                                 outgoing_history_rewriter.as_ref(),
                                 deferred_reminder.as_ref(),
                                 date_change_reminder.as_ref(),
-                                &turn_reminders,
+                                &mut turn_reminders,
+                                &mut guarded_async_hook_reminders,
+                                &context_announcements,
                                 &wire_tools,
+                                skip_global_cache_for_system_prompt,
                                 system_prompt,
                                 user_cancel,
                                 display_hook_active,
                                 assistant_id,
                                 cost_scope.as_ref(),
                                 api_call_started,
+                                &retry_scope,
+                                failed_stream_outlasted_timeout,
                             )
-                            .await?;
-                        exec = replacement_exec;
-                        cost_receipt = fallback_cost_receipt;
-                        pumped_from_fallback
+                            .await?
+                        {
+                            StreamErrorFallback::Recovered {
+                                pumped,
+                                executor,
+                                cost_receipt: fallback_cost_receipt,
+                            } => {
+                                exec = executor;
+                                cost_receipt = fallback_cost_receipt;
+                                assistant_session_append_dispatched = true;
+                                (pumped, None)
+                            }
+                            StreamErrorFallback::Declined(message_id) => {
+                                return Ok(PumpStreamingOutcome::Complete(message_id));
+                            }
+                        }
                     }
                     // #10: RateLimited/Overloaded/RepeatedOverloaded keep dedicated
                     // downstream handling — propagate.
-                    Err(f) if crate::turn_loop::is_carveout_propagated(&f.error) => {
-                        return Err(f.error);
+                    Err(mut f) if crate::turn_loop::is_carveout_propagated(&f.error) => {
+                        f.partial_close.close(orch.output.as_ref()).await;
+                        if let Some(usage) = f.partial.usage.as_ref() {
+                            orch.record_prompt_cache_usage(usage).await;
+                        }
+                        let other = f.error;
+                        orch.settle_stream_error_attempt(
+                            &mut exec,
+                            &mut f.partial,
+                            &mut settlement,
+                            assistant_id,
+                            &other.to_string(),
+                        )
+                        .await;
+                        crate::server_fallback::flush_pending_notice(orch).await;
+                        return Err(other);
                     }
                     // #10: any other mid-stream model/runtime error (e.g. Transport)
                     // ends the turn GRACEFULLY as `model_error` (faithful port of the
@@ -1073,36 +2283,115 @@ impl StreamingTurnDriver<'_> {
                     // finalize class. The assistant message for a partial-with-real-
                     // -output turn is persisted by the finalize arm above; here nothing
                     // was persisted (TS `yieldMissingToolResultBlocks` no-op).
-                    Err(f) => {
+                    Err(mut f) => {
+                        f.partial_close.close(orch.output.as_ref()).await;
+                        if let Some(usage) = f.partial.usage.as_ref() {
+                            orch.record_prompt_cache_usage(usage).await;
+                        }
                         let other = f.error;
+                        orch.settle_stream_error_attempt(
+                            &mut exec,
+                            &mut f.partial,
+                            &mut settlement,
+                            assistant_id,
+                            &other.to_string(),
+                        )
+                        .await;
                         // Classify the typed mid-stream error (`Flp`/`KNn`) into the
                         // api-error envelope; the message text stays verbatim.
                         let env = classify_api_error(&other);
                         let id =
                             crate::turn_loop::surface_model_error(orch, &other.to_string(), env)
                                 .await;
+                        crate::server_fallback::flush_pending_notice(orch).await;
                         let cost = orch.snapshot_cost_real().await;
-                        orch.output.emit_end_turn("model_error", &cost).await;
+                        orch.mark_mod_turn_error();
+                        orch.emit_turn_terminal("model_error", &cost).await;
                         return Ok(PumpStreamingOutcome::Complete(id));
                     }
                 }
             }
         };
+        let assistant_id = pumped.replacement_message_id.unwrap_or(assistant_id);
+        let request_model = model.clone();
+        let request_profile = model_profile.clone();
+        let mut response_model = request_model.clone();
+        let mut response_profile = request_profile.clone();
+        if let Some(served_model) = pumped.served_model.as_ref() {
+            response_model.clone_from(served_model);
+        }
+        if let Some(info) = pumped
+            .server_fallback_events
+            .iter()
+            .rev()
+            .find(|info| matches!(info.event.reason.as_str(), "refusal" | "sticky"))
+        {
+            response_profile = Some(info.profile.clone());
+        }
         if cost_receipt.is_none() {
             cost_receipt = Self::begin_stream_cost_response(
                 orch,
                 cost_scope.as_ref(),
-                &model,
-                model_profile.as_deref(),
+                &request_model,
+                request_profile.as_deref(),
                 &pumped,
                 api_call_started.elapsed(),
             );
         }
+        let next_mod_response = if turn_step_hook_active {
+            match remaining {
+                Some(stream) => {
+                    let exec = match user_cancel.as_ref() {
+                        Some(token) => crate::streaming_executor::StreamingToolExecutor::try_new_with_user_cancel(
+                            orch,
+                            query_history.clone(),
+                            token.clone(),
+                        ).await?,
+                        None => crate::streaming_executor::StreamingToolExecutor::try_new(orch, query_history.clone()).await?,
+                    };
+                    Some(OpenedStreamingIteration {
+                        opened: OpenedModelStream::Stream(stream),
+                        exec,
+                        query_history: query_history.clone(),
+                        retry_scope: retry_scope.clone(),
+                        model: model.clone(),
+                        model_profile: model_profile.clone(),
+                        outgoing_history_rewriter,
+                        turn_reminders,
+                        guarded_async_hook_reminders,
+                        context_announcements,
+                        wire_tools: wire_tools.clone(),
+                        skip_global_cache_for_system_prompt,
+                        deferred_reminder,
+                        date_change_reminder,
+                        assistant_id: MessageId::new(),
+                        partial_finalize: None,
+                        partial_finalize_notice_id: None,
+                        turn_id: turn_id.clone(),
+                        display_hook_active,
+                        turn_step_hook_active,
+                        mod_model_state,
+                        api_call_started: std::time::Instant::now(),
+                        stream_started,
+                        api_success_message_count,
+                        api_success_message_tokens,
+                        did_fall_back_to_non_streaming: false,
+                        cost_scope,
+                        cost_receipt: None,
+                    })
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
         Ok(PumpStreamingOutcome::Pumped(PumpedStreamingIteration {
             pumped,
+            settlement,
+            next_mod_response,
             exec,
-            model,
-            model_profile,
+            model: response_model,
+            model_profile: response_profile,
             wire_tools,
             assistant_id,
             partial_finalize,
@@ -1113,20 +2402,25 @@ impl StreamingTurnDriver<'_> {
             api_success_message_count,
             api_success_message_tokens,
             did_fall_back_to_non_streaming,
+            assistant_session_append_dispatched,
             pre_batch_mcp_tool_count,
             cost_receipt,
         }))
     }
 
-    async fn finalize_iteration(
+    async fn finalize_iteration<'a>(
         orch: &ConversationOrchestrator,
-        pumped_iteration: PumpedStreamingIteration<'_>,
-        system_prompt: &Option<String>,
+        pumped_iteration: PumpedStreamingIteration<'a>,
+        system_prompt: &Option<
+            lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        >,
         user_cancel: &Option<CancellationToken>,
         loop_state: &mut TurnLoopState,
-    ) -> Result<FinalizedStreamingIteration, OrchestratorError> {
+    ) -> Result<FinalizedStreamingIteration<'a>, OrchestratorError> {
         let PumpedStreamingIteration {
-            pumped,
+            mut pumped,
+            mut settlement,
+            next_mod_response,
             mut exec,
             model,
             model_profile,
@@ -1140,6 +2434,7 @@ impl StreamingTurnDriver<'_> {
             api_success_message_count,
             api_success_message_tokens,
             did_fall_back_to_non_streaming,
+            assistant_session_append_dispatched,
             pre_batch_mcp_tool_count,
             cost_receipt,
         } = pumped_iteration;
@@ -1158,6 +2453,7 @@ impl StreamingTurnDriver<'_> {
         // the REAL connect-phase retry count (`last_retry_count()`) instead
         // of the previous hardcoded `Duration::ZERO` / `0`.
         if let Some(ref usage) = pumped.usage {
+            orch.record_prompt_cache_usage(usage).await;
             // #55: cache this response's total input tokens (the `Xtt`
             // last-usage snapshot) for the fixed-prefix overflow guard.
             orch.record_response_input_tokens(usage);
@@ -1243,7 +2539,10 @@ impl StreamingTurnDriver<'_> {
         // `session.history` here equals the streamed snapshot — the streaming
         // path does not mutate history mid-call — taken before the assistant
         // reply is appended below. Strict no-op when no slot is wired.
-        orch.save_cache_safe_params(system_prompt.as_deref(), &model, &wire_tools)
+        let display_system = system_prompt.as_ref().map(
+            lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::display_text,
+        );
+        orch.save_cache_safe_params(display_system.as_deref(), &model, &wire_tools)
             .await;
 
         // Task 8 (llm-runtime future-work batch 3): the streamed call (or
@@ -1258,25 +2557,34 @@ impl StreamingTurnDriver<'_> {
 
         // 4. Assemble + append the assistant message.
         // `assistant_id` was pre-allocated before the stream (mid-stream
-        // dispatch hands it to the executor as each tool registers).
-        let mut blocks: Vec<ContentBlock> = pumped.assistant_blocks.clone();
-        for t in &pumped.tool_uses {
-            blocks.push(ContentBlock::ToolUse {
-                id: t.id.clone(),
-                name: t.name.clone(),
-                input: t.input.clone(),
-                provider_id: t.provider_id.clone(),
-            });
-        }
-        let assistant_msg = ConversationMessage::Assistant {
-            id: assistant_id,
-            content: blocks,
-            stop_reason: pumped.stop_reason.clone(),
-        };
+        // dispatch hands it to the executor as each tool registers). An
+        // accepted server-fallback display replacement resets this same live
+        // assistant row and retains its identity, so this is also the ID sent
+        // by the final `MessageIdentity` and persisted below.
+        let assistant_msg = pumped_assistant_message(&pumped, assistant_id);
+        let publication_fence = exec.publication_fence();
+        let publication_guard = orch
+            .prompt_runtime
+            .guarded_prompt_message_guard(assistant_id)
+            .await
+            .unwrap_or_else(|| Arc::new(publication_fence.clone()));
+        if !orch
+            .append_streamed_assistant_to_history(
+                &assistant_msg,
+                Some(publication_guard),
+                !pumped.assistant_rows.is_empty(),
+            )
+            .await
         {
-            let mut s = orch.session.lock().await;
-            s.history.push(assistant_msg.clone());
+            return Ok(FinalizedStreamingIteration::Complete(assistant_id));
         }
+        orch.record_mod_turn_response(
+            &assistant_msg,
+            pumped.usage.as_ref(),
+            &model,
+            pumped.stop_reason.as_deref(),
+            pumped.stop_details.as_ref(),
+        );
 
         // P2-04 (MessageDisplay `displayContent`): completed-message pass.
         // Once the assistant text blocks are finalized, fire `MessageDisplay`
@@ -1292,10 +2600,7 @@ impl StreamingTurnDriver<'_> {
             let joined: String = pumped
                 .assistant_blocks
                 .iter()
-                .map(|b| match b {
-                    ContentBlock::Text { text } => text.as_str(),
-                    _ => "",
-                })
+                .filter_map(ContentBlock::visible_text)
                 .collect();
             // claude-code `Qff`: skip firing entirely when the joined text is
             // empty (`if(s==="")return i`).
@@ -1349,13 +2654,40 @@ impl StreamingTurnDriver<'_> {
         orch.output
             .emit_message_boundary(pumped.stop_reason.as_deref(), request_id.as_deref())
             .await;
-        let tool_use_parent_uuids = orch
-            .persist_assistant_per_block(
-                &assistant_msg,
-                assistant_usage.as_ref(),
-                request_id.as_deref(),
-            )
-            .await;
+        let mut tool_use_parent_uuids = pumped.assistant_tool_parent_uuids.clone();
+        if pumped.assistant_rows.is_empty() {
+            tool_use_parent_uuids = if assistant_session_append_dispatched {
+                orch.persist_preappended_assistant_per_block(
+                    &assistant_msg,
+                    assistant_usage.as_ref(),
+                    request_id.as_deref(),
+                    publication_fence.clone(),
+                )
+                .await
+            } else {
+                orch.persist_assistant_per_block(
+                    &assistant_msg,
+                    assistant_usage.as_ref(),
+                    request_id.as_deref(),
+                    Some(publication_fence.clone()),
+                )
+                .await
+            };
+        } else {
+            for row in &mut pumped.assistant_rows {
+                row.stop_reason.clone_from(&pumped.stop_reason);
+                row.stop_details.clone_from(&pumped.stop_details);
+                row.usage.clone_from(&pumped.usage);
+            }
+            // The stream-local journal retains interleaved assistant/tool rows
+            // until terminal fields are available, then writes only its new
+            // suffix in source event order. Raw K rows still become the single
+            // merged assistant model message above.
+            orch.flush_stream_event_journal(&mut settlement, &mut pumped.assistant_rows)
+                .await;
+            tool_use_parent_uuids.extend(settlement.tool_use_parent_uuids.clone());
+        }
+        crate::server_fallback::flush_pending_notice(orch).await;
         // Fallback parent (the LAST persisted block's uuid) for any
         // tool_result whose tool_use id is missing from the map (defensive).
         let assistant_uuid = orch.transcript.last_jsonl_uuid.lock().await.clone();
@@ -1373,11 +2705,15 @@ impl StreamingTurnDriver<'_> {
                 error: Some("server_error"),
                 api_error_status: None,
                 inner_stop_reason: None,
-                truncated_after_output: true,
+                truncated_after_output: crate::streaming_loop::partial_is_text_continuable(&pumped),
             };
             partial_finalize_notice_id = Some(
-                crate::turn_loop::surface_api_error_notice(orch, cause.incomplete_notice(), env)
-                    .await,
+                crate::turn_loop::surface_api_error_notice(
+                    orch,
+                    cause.notice(crate::streaming_loop::partial_has_output(&pumped)),
+                    env,
+                )
+                .await,
             );
         }
 
@@ -1402,9 +2738,15 @@ impl StreamingTurnDriver<'_> {
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled);
 
-        let (tool_prevent_continuation, post_tool_batch_calls) = orch
-            .drive_streaming_tools(&mut exec, &pumped, &tool_use_parent_uuids, &assistant_uuid)
-            .await;
+        let (tool_prevent_continuation, post_tool_batch_dispatch) = orch
+            .drive_streaming_tools(
+                &mut exec,
+                &mut pumped,
+                &mut settlement,
+                &tool_use_parent_uuids,
+                &assistant_uuid,
+            )
+            .await?;
 
         Ok(FinalizedStreamingIteration::Finalized(
             FinalizedStreamingData {
@@ -1421,6 +2763,34 @@ impl StreamingTurnDriver<'_> {
         ))
     }
 
+    async fn next_mod_response<'a>(
+        next: Option<OpenedStreamingIteration<'a>>,
+    ) -> Option<OpenedStreamingIteration<'a>> {
+        let mut opened = next?;
+        let OpenedModelStream::Stream(mut tail) = opened.opened else {
+            unreachable!("a Mod continuation always owns a stream")
+        };
+        let first = tail.next().await?;
+        if let Some((model, profile)) = opened
+            .mod_model_state
+            .as_ref()
+            .and_then(|state| state.lock().unwrap().clone())
+        {
+            opened.model = model;
+            opened.model_profile = profile;
+        }
+        if let Ok(HistoryEvent::MessageStart { response }) = &first {
+            opened.model = response.model.clone();
+        }
+        opened.api_call_started = std::time::Instant::now();
+        opened.opened = OpenedModelStream::Stream(
+            futures::stream::once(async move { first })
+                .chain(tail)
+                .boxed(),
+        );
+        Some(opened)
+    }
+
     /// One iteration of the streaming turn loop: prepare → pump → finalize →
     /// abort checkpoint → disposition.
     ///
@@ -1431,465 +2801,147 @@ impl StreamingTurnDriver<'_> {
     /// streaming cancel guard runs between them and this call.
     async fn run_round(
         orch: &ConversationOrchestrator,
-        system_prompt: &Option<String>,
+        system_prompt: &Option<
+            lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        >,
         user_cancel: &Option<CancellationToken>,
         loop_state: &mut TurnLoopState,
         in_human_turn: bool,
     ) -> Result<StepExit, OrchestratorError> {
-        let prepared = match Self::prepare_iteration(
-            orch,
-            system_prompt,
-            user_cancel,
-            loop_state,
-            in_human_turn,
-        )
-        .await?
-        {
-            PrepareStreamingOutcome::Ready(iteration) => iteration,
-            PrepareStreamingOutcome::Complete(message_id) => {
-                return Ok(StepExit::FinishThroughEpilogue(message_id));
-            }
-        };
-
-        let pumped =
-            Self::pump_iteration(orch, prepared, system_prompt, user_cancel, loop_state).await;
-        let pumped_iteration = match pumped {
-            Err(error) => {
-                // `open_iteration` enables SDK frame buffering before the
-                // stream is opened. Every error path must release that
-                // session-scoped buffer or later tool frames disappear.
-                orch.set_tool_frame_buffering(false).await;
-                return Err(error);
-            }
-            Ok(PumpStreamingOutcome::Pumped(iteration)) => iteration,
-            Ok(PumpStreamingOutcome::Complete(message_id)) => {
-                orch.set_tool_frame_buffering(false).await;
-                return Ok(StepExit::FinishThroughEpilogue(message_id));
-            }
-        };
-
-        let finalized = match Self::finalize_iteration(
-            orch,
-            pumped_iteration,
-            system_prompt,
-            user_cancel,
-            loop_state,
-        )
-        .await
-        {
-            Ok(finalized) => finalized,
-            Err(error) => {
-                orch.set_tool_frame_buffering(false).await;
-                return Err(error);
-            }
-        };
-        let FinalizedStreamingIteration {
-            pumped,
-            assistant_id,
-            tool_prevent_continuation,
-            post_tool_batch_calls,
-            pre_batch_mcp_tool_count,
-            partial_finalize,
-            partial_finalize_notice_id,
-            aborted_during_stream,
-        } = finalized;
-
-        // A3: accumulate this step's output tokens (TS
-        // `getTurnOutputTokens()`), ONCE, after the model step has returned
-        // and before the disposition reads the running total.
-        //
-        // §3.4 wants a single accumulation boundary per step. This used to
-        // sit inside `finalize_iteration`, where the two batched entries
-        // accumulate in their loop bodies instead — three sites, one of them
-        // a step deeper than the others. Moving it here puts all three on
-        // the same boundary. Safe because nothing reads `global_turn_tokens`
-        // between the old site and the disposition that consumes it, and
-        // `streaming_budget_on_continues_then_stops_at_threshold` fails if
-        // the accumulation lands after the budget check rather than before.
-        loop_state.global_turn_tokens = loop_state
-            .global_turn_tokens
-            .saturating_add(pumped.output_tokens);
-
-        // DEFERRED-3 / esc-interrupt FIX: "we were aborted" — the single
-        // post-drive abort checkpoint. Once the user-interrupt token has fired,
-        // the executor above already drained the bare REJECT_MESSAGE
-        // `tool_result`s into history (model-visible). The turn MUST now STOP —
-        // claude-code returns with NO further `callModel`, honoring
-        // REJECT_MESSAGE's "STOP what you are doing and wait for the user".
-        // Looping into the `Some("tool_use") => continue` arm below would (1)
-        // issue a wasted extra round-trip after every ESC and (2) let a
-        // Block-behavior tool emitted on that continuation actually EXECUTE
-        // (`abort_reason_for` returns `None` for Block tools) despite the
-        // interrupt — both of which claude-code structurally prevents by
-        // returning here first. `None` token (plain `run_turn_streaming`) →
-        // never fires → identical to before.
-        //
-        // #5: the terminal reason + interrupt message depend on WHICH ref
-        // checkpoint observed the abort (captured in `aborted_during_stream`
-        // before the drive): an abort already set when the stream ended is
-        // `aborted_streaming` / `[Request interrupted by user]` (query.ts:1015,
-        // `toolUse:false`); an abort that fired only DURING the tool drive is
-        // `aborted_tools` / `[Request interrupted by user for tool use]`
-        // (query.ts:1485, `toolUse:true`).
-        if user_cancel
-            .as_ref()
-            .is_some_and(CancellationToken::is_cancelled)
-        {
-            // Abort wins over a result-level end request. Results that were
-            // allowed to finish (notably Block-behavior tools) may have
-            // recorded one before this checkpoint, so drain the side table
-            // even though the end-turn path below is intentionally skipped.
-            let _ = orch
-                .take_pending_tool_result_turn_ends(
-                    &pumped
-                        .tool_uses
-                        .iter()
-                        .map(|tool_use| tool_use.id.clone())
-                        .collect::<Vec<_>>(),
-                )
-                .await;
-            let cost = orch.snapshot_cost_real().await;
-            let (abort_reason, interrupt_message) = if aborted_during_stream {
-                ("aborted_streaming", INTERRUPT_MESSAGE)
-            } else {
-                ("aborted_tools", INTERRUPT_MESSAGE_FOR_TOOL_USE)
+        let mut step_cache = None;
+        loop {
+            let selected = {
+                let session = orch.session.lock().await;
+                crate::query_model::ModelRoute {
+                    model: session.model.clone(),
+                    profile: session.model_profile.clone(),
+                }
             };
-            orch.output.emit_end_turn(abort_reason, &cost).await;
-            // NOW-ABORT disambiguation: a `Now`-driven cancellation means the
-            // urgent queued command will run next via the between-turn drain —
-            // DON'T inject the user-interrupt message. For a plain user
-            // interrupt (the default with no reason flag wired) inject as
-            // before. claude-code `query.ts:1046-1050`/`1501-1505`:
-            // `createUserInterruptionMessage`.
-            if orch.cancel_reason_now()
-                != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
-            {
-                orch.inject_user_message(interrupt_message).await;
+            let selected = crate::scheduled_turn::current().map_or(selected, |settings| {
+                crate::query_model::ModelRoute {
+                    model: settings.model,
+                    profile: Some(settings.provider),
+                }
+            });
+            // A user's model switch during the query supersedes its fallback.
+            if loop_state.selected_route.as_ref() != Some(&selected) {
+                loop_state.selected_route = Some(selected);
+                loop_state.serving_route = None;
+                loop_state.fallback_index = 0;
             }
-            return Ok(StepExit::FinishThroughEpilogue(assistant_id));
-        }
-
-        // P1-04 (cc 2.1.199): a finalized partial ends the turn once its
-        // dispatched tools have drained (above) and the incomplete-response
-        // notice has been surfaced — cc `break e`s out of the stream loop after
-        // yielding the notice; it does NOT re-enter the continuation logic. We
-        // terminate here (reason `model_error`, matching the api-error catch)
-        // rather than looping on the synthesized `tool_use`/`end_turn`, so the
-        // user sees the partial + notice and can retry. The synthesized
-        // stop_reason still rides on the persisted partial assistant line
-        // (patched above) for resume fidelity.
-        if partial_finalize.is_some() {
-            if crate::turn_loop::truncated_response_recovery_eligible(
-                &orch.config.query_source,
-                orch.prompt_is_interactive(),
-            ) && loop_state.recovery.max_output_tokens_recovery_count
-                < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT
-            {
-                let is_subagent = crate::turn_loop::truncated_response_recovery_is_subagent(
-                    &orch.config.query_source,
-                );
-                let nudge = if is_subagent {
-                    crate::turn_loop::TRUNCATED_RESPONSE_RECOVERY_NUDGE_SUBAGENT
-                } else {
-                    crate::turn_loop::TRUNCATED_RESPONSE_RECOVERY_NUDGE_MAIN
-                };
-                orch.inject_meta_user_message(nudge).await;
-                loop_state.recovery.max_output_tokens_recovery_count = loop_state
-                    .recovery
-                    .max_output_tokens_recovery_count
-                    .saturating_add(1);
-                loop_state.recovery.max_output_tokens_override = None;
+            let route = loop_state.serving_route.clone();
+            let context = crate::query_model::fallback_target_context(
+                orch,
+                &loop_state.selected_route.as_ref().unwrap().model,
+                route.as_ref().map(|route| route.model.as_str()),
+            )
+            .await;
+            // This iteration future contains the prepare/pump/finalize state
+            // machine. Keep it off `run_round`'s poll stack while the two
+            // task-local scopes wrap the same future.
+            let iteration = Box::pin(Self::run_round_for_model(
+                orch,
+                system_prompt,
+                user_cancel,
+                loop_state,
+                in_human_turn,
+                &mut step_cache,
+            ));
+            let outcome = crate::query_model::ROUTE
+                .scope(
+                    route,
+                    lingxi_core::host::refusal_driver::scope_fallback_target(context, iteration),
+                )
+                .await?;
+            if let Some(exit) = outcome {
+                return Ok(exit);
+            }
+            if token_aborted(user_cancel) {
+                // Rejoin the outer cancellation checkpoint before any dispatch.
                 return Ok(StepExit::Continue);
             }
-            // A finalized partial is terminal before normal tool-result
-            // disposition. Do not leave an end marker from a completed
-            // result live in the session-scoped side table.
-            let _ = orch
-                .take_pending_tool_result_turn_ends(
-                    &pumped
-                        .tool_uses
-                        .iter()
-                        .map(|tool_use| tool_use.id.clone())
-                        .collect::<Vec<_>>(),
-                )
-                .await;
-            let cost = orch.snapshot_cost_real().await;
-            orch.output.emit_end_turn("model_error", &cost).await;
-            return Ok(StepExit::FinishThroughEpilogue(
-                partial_finalize_notice_id.unwrap_or(assistant_id),
-            ));
-        }
-
-        match orch
-            .decide_streaming_disposition(
-                loop_state,
-                &pumped,
-                assistant_id,
-                tool_prevent_continuation,
-                post_tool_batch_calls,
-                pre_batch_mcp_tool_count,
-            )
-            .await?
-        {
-            StreamingIterationDisposition::Continue => Ok(StepExit::Continue),
-            StreamingIterationDisposition::Complete(message_id) => {
-                // Pending input can arrive while the final response is
-                // streaming, after the top-of-loop drain has already run.
-                // Give it one final drain before committing the natural
-                // end-turn so it continues this same turn.
-                if orch.drain_mid_turn_input().await {
-                    return Ok(StepExit::Continue);
-                }
-                Ok(StepExit::FinishThroughEpilogue(message_id))
-            }
-            StreamingIterationDisposition::ForcedComplete(message_id) => {
-                Ok(StepExit::FinishThroughEpilogue(message_id))
-            }
-            // §3.6: the ONE disposition that skips the epilogue.
-            StreamingIterationDisposition::Return(outcome) => Ok(StepExit::ReturnDirect(outcome)),
         }
     }
 
-    pub(super) async fn run(self) -> Result<ConversationOutcome, OrchestratorError> {
-        let Self {
-            orch,
-            prompt,
-            images,
-            user_cancel,
-            message_id,
-            transient_rewake,
-            in_human_turn,
-            queued_inputs,
-        } = self;
-
-        // Startup Responses WebSocket prewarm is strictly opportunistic. A real
-        // user turn must never wait for an in-flight `generate=false` request to
-        // finish before it can open its own stream.
-        orch.abort_startup_responses_websocket_prewarm();
-
-        // 0. Build the system prompt for THIS turn.
-        // claude-code `nre` precedence: `--system-prompt` (override) wins; else
-        // the `--agent`-adopted main-thread agent's prompt; else the default.
-        let system_prompt: Option<String> = Some(orch.effective_system_prompt().await);
-
-        // A side query left unfinished when the previous user turn ended was
-        // keyed to that previous prompt. Never surface it against new intent.
-        orch.discard_stale_prefetches().await;
-
-        // 1. Append the user prompt (+ any pasted images) to session history.
-        // `images` arrives already decoded (path-based callers ran `load_images`
-        // first; the bridge converts inline `ImageRefDto`s straight to sources).
-        let submissions: Vec<(QueuedPromptInput, ConversationMessage)> = match queued_inputs {
-            Some(inputs) => inputs
-                .into_iter()
-                .map(|input| {
-                    let mut message = ConversationMessage::user(
-                        input.message_id.unwrap_or_default(),
-                        input.text.clone(),
-                    );
-                    if let ConversationMessage::User { is_meta, .. } = &mut message {
-                        *is_meta = input.is_meta;
-                    }
-                    (input, message)
-                })
-                .collect(),
-            None => {
-                let mut message = ConversationMessage::user_with_images(
-                    message_id.unwrap_or_default(),
-                    prompt.to_string(),
-                    images,
-                );
-                if let ConversationMessage::User { is_meta, .. } = &mut message {
-                    *is_meta = !in_human_turn;
-                }
-                vec![(
-                    QueuedPromptInput {
-                        goal_retry_id: None,
-                        text: prompt.to_string(),
-                        is_meta: !in_human_turn,
-                        message_id,
-                        ..Default::default()
-                    },
-                    message,
-                )]
-            }
-        };
-        // A human entry owns turn-level UI/hook identity, but never rewrites a
-        // neighboring scheduled entry's per-message metadata.
-        let primary = submissions
-            .iter()
-            .position(|(input, _)| !input.is_meta)
-            .unwrap_or(0);
-        let user_msg = &submissions[primary].1;
-        let prior_message_id = {
-            let mut s = orch.session.lock().await;
-            let prior = s.history.last().map(ConversationMessage::id);
-            if !transient_rewake {
-                s.history
-                    .extend(submissions.iter().map(|(_, message)| message.clone()));
-            }
-            prior
-        };
-        if !transient_rewake {
-            for (input, message) in &submissions {
-                orch.persist_queued_message_to_jsonl(message, input).await;
-            }
-        }
-        // (/rewind) Snapshot the pre-turn file state IN MEMORY, keyed by this
-        // user message, so `track_edit` (fired by Edit/Write/NotebookEdit during
-        // the turn) records each file's pre-edit backup into it. The POPULATED
-        // record is persisted to the transcript at TURN END (see below) — NOT
-        // here: at turn start the backup map is empty (no edits yet), and
-        // persisting it now would leave disk-based restore (`rewind_from_disk`,
-        // which runs after the TUI unwinds and rebuilds the index from these
-        // lines) with nothing to restore.
-        let file_history_msg_id = (!transient_rewake).then(|| user_msg.id().as_uuid());
-        if let (Some(fh), Some(message_id)) = (&orch.file_history, file_history_msg_id) {
-            fh.make_snapshot(message_id).await;
-        }
-
-        // hooks B4: UserPromptSubmit (streaming twin). A Block aborts before the
-        // first stream is opened. No-op when unregistered.
-        if !transient_rewake {
-            for (input, message) in &submissions {
-                // Synthetic entries (cron fires, `/loop` wakeups) are not user
-                // prompts: firing the hook for them double-counts telemetry and
-                // re-runs `append_ultracode_attachments` per batch entry.
-                if input.is_meta {
-                    continue;
-                }
-                if orch
-                    .fire_user_prompt_submit(&input.text, message.id())
-                    .await
-                {
-                    return Ok(ConversationOutcome::StopHookPrevented {
-                        turn_count: 0,
-                        final_message_id: message.id(),
-                    });
-                }
-            }
-        }
-
-        orch.begin_output_turn(user_msg.id()).await?;
-        let mut loop_state = TurnLoopState::new(
-            orch,
-            prior_message_id.unwrap_or_else(|| user_msg.id()),
-            user_cancel.clone(),
+    async fn advance_model(
+        orch: &ConversationOrchestrator,
+        loop_state: &mut TurnLoopState,
+        failed: &str,
+        profile: Option<&str>,
+        reason: &str,
+    ) -> Result<(), OrchestratorError> {
+        let primary = loop_state
+            .selected_route
+            .as_ref()
+            .map_or(failed, |route| route.model.as_str());
+        let chain = crate::query_model::configured_chain(
+            orch.config.fallback_model.as_deref().unwrap_or_default(),
+            primary,
         );
-        let final_message_id;
-        loop {
-            // MID-TURN DRAIN (claude-code query.ts ~1570-1580): drain BEFORE
-            // every terminal top-of-loop guard, including `max_turns`. A message
-            // can arrive while the previous model/tool step is running; returning
-            // for the cap before this consume-once source is polled would discard
-            // it. Claude Code 2.1.205 preserves that message when `--max-turns`
-            // ends the turn, so inject it into the persisted history first.
-            // With no source wired this remains a strict no-op.
-            // The cancel guard is NOT part of this: on this path it runs AFTER
-            // the increment (below), where the two batched entries have it first
-            // or not at all.
-            match orch
-                .run_turn_loop_guards(loop_state::LoopGuardOrder::Streaming, &mut loop_state)
-                .await
-            {
-                loop_state::GuardVerdict::Proceed => {}
-                loop_state::GuardVerdict::MaxTurns => {
-                    return Err(OrchestratorError::MaxTurnsReached {
-                        max_turns: orch.config.max_turns,
-                    })
-                }
-                loop_state::GuardVerdict::OverBudget => {
-                    return Err(OrchestratorError::MaxBudgetReached {
-                        budget_nano_usd: orch.config.max_budget_nano_usd.unwrap_or(0),
-                    })
-                }
-            }
-
-            // DEFERRED-3 / esc-interrupt FIX: top-of-loop user-interrupt guard
-            // (faithful port of claude-code `query.ts:1015` — the `aborted_streaming`
-            // return). If the user-interrupt token is already set when we reach the
-            // top of an iteration — a pre-cancel, or an abort that fired during the
-            // previous iteration's streaming BEFORE any tool ran — we must STOP
-            // BEFORE issuing the next `callModel`. claude-code consumes any
-            // remaining streaming results then returns `aborted_streaming` with no
-            // further sampling; here the previous iteration already drained its
-            // results into history (the post-tools guard) or there were none, so we
-            // simply break. This is the structural barrier that prevents a
-            // Block-behavior tool on a post-interrupt continuation from ever
-            // executing. `None` token → never fires → identical to before.
-            if user_cancel
-                .as_ref()
-                .is_some_and(CancellationToken::is_cancelled)
-            {
-                let cost = orch.snapshot_cost_real().await;
-                orch.output.emit_end_turn("aborted_streaming", &cost).await;
-                // NOW-ABORT disambiguation: when the cancellation was driven by a
-                // `Now`-priority enqueue (not a user Ctrl+C/ESC), the urgent
-                // command IS the "interruption" and will be run next by the
-                // between-turn drain — so DON'T inject the user-interrupt message
-                // (which would mislabel the abort and pollute context). For a
-                // plain user interrupt (the default when no reason flag is wired)
-                // behavior is byte-identical to before: inject the message.
-                // claude-code `query.ts:1046-1050`: `createUserInterruptionMessage`.
-                if orch.cancel_reason_now()
-                    != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
-                {
-                    orch.inject_user_message(INTERRUPT_MESSAGE).await;
-                }
-                final_message_id = loop_state.last_message_id;
-                break;
-            }
-
-            match Self::run_round(
-                orch,
-                &system_prompt,
-                &user_cancel,
-                &mut loop_state,
-                in_human_turn,
-            )
-            .await?
-            {
-                StepExit::Continue => continue,
-                StepExit::FinishThroughEpilogue(message_id) => {
-                    final_message_id = message_id;
-                    break;
-                }
-                // §3.6: skips the file-history epilogue below, which is exactly
-                // what `Return` has always done.
-                StepExit::ReturnDirect(outcome) => return Ok(outcome),
-            }
+        let (index, target) =
+            crate::query_model::advance(&chain, loop_state.fallback_index, failed, reason);
+        let target = target.ok_or_else(|| {
+            OrchestratorError::Internal("configured model fallback chain exhausted".into())
+        })?;
+        let current = crate::query_model::ModelRoute {
+            model: failed.into(),
+            profile: profile.map(str::to_owned),
+        };
+        let listings = orch.api.list_model_listings();
+        let next = crate::query_model::resolve(target, &current, &listings);
+        loop_state.fallback_index = index.saturating_add(1);
+        loop_state.serving_route = Some(next.clone());
+        // Native Dt continues in place before creating a model-change notice.
+        if index >= chain.len() {
+            return Ok(());
         }
-
-        // (/rewind) Persist THIS turn's now-populated file-history snapshot to the
-        // transcript — `track_edit` filled its backup map (pre-edit content of
-        // every file Edit/Write/NotebookEdit touched) during the turn above.
-        // Restore (`rewind_from_disk`) and `--resume` rebuild the index from
-        // these lines, so the record must carry the backups, not the empty map
-        // it had at turn start. Persisted unconditionally (an edit-free turn
-        // still records a restore point for conversation-only rewind).
-        if let (Some(fh), Some(file_history_msg_id)) = (&orch.file_history, file_history_msg_id) {
-            if let (Some(record), Some(writer)) = (
-                fh.snapshot_record(file_history_msg_id),
-                &orch.transcript.jsonl_writer,
-            ) {
-                let session_id = orch.session.lock().await.session_id;
-                let session_uuid = session_id.as_uuid().to_string();
-                let line = session::file_history::snapshot_line_json(&session_uuid, &record);
-                if let Err(error) = writer.append_file_history_snapshot(&line).await {
-                    orch.record_transcript_append_failure(
-                        &session_id.to_string(),
-                        "file_history_snapshot",
-                        &error,
-                    )
-                    .await;
-                }
-            }
-        }
-
-        Ok(ConversationOutcome::EndTurn {
-            turn_count: loop_state.turn_count,
-            final_message_id,
-        })
+        let facts = |route: &crate::query_model::ModelRoute| {
+            let listing = listings.iter().find(|listing| {
+                listing.request_model == route.model
+                    && route
+                        .profile
+                        .as_ref()
+                        .is_none_or(|profile| listing.provider_id == *profile)
+            });
+            let label = listing.map_or_else(
+                || route.model.clone(),
+                |listing| listing.display_model.clone(),
+            );
+            let window = listing
+                .and_then(|listing| listing.metadata.context_window_tokens)
+                .unwrap_or_else(|| {
+                    llm_runtime::model::context_window::context_window_for_model(&route.model, &[])
+                });
+            (label, window)
+        };
+        let (from_label, from_window) = facts(&current);
+        let (to_label, to_window) = facts(&next);
+        let content =
+            crate::query_model::server_error_notice(&from_label, &to_label, from_window, to_window);
+        let id = MessageId::new();
+        let metadata = lingxi_core::types::ModelFallbackMetadata {
+            trigger: reason.into(),
+            original_model: failed.into(),
+            fallback_model: next.model,
+        };
+        let notice = ConversationMessage::System {
+            id,
+            content: content.clone(),
+            subtype: Some("model_fallback".into()),
+            compact_metadata: None,
+            refusal_fallback: None,
+            model_fallback: Some(metadata.clone()),
+        };
+        let session_id = {
+            let mut session = orch.session.lock().await;
+            session.history.push(notice.clone());
+            session.session_id
+        };
+        orch.persist_message_to_jsonl(&notice).await;
+        orch.output
+            .emit_model_fallback(&id, &session_id, &content, &metadata)
+            .await;
+        Ok(())
     }
 
     async fn run_round_for_model(
@@ -2089,7 +3141,7 @@ impl StreamingTurnDriver<'_> {
                 } else {
                     ("aborted_tools", INTERRUPT_MESSAGE_FOR_TOOL_USE)
                 };
-                orch.output.emit_end_turn(abort_reason, &cost).await;
+                orch.emit_turn_terminal(abort_reason, &cost).await;
                 // NOW-ABORT disambiguation: a `Now`-driven cancellation means the
                 // urgent queued command will run next via the between-turn drain —
                 // DON'T inject the user-interrupt message. For a plain user
@@ -2152,7 +3204,7 @@ impl StreamingTurnDriver<'_> {
                     .await;
                 let cost = orch.snapshot_cost_real().await;
                 orch.mark_mod_turn_error();
-                orch.output.emit_end_turn("model_error", &cost).await;
+                orch.emit_turn_terminal("model_error", &cost).await;
                 return Ok(Some(StepExit::FinishThroughEpilogue(
                     partial_finalize_notice_id.unwrap_or(assistant_id),
                 )));
@@ -2223,5 +3275,369 @@ impl StreamingTurnDriver<'_> {
                 }
             };
         }
+    }
+
+    pub(super) async fn run(self) -> Result<ConversationOutcome, OrchestratorError> {
+        let Self {
+            orch,
+            prompt,
+            images,
+            user_cancel,
+            message_id,
+            transient_rewake,
+            in_human_turn,
+            queued_inputs,
+            row_token,
+            mut projected_content,
+        } = self;
+
+        // Startup Responses WebSocket prewarm is strictly opportunistic. A real
+        // user turn must never wait for an in-flight `generate=false` request to
+        // finish before it can open its own stream.
+        orch.abort_startup_responses_websocket_prewarm();
+
+        // 0. Build the system prompt for THIS turn.
+        // claude-code `nre` precedence: `--system-prompt` (override) wins; else
+        // the `--agent`-adopted main-thread agent's prompt; else the default.
+        let system_prompt: Option<
+            lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        > = Some(orch.provider_system_prompt().await);
+
+        // A side query left unfinished when the previous user turn ended was
+        // keyed to that previous prompt. Never surface it against new intent.
+        orch.discard_stale_prefetches().await;
+
+        // Screen each submission before a user row is committed. A Mod answer
+        // without `next(e)` can drop it; a forwarded rewrite becomes the text
+        // the model and the persisted transcript receive.
+        let mut mod_contexts = Vec::new();
+        let mut screened_prompt = None;
+        let queued_inputs = if transient_rewake {
+            queued_inputs
+        } else {
+            match queued_inputs {
+                Some(inputs) => {
+                    let mut admitted = Vec::with_capacity(inputs.len());
+                    for mut input in inputs {
+                        if let Some(kind) =
+                            input.mod_origin.as_ref().and_then(external_receive_kind)
+                        {
+                            let Some(received) =
+                                orch.screen_mod_queued_receive(&input.text, kind).await
+                            else {
+                                continue;
+                            };
+                            input.text = received;
+                        }
+                        match orch
+                            .screen_mod_prompt_submit(&input.text, &[], input.mod_origin.clone())
+                            .await
+                        {
+                            ModPromptScreen::Admit { text, context, .. } => {
+                                input.text = text;
+                                admitted.push(input);
+                                mod_contexts.push(context);
+                            }
+                            ModPromptScreen::Drop(reason) => {
+                                orch.emit_mod_prompt_drop(&reason).await;
+                            }
+                        }
+                    }
+                    if admitted.is_empty() {
+                        return Ok(ConversationOutcome::StopHookPrevented {
+                            turn_count: 0,
+                            final_message_id: message_id.unwrap_or_else(MessageId::new),
+                        });
+                    }
+                    Some(admitted)
+                }
+                None => {
+                    let origin = crate::mod_prompt_origin::current();
+                    let mut received = prompt.to_owned();
+                    if let Some(kind) = external_receive_kind(&origin) {
+                        let Some(text) = orch.screen_mod_queued_receive(prompt, kind).await else {
+                            return Ok(ConversationOutcome::StopHookPrevented {
+                                turn_count: 0,
+                                final_message_id: message_id.unwrap_or_else(MessageId::new),
+                            });
+                        };
+                        received = text;
+                    }
+                    let screen = if let Some(content) = &mut projected_content {
+                        // External receive currently returns display text; retain
+                        // the original exact text when it forwards unchanged.
+                        if received != content.display_text() {
+                            content.rewrite_text(
+                                lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                                    serde_json::json!(received),
+                                ),
+                            )?;
+                        }
+                        orch.screen_mod_prompt_submit_projected(&content.text, &images, None)
+                            .await
+                    } else {
+                        orch.screen_mod_prompt_submit(&received, &images, None)
+                            .await
+                    };
+                    match screen {
+                        ModPromptScreen::Admit {
+                            text,
+                            text_projection,
+                            context,
+                        } => {
+                            if let Some(content) = &mut projected_content {
+                                content.rewrite_text(text_projection)?;
+                            }
+                            screened_prompt = Some(text);
+                            mod_contexts.push(context);
+                        }
+                        ModPromptScreen::Drop(reason) => {
+                            orch.emit_mod_prompt_drop(&reason).await;
+                            return Ok(ConversationOutcome::StopHookPrevented {
+                                turn_count: 0,
+                                final_message_id: message_id.unwrap_or_else(MessageId::new),
+                            });
+                        }
+                    }
+                    None
+                }
+            }
+        };
+        let prompt = screened_prompt.as_deref().unwrap_or(prompt);
+
+        // 1. Append the user prompt (+ any pasted images) to session history.
+        // `images` arrives already decoded (path-based callers ran `load_images`
+        // first; the bridge converts inline `ImageRefDto`s straight to sources).
+        let submissions: Vec<(QueuedPromptInput, ConversationMessage)> = match queued_inputs {
+            Some(inputs) => inputs
+                .into_iter()
+                .map(|input| {
+                    let mut message = ConversationMessage::user(
+                        input.message_id.unwrap_or_default(),
+                        input.text.clone(),
+                    );
+                    if let ConversationMessage::User { is_meta, .. } = &mut message {
+                        *is_meta = input.is_meta;
+                    }
+                    (input, message)
+                })
+                .collect(),
+            None => {
+                let mut message = ConversationMessage::user_with_images(
+                    message_id.unwrap_or_default(),
+                    prompt.to_string(),
+                    images,
+                );
+                if let ConversationMessage::User {
+                    content, is_meta, ..
+                } = &mut message
+                {
+                    *is_meta = !in_human_turn;
+                    if let Some(projected) = projected_content {
+                        *content = projected.blocks;
+                    }
+                }
+                vec![(
+                    QueuedPromptInput {
+                        goal_retry_id: None,
+                        text: prompt.to_string(),
+                        is_meta: !in_human_turn,
+                        message_id,
+                        transcript_row_token: row_token,
+                        ..Default::default()
+                    },
+                    message,
+                )]
+            }
+        };
+        // A human entry owns turn-level UI/hook identity, but never rewrites a
+        // neighboring scheduled entry's per-message metadata.
+        let primary = submissions
+            .iter()
+            .position(|(input, _)| !input.is_meta)
+            .unwrap_or(0);
+        let user_msg = &submissions[primary].1;
+        let mod_turn_text = if submissions[primary].0.is_meta {
+            ""
+        } else {
+            submissions[primary].0.text.as_str()
+        };
+        let prior_message_id = {
+            orch.session
+                .lock()
+                .await
+                .history
+                .last()
+                .map(ConversationMessage::id)
+        };
+        if !transient_rewake {
+            for ((input, message), context) in submissions.iter().zip(&mod_contexts) {
+                orch.session.lock().await.history.push(message.clone());
+                orch.persist_queued_message_to_jsonl(message, input).await;
+                orch.append_mod_prompt_context(context).await;
+            }
+        }
+        // (/rewind) Snapshot the pre-turn file state IN MEMORY, keyed by this
+        // user message, so `track_edit` (fired by Edit/Write/NotebookEdit during
+        // the turn) records each file's pre-edit backup into it. The POPULATED
+        // record is persisted to the transcript at TURN END (see below) — NOT
+        // here: at turn start the backup map is empty (no edits yet), and
+        // persisting it now would leave disk-based restore (`rewind_from_disk`,
+        // which runs after the TUI unwinds and rebuilds the index from these
+        // lines) with nothing to restore.
+        let file_history_msg_id = (!transient_rewake).then(|| user_msg.id().as_uuid());
+        if let (Some(fh), Some(message_id)) = (&orch.file_history, file_history_msg_id) {
+            fh.make_snapshot(message_id).await;
+        }
+
+        // hooks B4: UserPromptSubmit (streaming twin). A Block aborts before the
+        // first stream is opened. No-op when unregistered.
+        if !transient_rewake {
+            for (input, message) in &submissions {
+                // Synthetic entries (cron fires, `/loop` wakeups) are not user
+                // prompts: firing the hook for them double-counts telemetry and
+                // re-runs `append_ultracode_attachments` per batch entry.
+                if input.is_meta {
+                    continue;
+                }
+                let prompt_projection = super::projected_content::exact_message_text(message);
+                if orch
+                    .fire_user_prompt_submit_projected(&prompt_projection, message.id())
+                    .await
+                {
+                    return Ok(ConversationOutcome::StopHookPrevented {
+                        turn_count: 0,
+                        final_message_id: message.id(),
+                    });
+                }
+            }
+        }
+
+        orch.begin_output_turn(user_msg.id()).await?;
+        let mut loop_state = TurnLoopState::new(
+            orch,
+            prior_message_id.unwrap_or_else(|| user_msg.id()),
+            user_cancel.clone(),
+        );
+        let final_message_id;
+        loop {
+            // MID-TURN DRAIN (claude-code query.ts ~1570-1580): drain BEFORE
+            // every terminal top-of-loop guard, including `max_turns`. A message
+            // can arrive while the previous model/tool step is running; returning
+            // for the cap before this consume-once source is polled would discard
+            // it. Claude Code 2.1.205 preserves that message when `--max-turns`
+            // ends the turn, so inject it into the persisted history first.
+            // With no source wired this remains a strict no-op.
+            // The cancel guard is NOT part of this: on this path it runs AFTER
+            // the increment (below), where the two batched entries have it first
+            // or not at all.
+            match orch
+                .run_turn_loop_guards(loop_state::LoopGuardOrder::Streaming, &mut loop_state)
+                .await
+            {
+                loop_state::GuardVerdict::Proceed => {}
+                loop_state::GuardVerdict::MaxTurns => {
+                    return Err(OrchestratorError::MaxTurnsReached {
+                        max_turns: orch.config.max_turns,
+                    });
+                }
+                loop_state::GuardVerdict::OverBudget => {
+                    return Err(OrchestratorError::MaxBudgetReached {
+                        budget_nano_usd: orch.config.max_budget_nano_usd.unwrap_or(0),
+                    });
+                }
+            }
+
+            // DEFERRED-3 / esc-interrupt FIX: top-of-loop user-interrupt guard
+            // (faithful port of claude-code `query.ts:1015` — the `aborted_streaming`
+            // return). If the user-interrupt token is already set when we reach the
+            // top of an iteration — a pre-cancel, or an abort that fired during the
+            // previous iteration's streaming BEFORE any tool ran — we must STOP
+            // BEFORE issuing the next `callModel`. claude-code consumes any
+            // remaining streaming results then returns `aborted_streaming` with no
+            // further sampling; here the previous iteration already drained its
+            // results into history (the post-tools guard) or there were none, so we
+            // simply break. This is the structural barrier that prevents a
+            // Block-behavior tool on a post-interrupt continuation from ever
+            // executing. `None` token → never fires → identical to before.
+            if user_cancel
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                let cost = orch.snapshot_cost_real().await;
+                orch.emit_turn_terminal("aborted_streaming", &cost).await;
+                // NOW-ABORT disambiguation: when the cancellation was driven by a
+                // `Now`-priority enqueue (not a user Ctrl+C/ESC), the urgent
+                // command IS the "interruption" and will be run next by the
+                // between-turn drain — so DON'T inject the user-interrupt message
+                // (which would mislabel the abort and pollute context). For a
+                // plain user interrupt (the default when no reason flag is wired)
+                // behavior is byte-identical to before: inject the message.
+                // claude-code `query.ts:1046-1050`: `createUserInterruptionMessage`.
+                if orch.cancel_reason_now()
+                    != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
+                {
+                    orch.inject_user_message(INTERRUPT_MESSAGE).await;
+                }
+                final_message_id = loop_state.last_message_id;
+                break;
+            }
+
+            if !loop_state.mod_turn_started {
+                orch.fire_mod_turn_start(mod_turn_text, &loop_state.mod_turn_id)
+                    .await;
+                loop_state.mod_turn_started = true;
+            }
+
+            match Box::pin(Self::run_round(
+                orch,
+                &system_prompt,
+                &user_cancel,
+                &mut loop_state,
+                in_human_turn,
+            ))
+            .await?
+            {
+                StepExit::Continue => continue,
+                StepExit::FinishThroughEpilogue(message_id) => {
+                    final_message_id = message_id;
+                    break;
+                }
+                // §3.6: skips the file-history epilogue below, which is exactly
+                // what `Return` has always done.
+                StepExit::ReturnDirect(outcome) => return Ok(outcome),
+            }
+        }
+
+        // (/rewind) Persist THIS turn's now-populated file-history snapshot to the
+        // transcript — `track_edit` filled its backup map (pre-edit content of
+        // every file Edit/Write/NotebookEdit touched) during the turn above.
+        // Restore (`rewind_from_disk`) and `--resume` rebuild the index from
+        // these lines, so the record must carry the backups, not the empty map
+        // it had at turn start. Persisted unconditionally (an edit-free turn
+        // still records a restore point for conversation-only rewind).
+        if let (Some(fh), Some(file_history_msg_id)) = (&orch.file_history, file_history_msg_id) {
+            if let (Some(record), Some(writer)) = (
+                fh.snapshot_record(file_history_msg_id),
+                &orch.transcript.jsonl_writer,
+            ) {
+                let session_id = orch.session.lock().await.session_id;
+                let session_uuid = session_id.as_uuid().to_string();
+                let line = session::file_history::snapshot_line_json(&session_uuid, &record);
+                if let Err(error) = writer.append_file_history_snapshot(&line).await {
+                    orch.record_transcript_append_failure(
+                        &session_id.to_string(),
+                        "file_history_snapshot",
+                        &error,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        Ok(ConversationOutcome::EndTurn {
+            turn_count: loop_state.turn_count,
+            final_message_id,
+        })
     }
 }

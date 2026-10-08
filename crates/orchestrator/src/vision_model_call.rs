@@ -542,7 +542,7 @@ fn join_text_blocks(content: &[ContentBlock]) -> String {
     content
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -622,15 +622,9 @@ mod tests {
     impl crate::conversation::OrchestratorApiClient for VisionAwareMockApiClient {
         async fn messages_create(
             &self,
-            model: &str,
-            profile: Option<&str>,
-            system: Option<&str>,
-            msgs: Vec<ConversationMessage>,
-            tools: Vec<serde_json::Value>,
+            request: crate::OrchestratorApiRequest,
         ) -> Result<llm_runtime::HistoryResponse, LlmError> {
-            self.inner
-                .messages_create(model, profile, system, msgs, tools)
-                .await
+            self.inner.messages_create(request).await
         }
 
         fn resolve_media_route(
@@ -818,7 +812,7 @@ mod tests {
             vec![mock_message_response(
                 vec![llm_runtime::ContentBlock::Text {
                     text: "ok".to_string(),
-                    cache_control: None,
+                    cache_control: None, citations: None,
                 }],
                 Some("end_turn"),
             )],
@@ -858,7 +852,7 @@ mod tests {
             session.history.push(user_message);
         }
 
-        let _ = crate::turn_loop::execute_one_turn_with_recovery_tracked(&orch, None, None)
+        let _ = crate::turn_loop::execute_one_turn_with_recovery_tracked(&orch, None, None, None)
             .await
             .expect("turn succeeds");
 

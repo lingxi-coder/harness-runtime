@@ -9,7 +9,7 @@ use lingxi_core::host::{
 };
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use lingxi_llm_client::protocol::{self as wire, computer::*};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::future::Future;
@@ -788,6 +788,10 @@ pub(crate) async fn before_execution(
             ));
         }
         let check = lingxi_core::host::permission_gate::PermissionCheckContext {
+            input_projection: Some(
+                ctx.projected_input(input)
+                    .map_err(|error| ToolError::InvalidInput(error.to_string()))?,
+            ),
             tool_use_id: Some(id.to_string()),
             decision_reason_type: Some("safetyCheck".into()),
             decision_reason: Some(
@@ -808,7 +812,10 @@ pub(crate) async fn before_execution(
         match outcome {
             lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                 updated_input, ..
-            } if updated_input.as_ref().is_none_or(|v| v == input) => {
+            } if updated_input
+                .as_ref()
+                .is_none_or(|v| Some(v) == check.input_projection.as_ref()) =>
+            {
                 acknowledged_safety_checks = work.call.context.pending_safety_checks.clone();
             }
             lingxi_core::host::permission_gate::PermissionOutcome::Allow { .. } => {
@@ -819,7 +826,7 @@ pub(crate) async fn before_execution(
             _ => {
                 return Err(ToolError::PermissionDenied(
                     "provider computer safety check was not acknowledged".into(),
-                ))
+                ));
             }
         }
     }

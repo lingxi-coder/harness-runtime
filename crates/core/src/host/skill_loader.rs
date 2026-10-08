@@ -56,11 +56,13 @@ pub trait SkillLoader: Send + Sync {
     /// `agent_type` is the child's `agentType` — its first `:`-segment is the
     /// plugin prefix the impl tries for the plugin-qualified resolution strategy.
     /// `cwd` overrides the parent session cwd for isolated/worktree children.
+    /// `model` is the child's selected model, including inherited resolution.
     /// Read/expansion failures return `Err`; they must not look like missing skills.
     async fn resolve_and_load(
         &self,
         skill_name: &str,
         agent_type: &str,
         cwd: Option<&std::path::Path>,
+        model: Option<&str>,
     ) -> Result<Option<SkillLoad>, String>;
 }

@@ -38,155 +38,103 @@ use tokio_util::sync::CancellationToken;
 use tool_api::registry::ToolRegistry;
 use tool_api::ToolRegistryView as _;
 
-/// Minimal contract the orchestrator needs from the API client.
-///
-/// Production: [`crate::provider_adapter::ProviderApiAdapter`] (Task 6)
-/// drives `llm_runtime::ModelRuntime` into this shape.
-/// Tests: `MockApiClient`.
-#[async_trait]
-pub trait OrchestratorApiClient: Send + Sync {
-    /// Non-streaming `messages.create` with optional system prompt.
-    ///
-    /// `system` is the assembled system prompt (M5-03). `None` is a
-    /// no-op (the API call omits the `"system"` key). Callers that
-    /// want the assembled LingXi prompt populate it via
-    /// `ConversationOrchestrator::build_system_prompt` (private).
-    /// Callers with an override populate it from
-    /// `OrchestratorConfig::system_prompt_override`. `tools` is the wire
-    /// tool-definition array (`{name, description, input_schema}`) advertised
-    /// to the model, built via `ConversationOrchestrator::build_wire_tools`
-    /// (empty omits the `"tools"` key — same as the streaming `stream`).
-    async fn messages_create(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-    ) -> Result<HistoryResponse, LlmError>;
+/// Current owned request for the conversation API. Each implementation must
+/// explicitly execute the selected policy and every main-request option.
+#[derive(Debug, Clone)]
+pub enum OrchestratorApiRequest {
+    Main(llm_runtime::MessagesCreateRequest),
+    HookPrompt(HookPromptRequest),
+}
 
-    /// Non-streaming `messages.create` carrying a `context_hint` offer.
-    ///
-    /// The DEFAULT body delegates to [`Self::messages_create`], DROPPING the
-    /// hint — so every mock and non-Anthropic impl compiles unchanged and the
-    /// negotiation is a strict no-op there. Only [`ProviderApiAdapter`]
-    /// overrides it. Same shape as [`Self::messages_create_with_opts`] and for
-    /// the same reason: this trait has 13 implementors and is extended by
-    /// defaulted methods, never by signature changes.
-    ///
-    /// The turn loop calls this ONLY when the context-hint controller is active
-    /// (gated off by default); otherwise it stays on [`Self::messages_create`].
-    async fn messages_create_with_context_hint(
-        &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        _context_hint: Option<serde_json::Value>,
-    ) -> Result<HistoryResponse, LlmError> {
-        self.messages_create(model, profile, system, msgs, tools)
-            .await
-    }
+/// Isolated structured prompt-hook evaluation, independent of main settings.
+#[derive(Debug, Clone)]
+pub struct HookPromptRequest {
+    pub model: String,
+    pub profile: Option<String>,
+    pub system: String,
+    pub messages: Vec<ConversationMessage>,
+}
 
-    /// Isolated prompt-hook evaluation. Production disables thinking and requests
-    /// the evaluator JSON schema without modifying the conversation settings.
-    /// `profile` pins the provider the way the session's own turns are pinned;
-    /// `None` resolves the id unscoped.
-    async fn messages_create_hook_prompt(
-        &self,
+impl HookPromptRequest {
+    #[must_use]
+    pub fn new(
         model: &str,
         profile: Option<&str>,
         system: &str,
-        msgs: Vec<ConversationMessage>,
-    ) -> Result<HistoryResponse, LlmError> {
-        self.messages_create(model, profile, Some(system), msgs, Vec::new())
-            .await
+        messages: Vec<ConversationMessage>,
+    ) -> Self {
+        Self {
+            model: model.to_owned(),
+            profile: profile.map(str::to_owned),
+            system: system.to_owned(),
+            messages,
+        }
+    }
+}
+
+/// Minimal current contract the orchestrator needs from the API client.
+#[async_trait]
+pub trait OrchestratorApiClient: Send + Sync {
+    /// Exact native route identity. Unavailable route metadata admits no Fast mode.
+    fn is_first_party_route(&self, _model: &str, _profile: Option<&str>) -> bool {
+        false
     }
 
-    /// Non-streaming `messages.create` with an explicit `max_tokens` override
-    /// (REC.A1 8k→64k escalation, TS `query.ts:1199-1221`). The turn loop calls
-    /// this ONLY when a prior `max_tokens` recovery armed
-    /// [`crate::turn_loop::RecoveryState::max_output_tokens_override`]; otherwise
-    /// the plain [`Self::messages_create`] is used and this is never invoked.
-    ///
-    /// The DEFAULT body delegates to [`Self::messages_create`], dropping the
-    /// override — so every mock / non-Anthropic impl compiles unchanged and the
-    /// escalation is a strict no-op there. Only [`ProviderApiAdapter`]
-    /// overrides it to thread `max_tokens` into the provider call.
-    async fn messages_create_with_opts(
+    /// Inspect the selected credential's redacted origin without executing auth.
+    async fn credential_source(
         &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        _max_tokens: u32,
-    ) -> Result<HistoryResponse, LlmError> {
-        self.messages_create(model, profile, system, msgs, tools)
-            .await
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Result<llm_runtime::CredentialSource, LlmError> {
+        Ok(llm_runtime::CredentialSource::Unknown)
     }
 
-    /// Non-streaming `messages.create` with the **Opus-fallback** policy wired
-    /// (Opus-fallback batch). Identical to [`Self::messages_create`] except the
-    /// caller hands in the configured `fallback_model` (+ the pre-computed
-    /// subscription flags `is_subscriber` / `is_enterprise`).
-    ///
-    /// The DEFAULT body delegates to [`Self::messages_create`], dropping the
-    /// fallback args — so every existing impl (mocks, adapter, the
-    /// hook-prompt mock) compiles unchanged and behaves byte-identically. Only
-    /// [`ProviderApiAdapter`] overrides it to thread the fallback (Task 6).
-    /// The turn loop only calls THIS method when `config.fallback_model.is_some()`;
-    /// with no fallback configured it stays on `messages_create`, a strict no-op.
-    ///
-    /// NOTE: `LlmError` has no `FallbackTriggered` variant — that becomes
-    /// adapter-internal in Task 6. The turn-loop interception of `FallbackTriggered`
-    /// is removed; fallback is handled entirely within `ProviderApiAdapter`.
-    #[allow(clippy::too_many_arguments)]
-    async fn messages_create_with_fallback(
+    /// Provider wire chosen by the host route, independent of model name guesses.
+    fn native_computer_provider(
         &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        _fallback_model: Option<&str>,
-        _is_subscriber: bool,
-        _is_enterprise: bool,
-    ) -> Result<HistoryResponse, LlmError> {
-        // Default: ignore the fallback args and use the plain seam. Keeps all
-        // non-Anthropic impls (and mocks) byte-identical.
-        self.messages_create(model, profile, system, msgs, tools)
-            .await
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Option<lingxi_llm_client::protocol::computer::NativeComputerProvider> {
+        None
     }
 
-    /// Non-streaming `messages.create` with a pre-seeded consecutive-529 counter.
-    ///
-    /// Used by the mid-stream 529 → non-streaming fallback (Task 7 / claude.ts parity):
-    /// when a streaming call fails with `LlmError::Overloaded` after the first event,
-    /// the turn loop issues a FRESH non-streaming call seeded with
-    /// `initial_consecutive_overloaded = 1` so the retry budget accounts for the
-    /// streaming 529 that triggered the fallback (`initialConsecutive529Errors` in
-    /// `claude.ts:2559`).
-    ///
-    /// The DEFAULT body delegates to [`Self::messages_create`], ignoring the seed —
-    /// so every mock / non-Anthropic impl compiles unchanged and the seeding is a
-    /// strict no-op there (the mock retries from 0, which is conservative / safe).
-    /// Only [`crate::provider_adapter::ProviderApiAdapter`] overrides it to thread
-    /// `initial_consecutive_overloaded` into the non-stream retry driver.
-    async fn messages_create_seeded(
+    /// Project host-owned static prompt sections into the Native source-vector
+    /// contract for the selected model/profile. Non-routing clients fail closed
+    /// and preserve the grouped source strings without a provider marker.
+    fn prompt_snapshot_source_vector(
         &self,
-        model: &str,
-        profile: Option<&str>,
-        system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
-        _initial_consecutive_overloaded: u8,
+        _model: &str,
+        _profile: Option<&str>,
+        sections: &[lingxi_llm_client::providers::anthropic::system_prompt::SourceSection],
+    ) -> Vec<lingxi_llm_client::providers::anthropic::system_prompt::PromptText> {
+        lingxi_llm_client::providers::anthropic::system_prompt::snapshot_source_vector(
+            sections,
+            None,
+            lingxi_llm_client::providers::anthropic::system_prompt::GatePolicy::default(),
+        )
+    }
+
+    /// Embeddings own any provider-specific enable admission. The production
+    /// provider adapter checks native organization and policy state.
+    async fn validate_fast_enable(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Result<(), LlmError> {
+        Ok(())
+    }
+    /// Execute an owned main request or isolated structured hook evaluation.
+    async fn messages_create(
+        &self,
+        request: OrchestratorApiRequest,
+    ) -> Result<HistoryResponse, LlmError>;
+
+    /// Buffer the provider stream until a terminal response before desktop dispatch.
+    async fn messages_create_buffered_stream(
+        &self,
+        request: llm_runtime::MessagesCreateRequest,
     ) -> Result<HistoryResponse, LlmError> {
-        // Default: ignore the seed and use the plain seam. Keeps all
-        // non-Anthropic impls (and mocks) byte-identical.
-        self.messages_create(model, profile, system, msgs, tools)
-            .await
+        self.messages_create(OrchestratorApiRequest::Main(request)).await
     }
 
     /// Count the input tokens a `messages.create` for `(model, system, msgs,
@@ -269,8 +217,29 @@ pub trait OrchestratorApiClient: Send + Sync {
     fn set_thinking_config(&self, _thinking: llm_runtime::model::thinking::ThinkingConfig) {}
 
     /// Replace the main-loop effort used for subsequent provider requests.
-    /// `None` clears the live override.
-    fn set_effort(&self, _effort: Option<serde_json::Value>) {}
+    /// Inherit, explicit automatic default and a pinned value stay distinct.
+    fn set_effort(&self, _effort: lingxi_core::host::effort_table::SessionEffort) {}
+
+    /// Native command inputs from the current selected SDK route. Non-native
+    /// routes return None and continue through provider-neutral controls.
+    fn effort_command_snapshot(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Result<Option<lingxi_core::host::effort::EffortCommandSnapshot>, LlmError> {
+        Err(LlmError::ModelUnavailable)
+    }
+
+    /// Query-owned refusal text facts resolved by the embedding host. An
+    /// absent source stays absent; managed model admission is not the native
+    /// refusal-model eligibility decision.
+    fn refusal_api_text_snapshot(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Result<Option<lingxi_core::host::refusal_api_text::RefusalApiTextSnapshot>, LlmError> {
+        Ok(None)
+    }
 
     /// Richer catalog listing for the grouped `/model` picker. Default returns
     /// empty (mocks / non-routing impls); `ProviderApiAdapter` overrides it.
@@ -393,9 +362,10 @@ pub trait OrchestratorApiClient: Send + Sync {
         &self,
         _model: &str,
         _profile: Option<&str>,
-        _system: Option<&str>,
+        _system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         _messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
+        _skip_global_cache_for_system_prompt: bool,
     ) -> Result<(), LlmError> {
         Ok(())
     }
@@ -403,23 +373,6 @@ pub trait OrchestratorApiClient: Send + Sync {
     /// Close any reusable Responses WebSocket session held by this API client.
     async fn close_responses_websocket_session(&self) -> Result<(), LlmError> {
         Ok(())
-    }
-
-    /// Provider wire chosen by the host route, independent of model name guesses.
-    fn native_computer_provider(
-        &self,
-        _model: &str,
-        _profile: Option<&str>,
-    ) -> Option<lingxi_llm_client::protocol::computer::NativeComputerProvider> {
-        None
-    }
-
-    /// Buffer the provider stream until a terminal response before desktop dispatch.
-    async fn messages_create_buffered_stream(
-        &self,
-        request: llm_runtime::MessagesCreateRequest,
-    ) -> Result<HistoryResponse, LlmError> {
-        self.messages_create(OrchestratorApiRequest::Main(request)).await
     }
 }
 
@@ -473,10 +426,41 @@ pub trait StreamingApiClient: Send + Sync {
         &self,
         model: &str,
         profile: Option<&str>,
-        system: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
+        query_source: &str,
+        skip_global_cache_for_system_prompt: bool,
+        request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
     ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError>;
+
+    /// A single `turn.step` hook may override effort for just this physical
+    /// request. Other callers retain the session effort through `stream`.
+    async fn stream_with_effort_override(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        effort: Option<&str>,
+        query_source: &str,
+        skip_global_cache_for_system_prompt: bool,
+        request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
+    ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        let _ = effort;
+        self.stream(
+            model,
+            profile,
+            system,
+            messages,
+            tools,
+            query_source,
+            skip_global_cache_for_system_prompt,
+            request_dispatch_admission,
+        )
+        .await
+    }
 
     /// Connect-phase retry count of the most recent `stream` call (the value
     /// the adapter knows when it returns the stream). Used by the streaming
@@ -742,6 +726,7 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
             LlmError::ModelUnavailable => (Some("model_not_found"), Some(404)),
             // `Flp` tail `status>=500` → "server_error".
             LlmError::ProviderInternal => (Some("server_error"), Some(500)),
+            LlmError::ProviderTimeout { .. } => (Some("server_error"), inner.http_status()),
             // Timeout / transport / connection-lost tail → "server_error", no
             // status (these are not `APIError`-with-numeric-status).
             LlmError::Transport { .. }
@@ -752,6 +737,7 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
             LlmError::MediaDelegationUnavailable { .. }
             | LlmError::MediaDelegationPartial { .. } => (Some("invalid_request"), None),
             LlmError::MalformedToolInput { .. }
+            | LlmError::RequestDispatchRejected { .. }
             | LlmError::CostUnavailable { .. }
             | LlmError::UnsupportedCapability { .. } => (Some("unknown"), None),
         },
@@ -1034,6 +1020,10 @@ struct WireToolSchemaCacheKey {
     /// pointer based on it, so an entry cached before the skill registered must
     /// not be reused after — the tool names are identical either side of that.
     workflow_authoring_skill_reachable: bool,
+    bash_precommit_skills: tool_api::tool_trait::BashPrecommitSkills,
+    bash_precommit_session_generation: u64,
+    mod_registration_identity: Option<(u64, u64)>,
+    mod_tool_description_generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1204,6 +1194,59 @@ pub(crate) struct GitStatusSnapshot {
     pub(crate) block: Option<String>,
 }
 
+/// Ephemeral facts accumulated from the actual main-loop model responses.
+/// `turn.complete` observes them after the turn has settled; they are never
+/// added to model history or serialized with the session.
+pub(crate) struct ModTurnFacts {
+    pub(crate) id: String,
+    pub(crate) started_at: std::time::Instant,
+    pub(crate) answer: String,
+    pub(crate) usage: Option<ModTurnUsage>,
+    pub(crate) refusal: Option<serde_json::Value>,
+    pub(crate) error: bool,
+}
+
+pub(crate) struct ModTurnUsage {
+    pub(crate) tokens: lingxi_core::token::Usage,
+    pub(crate) model: String,
+}
+
+/// Shared context for ordered main-loop Mod session events.
+#[derive(Clone)]
+pub(crate) struct ModSessionEventContext {
+    pub(crate) host: Arc<hooks::mods::ModHost>,
+    pub(crate) session: Arc<dyn hooks::mods::ModSessionContext>,
+    pub(crate) output: Arc<dyn OutputStream>,
+}
+
+/// Jobs owned by the main-loop Mod session-event FIFO.
+pub(crate) enum ModSessionEventWork {
+    TurnComplete {
+        context: ModSessionEventContext,
+        input: serde_json::Value,
+        original_answer: String,
+    },
+    Measure {
+        context: ModSessionEventContext,
+        sampler: Arc<mod_session_measure_sampler::ModSessionMeasureSampler>,
+        request: mod_session_measure_sampler::ModSessionMeasureRequest,
+    },
+    MeasureRequest {
+        context: ModSessionEventContext,
+        sampler: Arc<mod_session_measure_sampler::ModSessionMeasureSampler>,
+        reason: mod_session_measure_sampler::ModSessionMeasureReason,
+        snapshot: ModSessionMeasureSnapshot,
+    },
+}
+
+/// Current facts that can be sent to `session.measure` from this host.
+#[derive(Clone)]
+pub(crate) struct ModSessionMeasureSnapshot {
+    pub(crate) input: serde_json::Value,
+    pub(crate) cost_usd: Option<f64>,
+    pub(crate) limit_status: Option<String>,
+}
+
 pub struct ConversationOrchestrator {
     pub(crate) config: OrchestratorConfig,
     pub(crate) api: Arc<dyn OrchestratorApiClient>,
@@ -1216,16 +1259,48 @@ pub struct ConversationOrchestrator {
     pub(crate) computer_runtime: crate::native_computer::ComputerRuntime,
     pub(crate) tool_execution_journal: Option<Arc<dyn lingxi_core::host::ToolExecutionJournal>>,
     pub(crate) hooks: Arc<HookExecutor>, // = hooks::HookExecutorImpl (M5-06)
+    /// Exact enforced tool and shared budget handles inherited by Agent hooks.
+    pub(crate) hook_agent_inheritance: Option<lingxi_core::host::SubagentInheritance>,
     pub(crate) perms: Arc<dyn PermissionGate>,
     pub(crate) output: Arc<dyn OutputStream>,
     pub(crate) session: Arc<Mutex<SessionState>>,
+    /// Both the REPL and the shared host shutdown barrier can end a session.
+    pub(crate) session_end_fired: Mutex<HashSet<String>>,
+    /// Current main-loop Mod lifecycle record, protected by `turn_gate`.
+    pub(crate) mod_turn: std::sync::Mutex<Option<ModTurnFacts>>,
+    /// FIFO queue for settled main-loop `turn.complete` and `session.measure`
+    /// dispatches. The receiver drains after the sender drops; no turn or
+    /// shutdown path waits for a slow Mod while holding this queue's lock.
+    pub(crate) mod_session_event_sender:
+        std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ModSessionEventWork>>>,
+    /// Coalesces rate-limit and settled-turn samples for `session.measure`.
+    pub(crate) mod_session_measure_sampler:
+        Arc<mod_session_measure_sampler::ModSessionMeasureSampler>,
+    /// Last fullscreen text selection for `$.ui.selection()`. Surface-owned
+    /// ephemeral data: it must never enter persisted conversation state.
+    pub(crate) mod_ui_selection: std::sync::Mutex<Option<lingxi_core::host::ModUiSelection>>,
+    /// Live remote UI attachments exposed by `$.session.surfaces()`. The
+    /// composition root shares this Arc with its desktop runtime and bridge.
+    pub(crate) mod_surface_roster: std::sync::Arc<crate::mod_surface_roster::ModSurfaceRoster>,
+    /// Host settings sources, resolved with the same launch scope as execution.
+    pub(crate) mod_settings_reader: Option<Arc<dyn hooks::mods::ModSettingsReader>>,
+    /// Live slash-command view for `$.command.list` without a command-api
+    /// dependency from the orchestrator crate.
+    pub(crate) mod_command_catalog: Option<Arc<dyn hooks::mods::ModCommandCatalog>>,
     /// Owns cleanup of process-global invoked-skill rows even when a host drops
     /// or rebuilds this orchestrator without an explicit SessionEnd callback.
     pub(crate) invoked_skill_session_guard: compaction::invoked_skills::InvokedSkillSessionGuard,
+    /// Weak self-owner installed after the platform composition root selects
+    /// the final Arc. Autonomous streaming tool jobs upgrade this only for the
+    /// lifetime of their dispatch; the orchestrator does not own those jobs.
+    pub(crate) streaming_tool_dispatch_owner: std::sync::OnceLock<std::sync::Weak<Self>>,
     /// Serializes user, queued, and async-hook re-wake turns. A background hook
     /// may finish while a user turn is still streaming; waiting here makes its
     /// re-wake the next turn instead of racing two model loops over one history.
     pub(crate) turn_gate: Arc<Mutex<()>>,
+    /// Recipient-owned peer report queue. Admission never acquires `turn_gate`;
+    /// preparation persists each accepted report before acknowledging consumption.
+    pub(crate) main_reports: main_reports_impl::MainReportInbox,
     /// Serializes model-switch hooks without blocking on a running turn.
     pub(crate) model_switch_gate: Mutex<()>,
     /// Model selection, accounting, fallback, and request preparation state.
@@ -1338,6 +1413,14 @@ pub struct ConversationOrchestrator {
     /// then returns `vec![]`. The CLI binary (M6-07 init.rs) populates
     /// this from `.mcp.json` + `~/.config/lingxi/mcp.json`.
     pub(crate) mcp_registry: Option<Arc<mcp::McpRegistry>>,
+    /// Live task state for Mod agent enumeration and completion waits.
+    pub(crate) task_registry: Option<Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>>,
+    /// The same live name store used by the Agent tool and its spawner.
+    pub(crate) mod_agent_name_registry:
+        Option<Arc<dyn lingxi_core::host::agent_name_registry::AgentNameRegistry>>,
+    /// Host route authority shared with Agent model selection.
+    pub(crate) model_resolution_context_provider:
+        Option<Arc<dyn agent::model_resolution::ModelResolutionContextProvider>>,
     /// Provider-neutral local IDE lifecycle handle. `None` for hosts that do
     /// not expose a local endpoint inventory (mobile/embedded callers).
     pub(crate) ide_handle: Option<Arc<dyn lingxi_core::host::IdeHandle>>,
@@ -1449,19 +1532,83 @@ pub struct ConversationOrchestrator {
         Option<std::sync::Arc<dyn lingxi_core::host::coordinator_mode::CoordinatorModeHandle>>,
 }
 
+impl ConversationOrchestrator {
+    /// Put a finalized orchestrator behind its production Arc owner and bind
+    /// the weak back-reference required by owned streaming dispatch.
+    pub fn into_shared(this: Self) -> Arc<Self> {
+        let shared = Arc::new(this);
+        Self::bind_streaming_tool_dispatch_owner(&shared);
+        let session_id = shared
+            .session
+            .try_lock()
+            .expect("finalized orchestrator binds before turn publication")
+            .session_id;
+        shared.bind_subagent_stop_hook_owner(session_id);
+        shared
+    }
+
+    /// Bind the finalized composition-root Arc used by autonomous streaming
+    /// tool dispatch. Call this immediately after constructing the production
+    /// Arc, before publishing the orchestrator to any turn caller.
+    pub fn bind_streaming_tool_dispatch_owner(this: &Arc<Self>) {
+        let candidate = Arc::downgrade(this);
+        let installed = this
+            .streaming_tool_dispatch_owner
+            .get_or_init(|| candidate.clone());
+        assert!(
+            installed.ptr_eq(&candidate),
+            "ConversationOrchestrator was already bound to a different owner"
+        );
+    }
+
+    /// Upgrade the required production owner for a `'static` scheduler job.
+    /// The pointer check prevents a builder clone from dispatching through a
+    /// different session's Arc.
+    pub(crate) fn upgrade_streaming_tool_dispatch_owner(&self) -> Option<Arc<Self>> {
+        let owner = self.streaming_tool_dispatch_owner.get()?.upgrade()?;
+        std::ptr::eq(self, Arc::as_ptr(&owner)).then_some(owner)
+    }
+
+    /// Share this orchestrator's live UI attachment roster with its host.
+    #[must_use]
+    pub fn mod_surface_roster(
+        &self,
+    ) -> std::sync::Arc<crate::mod_surface_roster::ModSurfaceRoster> {
+        self.mod_surface_roster.clone()
+    }
+}
+
 // Responsibility-focused implementation modules. `conversation.rs` owns the
 // public façade and shared state shape; behavior lives in these child modules.
+#[path = "conversation/command_describe.rs"]
+mod command_describe_impl;
 #[path = "conversation/compaction.rs"]
 mod compaction_impl;
+pub(crate) use compaction_impl::{
+    SessionCompactCore, SessionCompactCoreOutput, SessionCompactDecision,
+};
 #[path = "conversation/drivers/mod.rs"]
 mod drivers_impl;
 pub use drivers_impl::QueuedPromptInput;
+#[path = "conversation/context_announcements.rs"]
+pub(crate) mod context_announcements_impl;
 #[path = "conversation/goal_retry.rs"]
 mod goal_retry_impl;
 #[path = "conversation/hooks.rs"]
 mod hooks_impl;
+#[path = "conversation/main_reports.rs"]
+pub(crate) mod main_reports_impl;
+#[path = "conversation/mod_projects_consent.rs"]
+mod mod_projects_consent;
+#[path = "conversation/mod_session_measure_sampler.rs"]
+mod mod_session_measure_sampler;
 #[path = "conversation/model.rs"]
 mod model_impl;
+#[path = "conversation/model_reminders.rs"]
+mod model_reminders_impl;
+pub(crate) use context_announcements_impl::PreparedContextAnnouncements;
+#[path = "conversation/prompt_cache.rs"]
+mod prompt_cache_impl;
 #[path = "conversation/prompt.rs"]
 mod prompt_impl;
 #[path = "conversation/reminders.rs"]
@@ -1471,6 +1618,10 @@ mod tooling_impl;
 #[path = "conversation/transcript.rs"]
 mod transcript_impl;
 pub use transcript_impl::ScheduledLoopFire;
+pub(crate) use transcript_impl::{
+    active_mod_result_stage_is_virtual, with_mod_result_stage, with_virtual_mod_result_stage,
+    ModResultStage,
+};
 #[path = "conversation/wiring.rs"]
 mod wiring_impl;
 
@@ -1482,11 +1633,11 @@ mod runtime_impl;
 use drivers_impl::parse_generated_session_name;
 use runtime_impl::{
     camelize_json_keys, compact_file_reference_body, extend_session_memory_fork_context,
-    find_unresolved_tool_use_in_history, read_utf8_prefix, CompactionRuntime, LifecycleRuntime,
-    ModelRuntime, PromptRuntime, SessionMemoryInFlightReset, TranscriptStore,
+    find_unresolved_tool_use_in_history, CompactionRuntime, LifecycleRuntime, ModelRuntime,
+    PromptRuntime, SessionMemoryInFlightReset, TranscriptStore,
 };
 pub use runtime_impl::{
-    CostSessionSwitcher, PreparedSessionSwitch, SessionActivationObserver, SessionMemoryHandle,
+    CostSessionSwitcher, PreparedSessionSwitch, SessionActivationObserver, SessionMemoryHandle, TurnExecutionMetrics,
 };
 
 /// Internal no-op streaming client used by [`ConversationOrchestrator::new`]
@@ -1503,9 +1654,12 @@ impl StreamingApiClient for NoStreamingApiClient {
         &self,
         _model: &str,
         _profile: Option<&str>,
-        _system: Option<&str>,
+        _system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         _messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
+        _query_source: &str,
+        _skip_global_cache_for_system_prompt: bool,
+        _request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
     ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         Err(LlmError::Transport {
             message: "no streaming client configured".into(),

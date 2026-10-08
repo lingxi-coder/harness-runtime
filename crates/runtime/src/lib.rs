@@ -15,6 +15,25 @@ pub use api::{
 };
 pub mod models;
 
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod effort_settings;
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod fast_settings;
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod skill_prompt;
+
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod parked_agent_restore;
+
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod main_report_waker;
+
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod instruction_identity;
+
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod model_resolution;
+
 #[cfg(feature = "collaboration")]
 pub use coordinator;
 

@@ -24,10 +24,11 @@ use tokio::sync::broadcast;
 
 pub(super) fn modern_listen_request_params(
     version: &str,
+    elicitation: lingxi_core::host::McpElicitationMode,
     notifications: serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Value {
     serde_json::json!({
-        "_meta": crate::client::modern_meta(version),
+        "_meta": crate::client::modern_meta(version, elicitation),
         "notifications": notifications,
     })
 }
@@ -363,9 +364,23 @@ impl McpRegistry {
         let Some(filter) = modern_listen_notifications_filter(&capabilities) else {
             return;
         };
+        let Some(elicitation) = self
+            .clients
+            .read()
+            .await
+            .get(&server_name)
+            .filter(|registered| {
+                registered
+                    .connection_id
+                    .is_none_or(|id| id == connection_id)
+            })
+            .map(|registered| registered.client.elicitation_capabilities().modern)
+        else {
+            return;
+        };
         let listen = match connection.start_call_unbounded(
             "subscriptions/listen",
-            modern_listen_request_params(&negotiated.version, filter),
+            modern_listen_request_params(&negotiated.version, elicitation, filter),
         ) {
             Ok(listen) => listen,
             Err(_) => {

@@ -26,7 +26,7 @@
 use regex::Regex;
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use tree_sitter::Node;
+use tree_sitter::{Node, Tree};
 
 /// One redirect on a simple command (TS `Redirect`, `ast.ts:25`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3277,30 +3277,55 @@ pub fn pre_check_too_complex(cmd: &str) -> Option<&'static str> {
 /// unhandled/ambiguous node fails closed (over-ask), never silently `Simple`.
 #[must_use]
 pub fn parse_for_security(cmd: &str) -> ParseForSecurityResult {
+    parse_for_security_internal(cmd, false).0
+}
+
+/// Parse once for permission evaluation while retaining Native `getPipeSegments`
+/// boundaries from the same tree-sitter tree. This keeps AST command spans for
+/// the general `a6t` path and byte-exact pipeline segments for the `m6o` path.
+pub(crate) fn parse_for_security_with_pipeline_segments(
+    cmd: &str,
+) -> (ParseForSecurityResult, Option<Vec<String>>) {
+    parse_for_security_internal(cmd, true)
+}
+
+fn parse_for_security_internal(
+    cmd: &str,
+    collect_pipeline_segments: bool,
+) -> (ParseForSecurityResult, Option<Vec<String>>) {
     // TS: `if (cmd === '') return { kind: 'simple', commands: [] }`.
     if cmd.is_empty() {
-        return ParseForSecurityResult::Simple {
-            commands: Vec::new(),
-        };
+        return (
+            ParseForSecurityResult::Simple {
+                commands: Vec::new(),
+            },
+            None,
+        );
     }
     // Pre-checks run before trusting tree-sitter (the known differentials).
     if let Some(reason) = pre_check_too_complex(cmd) {
-        return ParseForSecurityResult::TooComplex {
-            reason: reason.to_string(),
-        };
+        return (
+            ParseForSecurityResult::TooComplex {
+                reason: reason.to_string(),
+            },
+            None,
+        );
     }
     // TS `parseForSecurity`: `root === null => parse-unavailable`. Over-length /
     // unparseable → `parse_raw` returns `None` → `ParseUnavailable` (the caller
     // keeps the legacy battery), exactly like TS — NOT routed to `TooComplex`.
     let tree = match crate::bash_tree_sitter::parse_raw(cmd) {
         Some(t) => t,
-        None => return ParseForSecurityResult::ParseUnavailable,
+        None => return (ParseForSecurityResult::ParseUnavailable, None),
     };
     // TS: `const trimmed = cmd.trim(); if (trimmed === '') return simple[]`.
     if cmd.trim().is_empty() {
-        return ParseForSecurityResult::Simple {
-            commands: Vec::new(),
-        };
+        return (
+            ParseForSecurityResult::Simple {
+                commands: Vec::new(),
+            },
+            None,
+        );
     }
     // DEFER (PARSE_ABORTED): TS fail-CLOSES (`TooComplex`, nodeType `PARSE_ABORT`,
     // reason "Parser aborted (timeout or resource limit) — possible adversarial
@@ -3308,7 +3333,215 @@ pub fn parse_for_security(cmd: &str) -> ParseForSecurityResult {
     // here has no budget (see `bash_tree_sitter::parse_raw`), so that branch is
     // UNREACHABLE today; wire it only if a parse-timeout API is added — and use
     // the real 2.1.195 binary string then, which is NEWER than the TS source.
-    walk_program(tree.root_node(), cmd.as_bytes())
+    let parsed = walk_program(tree.root_node(), cmd.as_bytes());
+    if matches!(
+        &parsed,
+        ParseForSecurityResult::TooComplex { reason } if reason == "Parse error"
+    ) {
+        if let Some((completed_tree, completed_source)) =
+            complete_terminal_incomplete_if(&tree, cmd)
+        {
+            // The completed tree is structural only. Every command-like span is
+            // checked to remain within the caller's original bytes, and pipeline
+            // segments are sliced from those original bytes below.
+            let completed = walk_program(completed_tree.root_node(), completed_source.as_bytes());
+            if matches!(completed, ParseForSecurityResult::Simple { .. }) {
+                let pipeline_segments = collect_pipeline_segments
+                    .then(|| native_pipeline_segments(completed_tree.root_node(), cmd.as_bytes()))
+                    .flatten();
+                return (completed, pipeline_segments);
+            }
+        }
+    }
+    let pipeline_segments = collect_pipeline_segments
+        .then(|| native_pipeline_segments(tree.root_node(), cmd.as_bytes()))
+        .flatten();
+    (parsed, pipeline_segments)
+}
+
+#[derive(Default)]
+struct IfCompletionFacts {
+    errors: Vec<(usize, usize)>,
+    errors_at_eof: usize,
+    missing_count: usize,
+    if_statements: usize,
+    if_tokens: usize,
+    then_tokens: usize,
+    real_fi_tokens: usize,
+    open_if_statements: usize,
+    malformed_if_shape: bool,
+    command_span_outside_original: bool,
+    synthetic_fi: Vec<usize>,
+    synthetic_if_closing_fi: Vec<usize>,
+}
+
+fn inspect_if_completion_tree(node: Node, original_len: usize, facts: &mut IfCompletionFacts) {
+    if node.is_error() {
+        facts.errors.push((node.start_byte(), node.end_byte()));
+        if node.end_byte() == original_len {
+            facts.errors_at_eof += 1;
+        }
+    }
+    if node.is_missing() {
+        facts.missing_count += 1;
+    }
+    match node.kind() {
+        "if" => facts.if_tokens += 1,
+        "then" => facts.then_tokens += 1,
+        "fi" if !node.is_missing() => {
+            facts.real_fi_tokens += 1;
+            if node.start_byte() >= original_len {
+                facts.synthetic_fi.push(node.start_byte());
+            }
+        }
+        _ => {}
+    }
+    if matches!(
+        node.kind(),
+        "command"
+            | "variable_assignment"
+            | "declaration_command"
+            | "unset_command"
+            | "test_command"
+    ) && node.end_byte() > original_len
+    {
+        facts.command_span_outside_original = true;
+    }
+    if node.kind() == "if_statement" {
+        facts.if_statements += 1;
+        let direct = children(node);
+        let direct_ifs = direct.iter().filter(|child| child.kind() == "if").count();
+        let direct_thens = direct.iter().filter(|child| child.kind() == "then").count();
+        let direct_fis = direct
+            .iter()
+            .filter(|child| child.kind() == "fi" && !child.is_missing())
+            .collect::<Vec<_>>();
+        if direct_ifs != 1 || direct_thens != 1 || direct_fis.len() > 1 {
+            facts.malformed_if_shape = true;
+        }
+        if direct_fis.is_empty() {
+            facts.open_if_statements += 1;
+        }
+        for fi in direct_fis {
+            if fi.start_byte() >= original_len {
+                facts.synthetic_if_closing_fi.push(fi.start_byte());
+            }
+        }
+    }
+    for child in children(node) {
+        inspect_if_completion_tree(child, original_len, facts);
+    }
+}
+
+/// Repair only a uniquely terminal, whole-input ERROR around complete EOF
+/// `if`/`then` structures. The number of `fi` tokens comes from Host AST
+/// terminals, never text keywords or the Native parser's counts. The augmented
+/// tree is accepted only when its real closing tokens close every `if_statement`
+/// and no command-like span crosses the original source boundary.
+fn complete_terminal_incomplete_if(tree: &Tree, command: &str) -> Option<(Tree, String)> {
+    let original_len = command.len();
+    let root = tree.root_node();
+    if !matches!(root.kind(), "program" | "ERROR")
+        || root.start_byte() != 0
+        || root.end_byte() != original_len
+        || !root.has_error()
+    {
+        return None;
+    }
+    let mut base = IfCompletionFacts::default();
+    inspect_if_completion_tree(root, original_len, &mut base);
+    let open_if_count = base.if_tokens.checked_sub(base.real_fi_tokens)?;
+    if base.errors.len() != 1
+        || base.errors_at_eof != 1
+        || base.missing_count != 0
+        || open_if_count == 0
+        || base.if_statements != base.real_fi_tokens
+        || base.then_tokens < base.if_tokens
+        || base.malformed_if_shape
+        || base.command_span_outside_original
+    {
+        return None;
+    }
+
+    // The base ERROR subtree retains AST `if`/`then` terminals even when it
+    // cannot form an `if_statement`; count only those parser terminals (minus
+    // already-structured real `fi` terminals), never raw command keywords.
+    // One extra parse is bounded by parse_raw's existing UTF-16 input cap. There
+    // is no retry loop or new arbitrary nesting limit.
+    let suffix = "\nfi".repeat(open_if_count);
+    let (completed_tree, completed_source) =
+        crate::bash_tree_sitter::parse_raw_with_internal_suffix(command, &suffix)?;
+    let completed_root = completed_tree.root_node();
+    let mut completed = IfCompletionFacts::default();
+    inspect_if_completion_tree(completed_root, original_len, &mut completed);
+    let mut all_synthetic_fi = completed.synthetic_fi.clone();
+    all_synthetic_fi.sort_unstable();
+    let mut closing_synthetic_fi = completed.synthetic_if_closing_fi.clone();
+    closing_synthetic_fi.sort_unstable();
+    if completed_root.kind() != "program"
+        || completed_root.start_byte() != 0
+        || completed_root.end_byte() != completed_source.len()
+        || completed_root.has_error()
+        || !completed.errors.is_empty()
+        || completed.missing_count != 0
+        || completed.if_statements == 0
+        || completed.if_tokens != completed.if_statements
+        || completed.then_tokens < completed.if_statements
+        || completed.real_fi_tokens != completed.if_statements
+        || completed.open_if_statements != 0
+        || completed.malformed_if_shape
+        || completed.command_span_outside_original
+        || all_synthetic_fi != closing_synthetic_fi
+        || all_synthetic_fi.len() != open_if_count
+    {
+        return None;
+    }
+    Some((completed_tree, completed_source))
+}
+
+/// Native `cYo` walks every pipeline node, records the byte spans of its `|` /
+/// `|&` operator tokens, sorts those spans, then `getPipeSegments` slices the
+/// original UTF-8 command around them. Preserve that source-level behavior so a
+/// later permission walk can select the pipeline producer without reparsing or
+/// guessing from shell text.
+fn native_pipeline_segments(root: Node, src: &[u8]) -> Option<Vec<String>> {
+    fn collect(node: Node, positions: &mut Vec<(usize, usize)>) {
+        if node.kind() == "pipeline" {
+            for child in children(node) {
+                if child.kind() == "|" || child.kind() == "|&" {
+                    positions.push((child.start_byte(), child.end_byte()));
+                }
+            }
+        }
+        for child in children(node) {
+            collect(child, positions);
+        }
+    }
+
+    let mut positions = Vec::new();
+    collect(root, &mut positions);
+    if positions.is_empty() {
+        return None;
+    }
+    positions.sort_unstable_by_key(|(start, _)| *start);
+
+    let mut segments = Vec::new();
+    let mut cursor = 0usize;
+    for (start, end) in positions {
+        if start < cursor || end < start || end > src.len() {
+            return None;
+        }
+        let segment = std::str::from_utf8(&src[cursor..start]).ok()?.trim();
+        if !segment.is_empty() {
+            segments.push(segment.to_string());
+        }
+        cursor = end;
+    }
+    let tail = std::str::from_utf8(&src[cursor..]).ok()?.trim();
+    if !tail.is_empty() {
+        segments.push(tail.to_string());
+    }
+    Some(segments)
 }
 
 /// TS `walkProgram` (ast.ts:462). Drive [`collect_commands`] over the program
@@ -4752,6 +4985,16 @@ mod tests {
         }
         assert_eq!(pre_check_too_complex("ls -la"), None);
         assert_eq!(pre_check_too_complex("git status"), None);
+    }
+
+    #[test]
+    fn permission_parse_retains_pipeline_segments_from_the_same_ast() {
+        let (parsed, segments) = parse_for_security_with_pipeline_segments("echo ok | cat");
+        assert!(matches!(parsed, ParseForSecurityResult::Simple { .. }));
+        assert_eq!(
+            segments,
+            Some(vec!["echo ok".to_string(), "cat".to_string()])
+        );
     }
 
     #[test]

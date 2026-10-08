@@ -24,14 +24,14 @@ use lingxi_core::host::subagent_spawn::{
 };
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 use lingxi_core::host::{
-    FusionExecutor, FusionImplementHost, FusionInheritance, FusionModelHints, FusionModelRef,
-    FusionOrigin, FusionPanelMode, FusionPreset, FusionRequest, FusionStatus, PanelClaim,
-    PanelEvidence, PanelReport, PanelVerification, VerificationOutcome, VerificationRun,
-    WorktreeManager, DEFAULT_IMPLEMENT_FUSION_DIMENSIONS,
+    DEFAULT_IMPLEMENT_FUSION_DIMENSIONS, FusionExecutor, FusionImplementHost, FusionInheritance,
+    FusionModelHints, FusionModelRef, FusionOrigin, FusionPanelMode, FusionPreset, FusionRequest,
+    FusionStatus, PanelClaim, PanelEvidence, PanelReport, PanelVerification, VerificationOutcome,
+    VerificationRun, WorktreeManager,
 };
 use lingxi_core::types::AgentId;
 use platform_posix::worktree::PosixWorktreeManager;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sidequery::{
     SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse,
     StrictStructuredQueryRequest, StrictStructuredQueryResponse,
@@ -207,6 +207,7 @@ impl SubagentSpawner for EditingPanels {
             });
         }
         Ok(SubagentResult::Completed {
+            handback: None,
             agent_id: AgentId::new(),
             content: serde_json::to_value(panel_report(&format!("done by {model}"))).unwrap(),
             usage: usage.clone(),
@@ -514,9 +515,10 @@ async fn implement_run_against_a_real_repo_snapshots_the_users_work_and_leaves_i
     dirs.sort();
     dirs.dedup();
     assert_eq!(dirs.len(), 3);
-    assert!(dirs
-        .iter()
-        .all(|cwd| *cwd != &repo && cwd.starts_with(&repo)));
+    assert!(
+        dirs.iter()
+            .all(|cwd| *cwd != &repo && cwd.starts_with(&repo))
+    );
 
     // ── What each panel's patch says ──────────────────────────────────────
     // Panel ids are anonymous; tell the panels apart by what they changed.
@@ -696,9 +698,11 @@ async fn implement_run_against_a_real_repo_snapshots_the_users_work_and_leaves_i
         .map(str::trim)
         .collect();
     assert_eq!(new_branches.len(), 2, "kept branches: {new_branches:?}");
-    assert!(new_branches
-        .iter()
-        .all(|b| b.starts_with("worktree-fusion-")));
+    assert!(
+        new_branches
+            .iter()
+            .all(|b| b.starts_with("worktree-fusion-"))
+    );
 
     // ── Kept worktrees are exactly the ones with changes ──────────────────
     let kept = worktree_dirs(&repo);

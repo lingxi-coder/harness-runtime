@@ -1,4 +1,4 @@
-//! `claudeMdExcludes` — exclude `LINGXI.md` files matching glob patterns or
+//! `lingxiMdExcludes` — exclude `LINGXI.md` files matching glob patterns or
 //! absolute paths from loading. 1:1 with claude-code `isLingxiMdExcluded`
 //! (`claudemd.ts:547-573`) + `resolveExcludePatterns`. Only `User` / `Project` /
 //! `Local` tier files are excludable; `Managed` (and AutoMem/TeamMem) are never
@@ -18,7 +18,7 @@ fn match_opts() -> MatchOptions {
     }
 }
 
-/// Compiled `claudeMdExcludes` matcher. Build once from the merged settings
+/// Compiled `lingxiMdExcludes` matcher. Build once from the merged settings
 /// patterns; query per file via [`Self::is_excluded`].
 #[derive(Debug, Default, Clone)]
 pub struct LingxiMdExcluder {
@@ -26,7 +26,7 @@ pub struct LingxiMdExcluder {
 }
 
 impl LingxiMdExcluder {
-    /// Build from the merged `claudeMdExcludes` patterns. Each ABSOLUTE pattern
+    /// Build from the merged `lingxiMdExcludes` patterns. Each ABSOLUTE pattern
     /// also contributes a realpath-resolved variant (resolving its longest
     /// existing directory prefix) so a pattern written against `/tmp/...` still
     /// matches a file the OS resolved to `/private/tmp/...` (claude-code

@@ -116,6 +116,7 @@ pub fn strip_thinking_blocks_for_signature_recovery(messages: &mut [Message]) ->
             message.content.push(ContentBlock::Text {
                 text: "[Thinking removed]".into(),
                 cache_control: None,
+                citations: None,
             });
         }
         changed = true;
@@ -158,11 +159,12 @@ pub fn strip_marked_conversation_thinking(
             index += 1;
             preserve_prefix
                 || (!is_thinking(block)
-                    && !matches!(block, Block::Text { text } if text.trim().is_empty()))
+                    && !matches!(block, Block::Text { text, ..} if text.trim().is_empty()))
         });
         if content.is_empty() {
             content.push(Block::Text {
                 text: "[Thinking removed]".into(),
+                citations: None,
             });
         }
     }
@@ -187,9 +189,15 @@ mod tests {
                 id: old,
                 content: vec![
                     thinking(),
-                    Block::Text { text: " ".into() },
+                    Block::Text {
+                        text: " ".into(),
+                        citations: None,
+                    },
                     thinking(),
-                    Block::Text { text: "\n".into() },
+                    Block::Text {
+                        text: "\n".into(),
+                        citations: None,
+                    },
                 ],
                 stop_reason: None,
             },
@@ -202,7 +210,16 @@ mod tests {
         strip_marked_conversation_thinking(&mut messages, &[(old, 1)].into_iter().collect());
         match &messages[0] {
             ConversationMessage::Assistant { content, .. } => {
-                assert_eq!(content, &vec![thinking(), Block::Text { text: " ".into() }])
+                assert_eq!(
+                    content,
+                    &vec![
+                        thinking(),
+                        Block::Text {
+                            text: " ".into(),
+                            citations: None
+                        }
+                    ]
+                )
             }
             _ => unreachable!(),
         }
@@ -232,6 +249,7 @@ mod tests {
         ContentBlock::Text {
             text: s.into(),
             cache_control: None,
+            citations: None,
         }
     }
 
@@ -441,6 +459,7 @@ pub(crate) fn retain_input_blocks(
                 message.content.push(Block::Text {
                     text: text.into(),
                     thought_signature: None,
+                    citations: None,
                 });
             }
         }
@@ -512,6 +531,7 @@ mod input_recovery_tests {
                     Block::Text {
                         text: "  ".into(),
                         thought_signature: None,
+                        citations: None,
                     },
                 ],
                 native_options: vec![],
@@ -549,6 +569,7 @@ mod input_recovery_tests {
                 Block::Text {
                     text: "�".into(),
                     thought_signature: None,
+                    citations: None,
                 },
             ],
             native_options: vec![],

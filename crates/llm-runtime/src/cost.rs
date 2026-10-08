@@ -270,6 +270,24 @@ pub(crate) fn project_estimate(
         pricing_source: estimate.source,
     })
 }
+
+/// Project a frozen quote whose summary model may differ from the dispatched
+/// model, as with a server-fallback iteration total. The SDK quote supplies the
+/// selected billing/request/display row; the dispatched route supplies the
+/// provider namespace captured for this physical attempt.
+pub(crate) fn project_fallback_estimate(
+    estimate: lingxi_llm_client::client::pricing::CostEstimate,
+    dispatched: &PricingModelRef,
+) -> Result<CostEstimate, LlmError> {
+    let pricing_model = PricingModelRef {
+        pricing_provider_id: dispatched.pricing_provider_id.clone(),
+        billing_model: estimate.pricing_model.billing_model.clone(),
+        request_model: estimate.pricing_model.request_model.clone(),
+        display_model: estimate.pricing_model.display_model.clone(),
+    };
+    project_estimate(estimate, pricing_model)
+}
+
 impl CostEstimator {
     pub(crate) fn capture(
         &self,

@@ -95,6 +95,12 @@ pub enum LlmError {
     /// Provider returned a transient/internal failure.
     #[error("provider internal error")]
     ProviderInternal,
+    /// The provider reported `timeout_error`; not a local transport timeout.
+    #[error("provider timeout: {message}")]
+    ProviderTimeout {
+        message: String,
+        status: Option<u16>,
+    },
     /// Provider reported overload (Anthropic 529 / `overloaded_error`).
     ///
     /// `repeated` is `true` when the caller has seen `consecutive_overloaded >=
@@ -113,6 +119,13 @@ pub enum LlmError {
     Transport {
         /// Transport-layer failure message.
         message: String,
+    },
+    /// The host rejected this prepared request at the logical SDK dispatch boundary.
+    /// `prior_dispatch` is true when an earlier physical attempt in this drive was admitted.
+    #[error("model request was not admitted for dispatch")]
+    RequestDispatchRejected {
+        /// Whether this logical drive admitted an earlier physical attempt.
+        prior_dispatch: bool,
     },
     /// The request did not complete within the timeout.
     ///
@@ -298,6 +311,9 @@ impl LlmError {
     /// numeric status.
     #[must_use]
     pub fn http_status(&self) -> Option<u16> {
+        if let Self::ProviderTimeout { status, .. } = self {
+            return *status;
+        }
         self.provider_message().and_then(api_error_status)
     }
 
@@ -311,6 +327,7 @@ impl LlmError {
     pub fn provider_message(&self) -> Option<&str> {
         match self {
             LlmError::Authentication { message }
+            | LlmError::ProviderTimeout { message, .. }
             | LlmError::PermissionDenied { message }
             | LlmError::InvalidRequest { message }
             | LlmError::Transport { message }

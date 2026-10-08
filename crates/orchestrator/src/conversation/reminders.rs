@@ -1,8 +1,623 @@
 //! Per-turn reminders and memory/skill prefetch pipelines.
 
 use super::*;
+use hooks::attachment::HookPublicationGuard;
+use hooks::ExactHookText;
+use std::sync::Arc;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NativeRouteFailure {
+    Unexamined,
+    PastLink,
+}
+
+struct NativeRouteForms {
+    requested: std::path::PathBuf,
+    spellings: Vec<std::path::PathBuf>,
+    landing: Option<std::path::PathBuf>,
+    stopped_at: std::path::PathBuf,
+    failure: Option<NativeRouteFailure>,
+}
+
+async fn cancellable_read_io<T>(
+    cancel: Option<&lingxi_core::host::CancellationToken>,
+    future: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    match cancel {
+        Some(cancel) => tokio::select! {
+            biased;
+            () = cancel.cancelled() => None,
+            result = future => Some(result),
+        },
+        None => Some(future.await),
+    }
+}
+
+fn absolute_normalized_read_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    // Every supported in-tree source producer records an absolute route
+    // (file tools resolve against the session cwd; memory, SDK, and restored
+    // attachment paths are absolute). Do not guess the process cwd for a
+    // route-less relative value: it can differ from the active session cwd.
+    if !path.is_absolute() {
+        return None;
+    }
+    let absolute = path.to_path_buf();
+    let mut normalized = std::path::PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                // Native path.resolve clamps `..` at the volume root. Only
+                // pop a real path component, never the root/prefix itself.
+                if normalized.file_name().is_some() {
+                    normalized.pop();
+                }
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+    Some(normalized)
+}
+
+fn native_read_root_and_components(
+    path: &std::path::Path,
+) -> (
+    std::path::PathBuf,
+    std::collections::VecDeque<std::ffi::OsString>,
+) {
+    let mut root = std::path::PathBuf::new();
+    let mut pending = std::collections::VecDeque::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => root.push(prefix.as_os_str()),
+            std::path::Component::RootDir => root.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !root.pop() {
+                    pending.push_back(component.as_os_str().to_os_string());
+                }
+            }
+            std::path::Component::Normal(part) => pending.push_back(part.to_os_string()),
+        }
+    }
+    (root, pending)
+}
+
+fn push_native_route_path(
+    paths: &mut Vec<std::path::PathBuf>,
+    seen: &mut std::collections::HashSet<std::path::PathBuf>,
+    path: std::path::PathBuf,
+) {
+    if seen.insert(path.clone()) {
+        paths.push(path);
+    }
+}
+
+async fn native_read_route_forms(
+    path: &std::path::Path,
+    cancel: Option<&lingxi_core::host::CancellationToken>,
+) -> Option<NativeRouteForms> {
+    const MAX_HOPS: usize = 64;
+    let requested = absolute_normalized_read_path(path)?;
+    let mut spellings = vec![requested.clone()];
+    let mut seen_spellings = std::collections::HashSet::from([requested.clone()]);
+    let (mut current, mut pending) = native_read_root_and_components(&requested);
+    let mut seen_links =
+        std::collections::HashSet::<(std::path::PathBuf, Vec<std::ffi::OsString>)>::new();
+    let mut hops = 0;
+    let mut saw_link = false;
+    let mut stopped_at = requested.clone();
+
+    while let Some(component) = pending.pop_front() {
+        if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
+            return None;
+        }
+        if hops >= MAX_HOPS {
+            return Some(NativeRouteForms {
+                requested,
+                spellings,
+                landing: None,
+                stopped_at,
+                failure: Some(NativeRouteFailure::PastLink),
+            });
+        }
+        let candidate = current.join(&component);
+        stopped_at.clone_from(&candidate);
+        let metadata = cancellable_read_io(cancel, tokio::fs::symlink_metadata(&candidate)).await?;
+        match metadata {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                saw_link = true;
+                let tail = pending.iter().cloned().collect::<Vec<_>>();
+                if !seen_links.insert((candidate.clone(), tail.clone())) {
+                    return Some(NativeRouteForms {
+                        requested,
+                        spellings,
+                        landing: None,
+                        stopped_at,
+                        failure: Some(NativeRouteFailure::PastLink),
+                    });
+                }
+                hops += 1;
+                let target = match cancellable_read_io(cancel, tokio::fs::read_link(&candidate))
+                    .await?
+                {
+                    Ok(target) => target,
+                    Err(_) => {
+                        return Some(NativeRouteForms {
+                            requested,
+                            spellings,
+                            landing: None,
+                            stopped_at,
+                            failure: Some(NativeRouteFailure::PastLink),
+                        });
+                    }
+                };
+                let leaf = tail.is_empty();
+                let mut next = if target.is_absolute() {
+                    target
+                } else {
+                    current.join(target)
+                };
+                for part in tail {
+                    next.push(part);
+                }
+                let next = absolute_normalized_read_path(&next)?;
+                if leaf {
+                    push_native_route_path(&mut spellings, &mut seen_spellings, next.clone());
+                }
+                (current, pending) = native_read_root_and_components(&next);
+            }
+            Ok(_) => current.push(component),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                let mut landing = candidate;
+                for part in pending.drain(..) {
+                    landing.push(part);
+                }
+                let landing = absolute_normalized_read_path(&landing)?;
+                push_native_route_path(&mut spellings, &mut seen_spellings, landing.clone());
+                return Some(NativeRouteForms {
+                    requested,
+                    spellings,
+                    landing: Some(landing),
+                    stopped_at,
+                    failure: None,
+                });
+            }
+            Err(error) => {
+                let loop_error = cfg!(unix) && error.raw_os_error() == Some(40);
+                return Some(NativeRouteForms {
+                    requested,
+                    spellings,
+                    landing: None,
+                    stopped_at,
+                    failure: Some(if saw_link || loop_error {
+                        NativeRouteFailure::PastLink
+                    } else {
+                        NativeRouteFailure::Unexamined
+                    }),
+                });
+            }
+        }
+    }
+
+    let landing = current;
+    push_native_route_path(&mut spellings, &mut seen_spellings, landing.clone());
+    Some(NativeRouteForms {
+        requested,
+        spellings,
+        landing: Some(landing),
+        stopped_at,
+        failure: None,
+    })
+}
+
+async fn native_unix_sge_landing(
+    path: &std::path::Path,
+    cancel: Option<&lingxi_core::host::CancellationToken>,
+) -> Option<std::path::PathBuf> {
+    const MAX_HOPS: usize = 40;
+    let mut remaining = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(part) => Some(part.to_os_string()),
+            std::path::Component::ParentDir => Some("..".into()),
+            std::path::Component::Prefix(prefix) => Some(prefix.as_os_str().to_os_string()),
+            std::path::Component::RootDir | std::path::Component::CurDir => None,
+        })
+        .collect::<std::collections::VecDeque<_>>();
+    let mut current = std::path::PathBuf::from(std::path::MAIN_SEPARATOR.to_string());
+    let mut hops = 0;
+    while !remaining.is_empty() && hops <= MAX_HOPS {
+        if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
+            return None;
+        }
+        let component = remaining.pop_front()?;
+        let candidate = if component == ".." {
+            current.parent().unwrap_or(&current).to_path_buf()
+        } else {
+            current.join(&component)
+        };
+        let metadata =
+            match cancellable_read_io(cancel, tokio::fs::symlink_metadata(&candidate)).await? {
+                Ok(metadata) => metadata,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    if hops == 0 || remaining.len() == 0 {
+                        let mut result = current;
+                        result.push(component);
+                        for part in remaining {
+                            result.push(part);
+                        }
+                        return Some(result);
+                    }
+                    return None;
+                }
+                Err(_) => return None,
+            };
+        let target = if metadata.file_type().is_symlink() {
+            let target = match cancellable_read_io(cancel, tokio::fs::read_link(&candidate)).await? {
+                Ok(target) => target,
+                Err(_) => return None,
+            };
+            hops += 1;
+            target
+        } else {
+            std::path::PathBuf::new()
+        };
+        let is_link = metadata.file_type().is_symlink();
+        let next = if is_link {
+            if target.is_absolute() {
+                std::path::PathBuf::from(std::path::MAIN_SEPARATOR.to_string())
+            } else {
+                current.clone()
+            }
+        } else {
+            candidate
+        };
+        if is_link {
+            let mut target_parts = target.components().filter_map(|part| match part {
+                std::path::Component::Normal(value) => Some(value.to_os_string()),
+                std::path::Component::ParentDir => Some("..".into()),
+                _ => None,
+            }).collect::<std::collections::VecDeque<_>>();
+            target_parts.append(&mut remaining);
+            remaining = target_parts;
+        }
+        current = next;
+    }
+    if hops > MAX_HOPS { None } else { Some(current) }
+}
+
+async fn native_changed_file_read_path_set(
+    path: &std::path::Path,
+    cancel: Option<&lingxi_core::host::CancellationToken>,
+) -> Option<Vec<std::path::PathBuf>> {
+    const MAX_SET: usize = 32;
+    let requested = absolute_normalized_read_path(path)?;
+    let mut paths = vec![requested.clone()];
+    let mut seen = std::collections::HashSet::from([requested.clone()]);
+    let mut index = 0;
+    while index < paths.len() {
+        if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
+            return None;
+        }
+        let candidate = paths[index].clone();
+        let forms = native_read_route_forms(&candidate, cancel).await?;
+        if native_changed_file_route_is_unresolved(&forms, cancel).await? {
+            return None;
+        }
+        for spelling in forms.spellings {
+            push_native_route_path(&mut paths, &mut seen, spelling);
+        }
+        if forms.failure.is_some() {
+            push_native_route_path(&mut paths, &mut seen, candidate.clone());
+        } else {
+            push_native_route_path(&mut paths, &mut seen, forms.landing?);
+        }
+        #[cfg(unix)]
+        let extra = if candidate == requested && paths.len() > 1 {
+            native_unix_sge_landing(&requested, cancel).await
+        } else {
+            Some(candidate)
+        };
+        #[cfg(not(unix))]
+        let extra = Some(candidate);
+        let extra = extra?;
+        if paths.len() > MAX_SET {
+            return None;
+        }
+        push_native_route_path(&mut paths, &mut seen, extra);
+        index += 1;
+    }
+    Some(paths)
+}
+
+async fn native_changed_file_route_is_unresolved(
+    forms: &NativeRouteForms,
+    cancel: Option<&lingxi_core::host::CancellationToken>,
+) -> Option<bool> {
+    if forms.failure.is_none() {
+        return Some(false);
+    }
+    let root = forms.stopped_at.ancestors().last()?;
+    if forms.failure == Some(NativeRouteFailure::Unexamined)
+        && forms.requested.is_absolute()
+        && forms.stopped_at.parent() == Some(root)
+    {
+        let root_accessible = cancellable_read_io(cancel, tokio::fs::symlink_metadata(root)).await?;
+        // Native Cne suppresses an unexamined launch-root route only when the
+        // root itself is readable; failure to inspect that root is not treated
+        // as a blanket rejection.
+        return Some(root_accessible.is_ok());
+    }
+    Some(true)
+}
+
+async fn attach_async_hook_response(
+    orch: &ConversationOrchestrator,
+    text: ExactHookText,
+    hook_event: Option<String>,
+    publication_guard: Option<Arc<dyn HookPublicationGuard>>,
+) -> Option<crate::prompt::async_hook_response::GuardedAsyncHookReminder> {
+    let content = crate::prompt::async_hook_response::render_reminder(&[text])?;
+    let message = crate::prompt::async_hook_response::user_meta_message(MessageId::new(), content);
+    let origin = hook_event.map(|event| serde_json::json!({"kind":"hook","event":event}));
+    let attached = if let Some(origin) = origin {
+        let work = orch.mod_prompt_attachment("async_hook_response", message, origin);
+        if let Some(guard) = publication_guard.clone() {
+            crate::prompt::async_hook_response::run_hook_prompt_work(guard, work).await??
+        } else {
+            work.await?
+        }
+    } else {
+        message
+    };
+    Some(
+        crate::prompt::async_hook_response::GuardedAsyncHookReminder {
+            message: attached,
+            publication_guard,
+        },
+    )
+}
 
 impl ConversationOrchestrator {
+    pub(crate) async fn register_mod_persisted_attachment(
+        &self,
+        message: &ConversationMessage,
+        kind: &str,
+        origin: serde_json::Value,
+    ) {
+        self.prompt_runtime
+            .mod_persisted_attachments
+            .lock()
+            .await
+            .insert(message.id(), (kind.to_owned(), origin));
+    }
+
+    /// Screen original attachment renderings only in a model request copy.
+    /// Session history and its JSONL attachment record remain unchanged.
+    pub(crate) async fn screen_mod_persisted_attachments(
+        &self,
+        messages: &mut Vec<ConversationMessage>,
+    ) {
+        let pending = {
+            let catalog = self.prompt_runtime.mod_persisted_attachments.lock().await;
+            if catalog.is_empty() {
+                return;
+            }
+            std::mem::take(messages)
+                .into_iter()
+                .map(|message| {
+                    let descriptor = catalog.get(&message.id()).cloned();
+                    (message, descriptor)
+                })
+                .collect::<Vec<_>>()
+        };
+        for (message, descriptor) in pending {
+            if let Some((kind, origin)) = descriptor {
+                if let Some(rendered) = self.mod_prompt_attachment(&kind, message, origin).await {
+                    messages.push(rendered);
+                }
+            } else {
+                messages.push(message);
+            }
+        }
+    }
+
+    /// Let Mods rewrite one outgoing attachment before its engine framing is
+    /// sent to the model. Persistent callers retain the original message in
+    /// history and use [`Self::screen_mod_persisted_attachments`] at render.
+    pub(crate) async fn mod_prompt_attachment(
+        &self,
+        kind: &str,
+        message: ConversationMessage,
+        origin: serde_json::Value,
+    ) -> Option<ConversationMessage> {
+        self.mod_prompt_attachment_with_detail(kind, message, origin, None)
+            .await
+    }
+
+    pub(crate) async fn mod_prompt_attachment_with_detail(
+        &self,
+        kind: &str,
+        mut message: ConversationMessage,
+        origin: serde_json::Value,
+        detail: Option<serde_json::Value>,
+    ) -> Option<ConversationMessage> {
+        let Some(host) = (if let Some(registry) = &self.lifecycle_runtime.hook_registry {
+            registry.read().await.mod_host()
+        } else {
+            None
+        })
+        .filter(|host| host.has_event("prompt.attachment")) else {
+            return Some(message);
+        };
+        let message_id = message.id();
+        let ConversationMessage::User { content, .. } = &mut message else {
+            return Some(message);
+        };
+        use lingxi_core::types::utf16_json::{Utf16JsonProjection, Utf16JsonString};
+        use lingxi_core::types::ContentBlock;
+        let (units, citations, was_utf16) = match content.as_slice() {
+            [ContentBlock::Text { text, citations }] => (
+                text.encode_utf16().collect::<Vec<_>>(),
+                citations.clone(),
+                false,
+            ),
+            [ContentBlock::TextJsUtf16 {
+                utf16_code_units,
+                citations,
+                ..
+            }] => (utf16_code_units.clone(), citations.clone(), true),
+            _ => return Some(message),
+        };
+        let prefix = "<system-reminder>\n".encode_utf16().collect::<Vec<_>>();
+        let suffix = "\n</system-reminder>".encode_utf16().collect::<Vec<_>>();
+        let inner = units
+            .strip_prefix(prefix.as_slice())
+            .and_then(|body| body.strip_suffix(suffix.as_slice()));
+        let wrapped = inner.is_some();
+        let body_units = inner.unwrap_or(&units).to_vec();
+        let body = String::from_utf16_lossy(&body_units);
+        // Native JHo omits attachments whose unframed rendered text is blank.
+        if body.trim().is_empty() {
+            return Some(message);
+        }
+        let mut input = Utf16JsonProjection::plain(
+            serde_json::json!({"type":kind,"text":body,"origin":origin}),
+        );
+        if body.encode_utf16().ne(body_units.iter().copied()) {
+            input.strings.push(Utf16JsonString {
+                pointer: "/text".into(),
+                code_units: body_units.clone(),
+            });
+        }
+        if let Some(detail) = detail {
+            input.value["detail"] = detail;
+        }
+        let identity = host.registration_identity();
+        let (generation, cached) = {
+            let cache = self.prompt_runtime.mod_prompt_attachments.lock().await;
+            let cached = cache
+                .answers
+                .get(&message_id)
+                .and_then(|(source, catalog, answer)| {
+                    (source == &input && catalog == &identity).then_some(answer.clone())
+                });
+            (cache.generation, cached)
+        };
+        let answer = if let Some(cached) = cached {
+            cached
+        } else {
+            let pinned_kind = kind.to_owned();
+            let pinned_origin = origin.clone();
+            let log_output = self.output.clone();
+            let toast_output = self.output.clone();
+            let status_output = self.output.clone();
+            let result = host
+                .dispatch_with_utf16_at_context_scope(
+                    "prompt.attachment",
+                    input.clone(),
+                    &self.current_cwd(),
+                    Some(self),
+                    hooks::mods::ModUtf16DispatchScope::default(),
+                    lingxi_core::host::task_registry::FieldPresence::Missing,
+                    move |forwarded| {
+                        let pinned_kind = pinned_kind.clone();
+                        let pinned_origin = pinned_origin.clone();
+                        async move {
+                            if forwarded
+                                .value
+                                .get("type")
+                                .and_then(serde_json::Value::as_str)
+                                != Some(pinned_kind.as_str())
+                                || forwarded.value.get("origin") != Some(&pinned_origin)
+                                || forwarded.value.get("agentId").is_some()
+                            {
+                                return Err(hooks::mods::ModError::Hook(
+                                    "prompt.attachment type and origin are pinned".into(),
+                                ));
+                            }
+                            let text = forwarded.string_units("/text").ok_or_else(|| {
+                                hooks::mods::ModError::Hook("prompt.attachment needs text".into())
+                            })?;
+                            let display = String::from_utf16_lossy(&text);
+                            let mut result =
+                                Utf16JsonProjection::plain(serde_json::json!({"text":display}));
+                            if display.encode_utf16().ne(text.iter().copied()) {
+                                result.strings.push(Utf16JsonString {
+                                    pointer: "/text".into(),
+                                    code_units: text,
+                                });
+                            }
+                            Ok(result)
+                        }
+                    },
+                    move |plugin, text| {
+                        let output = log_output.clone();
+                        async move { output.emit_mod_log(&plugin, &text).await }
+                    },
+                    move |plugin, text, timeout_ms| {
+                        let output = toast_output.clone();
+                        async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+                    },
+                    move |plugin, text| {
+                        let output = status_output.clone();
+                        async move { output.emit_mod_status(&plugin, text.as_deref()).await }
+                    },
+                )
+                .await;
+            let answer = match result {
+                Ok(result) if result.result.get("text") == Some(&serde_json::Value::Null) => None,
+                Ok(result) => hooks::mods::ModUtf16ValueProjection {
+                    value: result.result,
+                    strings: result.result_utf16_strings,
+                    keys: result.result_utf16_keys,
+                }
+                .into_core_projection()
+                .ok()
+                .and_then(|projection| projection.string_units("/text")),
+                Err(error) => {
+                    tracing::warn!(attachment = kind, %error, "prompt.attachment Mod failed");
+                    Some(body_units)
+                }
+            };
+            let mut cache = self.prompt_runtime.mod_prompt_attachments.lock().await;
+            if cache.generation == generation {
+                cache
+                    .answers
+                    .insert(message_id, (input, identity, answer.clone()));
+            }
+            answer
+        };
+        let answer = answer?;
+        let answer = if wrapped {
+            [prefix, answer, suffix].concat()
+        } else {
+            answer
+        };
+        content[0] = match String::from_utf16(&answer) {
+            Ok(text) if !was_utf16 => ContentBlock::Text { text, citations },
+            _ => ContentBlock::TextJsUtf16 {
+                text: String::from_utf16_lossy(&answer),
+                utf16_code_units: answer,
+                citations,
+            },
+        };
+        Some(message)
+    }
+
     /// `/brief` toggle reminder, consumed once by the next model call.
     ///
     /// The visible command status is rendered by the host immediately, while
@@ -326,18 +941,61 @@ impl ConversationOrchestrator {
     /// the skill-/agent-listing reminders it is appended ONLY to the per-turn
     /// OUTGOING snapshot, never `session.history` / JSONL, so it never
     /// accumulates. No delta set is needed — draining the source IS the dedup.
-    pub(crate) async fn async_hook_response_reminder_message(&self) -> Option<ConversationMessage> {
-        let provider = self.prompt_runtime.async_hook_responses.as_ref()?;
-        let responses = provider.take_pending_responses().await;
-        let content = crate::prompt::async_hook_response::render_reminder(&responses)?;
-        Some(ConversationMessage::user_meta(MessageId::new(), content))
+    /// Keep each completed settings hook's event attached to its own outgoing
+    /// reminder so Mods receive `origin: {kind:'hook', event}`.
+    pub(crate) async fn async_hook_response_mod_messages(
+        &self,
+    ) -> Vec<crate::prompt::async_hook_response::GuardedAsyncHookReminder> {
+        let Some(provider) = self.prompt_runtime.async_hook_responses.as_ref() else {
+            return Vec::new();
+        };
+        let mut output = Vec::new();
+        let mut without_event = Vec::new();
+        for response in provider.take_pending_with_events().await {
+            let Some(publication_guard) = response.publication_guard else {
+                if response.hook_event.is_none() {
+                    without_event.push(response.text);
+                    continue;
+                }
+                if let Some(reminder) =
+                    attach_async_hook_response(self, response.text, response.hook_event, None).await
+                {
+                    output.push(reminder);
+                }
+                continue;
+            };
+            if let Some(reminder) = attach_async_hook_response(
+                self,
+                response.text,
+                response.hook_event,
+                Some(publication_guard),
+            )
+            .await
+            {
+                output.push(reminder);
+            }
+        }
+        // Older providers cannot identify an origin event. Preserve their
+        // established aggregate reminder without fabricating a hook origin.
+        if let Some(content) = crate::prompt::async_hook_response::render_reminder(&without_event) {
+            output.push(
+                crate::prompt::async_hook_response::GuardedAsyncHookReminder {
+                    message: crate::prompt::async_hook_response::user_meta_message(
+                        MessageId::new(),
+                        content,
+                    ),
+                    publication_guard: None,
+                },
+            );
+        }
+        output
     }
 
     /// T35: the per-turn `task-notification` reminders — one message per
     /// completion, empty when no source is wired or no background task finished
     /// since the last turn.
     ///
-    /// Mirrors [`Self::async_hook_response_reminder_message`]: drains the
+    /// Mirrors [`Self::async_hook_response_mod_messages`]: drains the
     /// registry's terminal-not-notified tasks (CONSUME-ONCE — the registry marks
     /// each `notified` + evicts on drain) and renders their `<task-notification>`
     /// blocks (claude-code's per-task-type `enqueue*Notification` formats) inside
@@ -783,7 +1441,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
         Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
-    /// The per-turn, transient `total_tokens_reminder` (producer `D3T`
+    /// The per-step `total_tokens_reminder` (producer `D3T`
     /// @296556375), or `None` when the mode resolves to `off`.
     ///
     /// ```js
@@ -799,34 +1457,29 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     /// `totalTokensReminderAfterUserTurn` is on — the latter also being the
     /// `reanchor` flag. `hoe(messages)` (@294688350) is the LAST assistant
     /// message's `input + cache_creation + cache_read + output`, cached here as
-    /// [`Self::last_response_input_tokens`] + [`Self::last_response_output_tokens`].
+    /// the reminder-only usage snapshot. Compaction resets that snapshot when
+    /// the replacement history no longer carries the prior assistant usage.
     ///
-    /// **Default OFF in the port** — see the divergence note on
-    /// [`crate::prompt::total_tokens`]. Stock sessions get `None`, so the
-    /// locked streaming fixtures stay byte-identical.
-    pub(crate) async fn total_tokens_reminder_message(&self) -> Option<ConversationMessage> {
+    /// The collector persists this non-ephemeral attachment. Later requests
+    /// retain its original position and bytes, matching the 2.1.286 renderer.
+    pub(crate) async fn total_tokens_reminder_message(
+        &self,
+        is_regular_user_prompt: bool,
+    ) -> Option<ConversationMessage> {
         use crate::prompt::total_tokens as tt;
         let mode = tt::resolve_mode(None);
         if mode == tt::TotalTokensMode::Off {
             return None;
         }
-        let (history_tail_is_tool_results, model) = {
-            let s = self.session.lock().await;
-            (Self::step_follows_tool_results(&s.history), s.model.clone())
-        };
-        let reanchor = !history_tail_is_tool_results && tt::after_user_turn(None);
-        if !history_tail_is_tool_results && !reanchor {
+        let model = self.session.lock().await.model.clone();
+        let reanchor = is_regular_user_prompt && tt::after_user_turn(None);
+        if is_regular_user_prompt && !reanchor {
             return None;
         }
         let used = i64::try_from(
             self.compaction_runtime
-                .last_response_input_tokens
-                .load(std::sync::atomic::Ordering::Relaxed)
-                .saturating_add(
-                    self.compaction_runtime
-                        .last_response_output_tokens
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                ),
+                .total_tokens_reminder_usage
+                .load(std::sync::atomic::Ordering::Relaxed),
         )
         .unwrap_or(i64::MAX);
         let context_window = i64::try_from(compaction::effective_context_window_size(
@@ -877,7 +1530,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     ///
     /// Both the leading `# currentDate` context and the midnight reminder use
     /// this producer, so call order cannot create two independent date memos.
-    pub(super) fn session_start_date(&self, session_id: lingxi_core::types::SessionId) -> String {
+    pub(crate) fn session_start_date(&self, session_id: lingxi_core::types::SessionId) -> String {
         let today = crate::prompt::env_meta::current_date_string();
         let mut state = self
             .prompt_runtime
@@ -939,8 +1592,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     }
 
     /// The per-turn, transient `agent_listing_delta` reminder, or `None` when
-    /// the gate is OFF (the default — keeps the inline-catalog build
-    /// byte-identical), the `Agent` tool is absent this turn, or no NEW agent
+    /// the `Agent` tool is absent this turn, or no NEW agent
     /// type has appeared since the last reminder. A wired DISK catalog is NOT
     /// required — built-ins are always announced (binary `aLe` uses
     /// `activeAgents`, which includes built-ins).
@@ -949,17 +1601,14 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     /// (`getAgentListingDeltaAttachment`, attachments.ts:1490-1554 →
     /// `normalizeAttachmentForAPI`'s `'agent_listing_delta'` case,
     /// messages.ts:4194-4215):
-    /// - GATE: `shouldInjectAgentListInMessages()` (env
-    ///   `LINGXI_AGENT_LIST_IN_MESSAGES`, default OFF — see
-    ///   [`agent::should_inject_agent_list_in_messages`]). When ON, `AgentTool`'s
-    ///   description drops the inline catalog for a static pointer line and the
-    ///   catalog is conveyed here instead, so the tool-schema prompt cache stops
-    ///   busting on every MCP/plugin/permission-driven catalog change.
+    /// - PLACEMENT: the Agent tool description carries a static pointer and
+    ///   the catalog is conveyed here, so catalog changes do not invalidate
+    ///   the tool-schema prompt cache.
     /// - TOOL GATE: skip when the `Agent` tool is not in the registry this turn
     ///   (attachments.ts:1497-1501) — the listing would be unactionable.
     /// - ENTRIES: the merged built-ins + catalog listing via
     ///   [`agent::agent_listing_entries`] (later-wins precedence, sorted), the
-    ///   same source of truth the inline prompt uses.
+    ///   same source of truth the Agent tool uses to validate selections.
     /// - DELTA: emit lines only for types NOT yet announced
     ///   ([`Self::sent_agent_names`]); `is_initial` = the set was empty BEFORE
     ///   this turn (TS `announced.size === 0`). An empty delta ⇒ `None`.
@@ -999,21 +1648,12 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     ///   [`lingxi_core::host::subscription::is_pro_plan`] and
     ///   [`lingxi_core::host::live_sessions::subagent_steer_is_default`].
     ///
-    /// NOT inert: `LINGXI_AGENT_LIST_IN_MESSAGES` defaults **ON** since 2.1.193
-    /// (`lingxi_core::host::subagent_spawn::should_inject_agent_list_in_messages` returns
-    /// `true` when unset), so a stock session that has the Agent tool now sends
-    /// the concurrency note on its FIRST agent listing — which is exactly what
-    /// 2.1.238 does for a non-Pro plan on the default steer. The removal branch
-    /// stays silent until a catalog actually shrinks.
+    /// A session with the Agent tool sends the concurrency note on its first
+    /// listing. The removal branch stays silent until the catalog shrinks.
     pub(crate) async fn agent_listing_reminder_message(&self) -> Option<ConversationMessage> {
-        // GATE: off by default (no GrowthBook in Rust) ⇒ no reminder, inline
-        // catalog stays byte-identical.
-        if !agent::should_inject_agent_list_in_messages() {
-            return None;
-        }
         // Gate on the Agent tool being available this turn (attachments.ts:1497).
-        // Dispatch lookup also matches the legacy `Task` alias. This is the ONLY
-        // structural gate in the binary's `aLe` — it does NOT gate on a wired
+        // This is the ONLY structural gate in the binary's `aLe` — it does NOT
+        // gate on a wired
         // DISK catalog (see below).
         self.find_dispatchable_tool("Agent")?;
 
@@ -1030,7 +1670,20 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
         if let Some(catalog) = self.lifecycle_runtime.agent_catalog.as_ref() {
             defs.extend(catalog.read().await.iter().cloned());
         }
-        let entries = agent::agent_listing_entries(&defs);
+        // `agent.offer` filters only this model-facing projection. The
+        // catalog itself remains untouched for explicit Agent dispatch.
+        let candidates = agent::agent_listing_candidates(&defs);
+        let mod_host = if let Some(registry) = &self.lifecycle_runtime.hook_registry {
+            registry.read().await.mod_host()
+        } else {
+            None
+        };
+        let entries = agent::filter_agent_offer_candidates(
+            candidates,
+            mod_host,
+            agent::AgentOfferContext::default(),
+        )
+        .await;
 
         // DELTA: keep only types not yet announced, then record them as sent;
         // and (AGT-15) compute the REMOVED set — announced types that are no
@@ -1234,6 +1887,40 @@ message with multiple tool uses so they run concurrently."
         ))
     }
 
+    async fn route_still_resolves_to_cached_file(
+        &self,
+        route_spellings: &[std::path::PathBuf],
+        cached_path: &std::path::Path,
+        cancel: Option<&lingxi_core::host::CancellationToken>,
+    ) -> bool {
+        // Cache keys can be lexical routes (`/var/...`) or canonical paths
+        // (`/private/var/...`), depending on the current producer. Compare the
+        // resolved cache identity to each CAPTURED route's resolved identity;
+        // never turn `cached_path` into a route or fallback authorization.
+        let Some(cached_result) =
+            cancellable_read_io(cancel, tokio::fs::canonicalize(cached_path)).await
+        else {
+            return false;
+        };
+        let Ok(cached_identity) = cached_result else {
+            return false;
+        };
+        for spelling in route_spellings {
+            if !spelling.is_absolute() {
+                continue;
+            }
+            let Some(result) =
+                cancellable_read_io(cancel, tokio::fs::canonicalize(spelling)).await
+            else {
+                return false;
+            };
+            if result.is_ok_and(|resolved| resolved == cached_identity) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// REM-05 — the per-turn `edited_text_file` (changed-files) reminders: one
     /// meta user message per file that changed ON DISK since the model last saw
     /// it.
@@ -1260,84 +1947,108 @@ message with multiple tool uses so they run concurrently."
     ///
     /// Step for step:
     ///
-    /// 1. **Scan** every MODEL-VISIBLE read-state entry, in the LRU's MRU→LRU
-    ///    order, through
+    /// 1. **Scan** every read-state entry with a source route (model read,
+    ///    rendered memory, post-compact restore, or SDK host seed), in the
+    ///    LRU's MRU→LRU order, through
     ///    [`tool_api::read_file_state::ReadFileStateLru::peek`] so the scan does
     ///    not rewrite recency (the oracle iterates the Map, which does not
     ///    either).
     ///
-    ///    # Divergence (reason)
-    ///    `OWr(e.readFileState)` yields EVERY key. LingXi additionally carries
-    ///    HOST-SEEDED snapshots in the same registry, explicitly flagged
-    ///    `in_model_context: false` ("the host marks this content as not present
-    ///    in the model context", `seed_read_state_from_host`). Telling the model
-    ///    a file "changed on disk since you last read it" when it never read it
-    ///    would be a lie, so the scan uses `model_context_keys()`. In claude-code
-    ///    every `readFileState` entry IS model context, so the two sets coincide
-    ///    there.
+    ///    `OWr(e.readFileState)` yields EVERY key, including memory and host
+    ///    seeds marked outside the current model-context set. LingXi records a
+    ///    source route when each real producer inserts those entries; only
+    ///    route-less, non-model/non-rendered seeds are excluded.
     /// 2. **Skip partial reads** — `a.offset!==void 0||a.limit!==void 0`.
-    ///    Also skip `seeded_from_context` / `is_partial_view` entries: their
-    ///    recorded content is deliberately NOT the on-disk bytes (frontmatter
-    ///    stripping, token-cap truncation), so diffing them against disk would
-    ///    emit a bogus reminder every turn. That is this port's stand-in for the
-    ///    oracle's `truncatedByTokenCap===!0` early return.
+    ///    After the actual Read call, Native separately suppresses a newly-read
+    ///    text result only when `truncatedByTokenCap` is true. Cached
+    ///    `is_partial_view` is not a pre-read filter.
     /// 3. **mtime gate** — `if(await f4e(l)<=a.timestamp)return null`. A missing
     ///    file DROPS the entry (`if(ur(c))e.readFileState.delete(s)`).
-    /// 4. **Re-read + content compare** — `vNe(a,content)`: identical bytes ⇒ no
-    ///    reminder (but the entry's timestamp is refreshed so the mtime gate
-    ///    stops firing).
+    /// 4. **Read-tool call + content compare** — `vNe(a,content)`: the registered
+    ///    Read tool supplies the result and refreshes its own read-state entry;
+    ///    identical text ⇒ no reminder.
     /// 5. **Diff** — [`crate::prompt::changed_files::render_snippet`] (`SEf`,
     ///    `structuredPatch` at context 8, 8192-char cap); an empty diff ⇒ no
     ///    reminder.
     /// 6. **Budget** — [`crate::prompt::changed_files::apply_snippet_budget`]
     ///    (`m3T = 16384`, cumulative across the turn's files; entries past the
     ///    threshold render the "diff is omitted here" arm).
-    /// 7. **Render** — [`crate::prompt::changed_files::render_changed_file`],
-    ///    each wrapped in its own `<system-reminder>` and marked meta, matching
-    ///    `Zy([kn({content:…,isMeta:!0})])` per attachment.
+    /// 7. **Render** — text attachments become wrapped meta messages. Native
+    ///    2.1.291's generic `edited_image_file` renderer returns an empty list;
+    ///    its typed image payload is retained but not sent as a model message.
     ///
-    /// The re-read REWRITES the read-state entry (content + mtime), which is
-    /// what the oracle's nested `Read` tool call does as a side effect — it is
-    /// what stops the reminder from repeating every turn for the same edit.
+    /// For a route that passes the current Read-deny and held-outside checks,
+    /// the registered Read call refreshes text/notebook state itself, matching
+    /// the Native nested `Read` call side effect. No reminder-specific cache
+    /// setter is used.
     ///
-    /// This is LIVE: there is no gate. It is silent in the common case because
-    /// nothing fires unless a tracked file's mtime actually moved outside the
-    /// session's own Read/Write path.
-    pub(crate) async fn changed_files_reminder_messages(&self) -> Vec<ConversationMessage> {
-        // (1) Snapshot the registry without touching recency.
-        let candidates: Vec<(std::path::PathBuf, tool_api::read_file_state::ReadFileEntry)> = {
+    pub(crate) async fn changed_files_reminder_messages(
+        &self,
+        cancel: Option<&lingxi_core::host::CancellationToken>,
+    ) -> Vec<ConversationMessage> {
+        // (1) Snapshot the registry without touching recency. Keep each current
+        // source route alongside the cache key; live deny rules may name
+        // either side of a symlink and Native rechecks the route before its
+        // changed-file Read.
+        let candidates: Vec<(
+            std::path::PathBuf,
+            tool_api::read_file_state::ReadFileEntry,
+            Vec<Vec<std::path::PathBuf>>,
+        )> = {
             let guard = self
                 .prompt_runtime
                 .read_state_map
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard
-                .model_context_keys()
+                .changed_file_candidate_keys()
                 .into_iter()
-                .filter_map(|p| guard.peek(&p).map(|e| (p, e)))
+                .filter_map(|p| {
+                    guard
+                        .peek(&p)
+                        .map(|entry| (p.clone(), entry, guard.requested_path_groups(&p)))
+                })
                 .collect()
         };
         if candidates.is_empty() {
             return Vec::new();
         }
 
-        let read_tool_name = self
-            .tools
-            .find_by_name("Read")
-            .map_or_else(|| "Read".to_string(), |t| t.name().to_string());
+        // Native's internal Read exists even when session tool visibility filters
+        // hide it. Both current desktop and mobile compositions register this as
+        // a built-in; `find_registered` selects built-ins first and bypasses the
+        // model-visible allowlist.
+        let Some(read_tool) = self.tools.find_registered("Read") else {
+            return Vec::new();
+        };
+        let read_tool_name = read_tool.name().to_string();
+        let messages = self.session.lock().await.model_context_history();
+        let mut base_read_context =
+            crate::turn_loop::streaming_tool_context_base(self, messages).await;
+        base_read_context.cancel = cancel.cloned();
+        // Native `sy(context)` uses these three current permission facts. A
+        // real policy snapshot supplies its live facts; a transport-only gate
+        // explicitly reports inactive facts.
+        let policy_snapshot = self.perms.read_path_policy_snapshot();
+        let native_path_recheck = policy_snapshot.facts().requires_path_recheck();
 
         let mut changed: Vec<crate::prompt::changed_files::ChangedFile> = Vec::new();
-        for (path, entry) in candidates {
-            // (2) partial / not-disk-faithful entries never participate.
-            if entry.offset.is_some()
-                || entry.limit.is_some()
-                || entry.seeded_from_context
-                || entry.is_partial_view
+        for (path, entry, requested_path_groups) in candidates {
+            if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
+                return Vec::new();
+            }
+            // (2) Native skips only entries previously read with an offset/limit.
+            if entry.offset.is_some() || entry.limit.is_some()
             {
                 continue;
             }
             // (3) mtime gate; a vanished file drops its entry.
-            let mtime_ms = match tokio::fs::metadata(&path).await.and_then(|m| m.modified()) {
+            let Some(metadata_result) =
+                cancellable_read_io(cancel, tokio::fs::metadata(&path)).await
+            else {
+                return Vec::new();
+            };
+            let mtime_ms = match metadata_result.and_then(|m| m.modified()) {
                 Ok(t) => tool_api::read_file_state::mtime_ms_floor(t),
                 Err(err) => {
                     if err.kind() == std::io::ErrorKind::NotFound {
@@ -1351,39 +2062,162 @@ message with multiple tool uses so they run concurrently."
             if mtime_ms <= entry.mtime_ms {
                 continue;
             }
-            // (4) re-read. A non-UTF-8 / unreadable file is skipped entirely —
-            // the oracle's `mC.call` would have returned an image/pdf/notebook
-            // payload, none of which produce an `edited_text_file`.
-            let Ok(fresh) = tokio::fs::read_to_string(&path).await else {
+            // Re-check every spelling of each observed route. The canonical
+            // cache key is checked for a direct deny as well, but it is never
+            // treated as a new allowed route: it is an I/O key, not a spelling
+            // the model used. Only routes captured by current model/file
+            // producers authorize a reminder read; a cache key alone does not.
+            if requested_path_groups.is_empty() {
+                continue;
+            }
+            let mut reminder_route = None;
+            for route_spellings in requested_path_groups {
+                let Some(source_spelling) = route_spellings.first().cloned() else {
+                    continue;
+                };
+                let mut check_spellings = if native_path_recheck {
+                    // Native `XB` has an abort-aware 32-member Set and, on
+                    // macOS/Linux, a separate 40-hop `xne` landing walk.
+                    // Direct Read permission uses its independent 64-hop
+                    // synchronous resolver.
+                    let Some(spellings) =
+                        native_changed_file_read_path_set(&source_spelling, cancel).await
+                    else {
+                        if cancel
+                            .is_some_and(lingxi_core::host::CancellationToken::is_cancelled)
+                        {
+                            return Vec::new();
+                        }
+                        continue;
+                    };
+                    spellings
+                } else {
+                    vec![source_spelling.clone()]
+                };
+                for spelling in route_spellings.iter().chain(std::iter::once(&path)) {
+                    if !check_spellings.contains(spelling) {
+                        check_spellings.push(spelling.clone());
+                    }
+                }
+                let mut route_denied = false;
+                if native_path_recheck {
+                    for spelling in &check_spellings {
+                        let check = policy_snapshot.check_path(spelling);
+                        if check.denied_by_read_rule
+                            == lingxi_core::host::permission_gate::ReadPathPolicyMatch::Match
+                            || check.held_outside
+                                == lingxi_core::host::permission_gate::ReadPathPolicyMatch::Match
+                        {
+                            route_denied = true;
+                            break;
+                        }
+                        // An active `PolicyPermissionGate` can be constructed
+                        // without filesystem roots. Its path-specific deny and
+                        // held-path answers are then explicitly unavailable;
+                        // preserve the existing changed-file behavior until a
+                        // real root producer is plumbed, rather than treating
+                        // missing data as either a Native allow or deny.
+                    }
+                }
+                let route_still_resolves = self
+                    .route_still_resolves_to_cached_file(&route_spellings, &path, cancel)
+                    .await;
+                if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
+                    return Vec::new();
+                }
+                if route_denied || !route_still_resolves {
+                    continue;
+                }
+                reminder_route = Some(source_spelling);
+                break;
+            }
+            let Some(reminder_path) = reminder_route else {
                 continue;
             };
-            // Refresh the entry either way, so the mtime gate does not re-fire
-            // on the next turn for the same on-disk state (the side effect the
-            // oracle gets from re-reading through the Read tool).
-            let unchanged = fresh == entry.content;
-            tool_api::read_file_state::set_with_model_context(
-                &self.prompt_runtime.read_state_map,
-                path.clone(),
-                tool_api::read_file_state::ReadFileEntry {
-                    content: fresh.clone(),
-                    mtime_ms,
-                    ..entry.clone()
-                },
-                true,
-            );
-            if unchanged {
-                continue;
-            }
-            // (5) diff.
-            let snippet =
-                crate::prompt::changed_files::render_snippet(&entry.content, &fresh, false);
-            if snippet.is_empty() {
-                continue;
-            }
-            changed.push(crate::prompt::changed_files::ChangedFile {
-                filename: path.to_string_lossy().into_owned(),
-                snippet,
+            // (4) Invoke the current registered Read tool directly, matching
+            // Native `ZS.call` after the path-policy checks above. The host-built
+            // request contains only the selected original route.
+            let input = serde_json::json!({
+                "file_path": reminder_path.to_string_lossy().into_owned(),
             });
+            if crate::schema_validation::validate_tool_schema_detailed(read_tool.as_ref(), &input)
+                .is_err()
+            {
+                continue;
+            }
+            let read_context = base_read_context.clone();
+            if read_tool
+                .validate_input(&input, &read_context)
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
+                return Vec::new();
+            }
+            let (progress_tx, _progress_rx) = tool_api::progress_channel();
+            let read_result = match read_tool.call(input, read_context, progress_tx).await {
+                Ok(result) => result,
+                Err(_) => {
+                    if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
+                        return Vec::new();
+                    }
+                    continue;
+                }
+            };
+            if cancel.is_some_and(lingxi_core::host::CancellationToken::is_cancelled) {
+                return Vec::new();
+            }
+            // The actual Read call owns cache/state updates. Consume only the
+            // Native changed-file result kinds; `new_messages` from this inner
+            // call are intentionally not forwarded.
+            match read_result.data.get("type").and_then(serde_json::Value::as_str) {
+                Some("text") => {
+                    let Some(file) = read_result.data.get("file") else {
+                        continue;
+                    };
+                    if file
+                        .get("truncatedByTokenCap")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                    {
+                        continue;
+                    }
+                    let Some(fresh) = file
+                        .get("content")
+                        .and_then(serde_json::Value::as_str)
+                    else {
+                        continue;
+                    };
+                    if fresh == entry.content {
+                        continue;
+                    }
+                    // (5) diff.
+                    let snippet =
+                        crate::prompt::changed_files::render_snippet(&entry.content, fresh, false);
+                    if snippet.is_empty() {
+                        continue;
+                    }
+                    changed.push(crate::prompt::changed_files::ChangedFile::text(
+                        reminder_path.to_string_lossy().into_owned(),
+                        snippet,
+                    ));
+                }
+                Some("image") => {
+                    if let Some(image) =
+                        crate::prompt::changed_files::ChangedFile::from_read_result(
+                            reminder_path.to_string_lossy().into_owned(),
+                            &read_result.data,
+                        )
+                    {
+                        changed.push(image);
+                    }
+                }
+                // Native NTr ignores PDFs, notebooks, `parts`, and every other
+                // non-text/non-image result.
+                _ => continue,
+            }
         }
         if changed.is_empty() {
             return Vec::new();
@@ -1393,12 +2227,8 @@ message with multiple tool uses so they run concurrently."
         crate::prompt::changed_files::apply_snippet_budget(&mut changed);
         changed
             .iter()
-            .map(|file| {
-                let body = crate::prompt::changed_files::render_changed_file(file, &read_tool_name);
-                ConversationMessage::user_meta(
-                    MessageId::new(),
-                    format!("<system-reminder>\n{body}\n</system-reminder>"),
-                )
+            .filter_map(|file| {
+                crate::prompt::changed_files::render_changed_file_message(file, &read_tool_name)
             })
             .collect()
     }
@@ -1412,27 +2242,6 @@ message with multiple tool uses so they run concurrently."
     /// 1:1 with claude-code `processConditionedMdRules` (claudemd.ts:1354-1397)
     /// fed through the `nested_memory` render seam (messages.ts:3700-3707):
     ///
-    /// 1. CACHE: the first call loads the full hierarchy (`memory.load(&cwd)` —
-    ///    the same call the system prompt uses) and caches the `globs.is_some()`
-    ///    subset in [`Self::conditional_rules_cache`]. Later turns reuse the cache
-    ///    — no disk re-walk — and only re-test it against the latest touched set.
-    /// 2. MATCH: for each cached rule and each touched file in
-    ///    [`Self::read_state_map`] (the tools' live-cwd absolutized paths),
-    ///    [`crate::prompt::conditional_rules::rule_matches_touched_file`] derives
-    ///    the rule's base dir (Project → parent-of-`.claude`; else `cwd`),
-    ///    relativizes + guards the touched path, and gitignore-tests it against
-    ///    the rule's globs. A rule with ANY matching touched file is ACTIVE.
-    /// 3. DELTA: a rule already in [`Self::sent_conditional_rules`] is skipped
-    ///    (TS `loadedNestedMemoryPaths`), so each rule injects ONCE. Newly-active
-    ///    rules are recorded as sent and rendered.
-    /// 4. RENDER: each newly-active rule becomes a bare `Contents of {path}:` body
-    ///    wrapped in `<system-reminder>` (messages.ts `nested_memory`), joined by
-    ///    a blank line into one meta user message (TS pushes one wrapped message
-    ///    per rule; concatenation here is byte-equivalent for a single rule and a
-    ///    faithful grouping for several).
-    ///
-    /// Appended ONLY to the per-turn outgoing snapshot (never `session.history` /
-    /// JSONL), exactly like the skill-listing + output-style reminders.
     /// Per-turn, transient `<new-diagnostics>` reminder — newly-reported LSP
     /// diagnostics not yet surfaced to the model (claude-code's
     /// `formatDiagnosticsBlock` flow). `None` when no LSP source is wired (no
@@ -1456,232 +2265,67 @@ message with multiple tool uses so they run concurrently."
         Some(ConversationMessage::user_meta(MessageId::new(), content))
     }
 
-    pub(crate) async fn conditional_rules_reminder_message(&self) -> Option<ConversationMessage> {
-        // (1) CACHE — fill once from the same memory load the system prompt
-        // uses. Task 5 (worktree 206 session-cwd plumbing): `cwd` is the LIVE
-        // `self.session_cwd` (not the frozen `self.cwd`), and
-        // `conditional_rules_cache` is reset to `None` by the `set_on_swap`
-        // callback [`Self::with_session_cwd`] registers, so a worktree swap
-        // forces this to re-walk disk under the NEW cwd instead of replaying
-        // the pre-swap directory's rule set for the rest of the session.
-        let cwd = self.session_cwd.cwd();
-        let cached: Option<Vec<crate::prompt::MemoryFile>> = self
-            .prompt_runtime
-            .conditional_rules_cache
-            .lock()
-            .unwrap()
-            .clone();
-        let rules: Vec<crate::prompt::MemoryFile> = match cached {
-            Some(rules) => rules,
-            None => {
-                let loaded = self
-                    .memory
-                    .load(&cwd)
-                    .await
-                    .into_iter()
-                    .filter(|f| f.globs.is_some())
-                    .collect::<Vec<_>>();
-                *self.prompt_runtime.conditional_rules_cache.lock().unwrap() = Some(loaded.clone());
-                loaded
-            }
-        };
-        if rules.is_empty() {
-            return None;
+    /// Consume actual per-context Read/readFor triggers, independent of LRU
+    /// contents. One per-trigger acquisition produces current durable rows.
+    pub async fn nested_memory_reminder_messages(&self) -> Vec<ConversationMessage> {
+        let queue = &self.prompt_runtime.nested_memory_triggers;
+        let disabled =
+            std::env::var_os("LINGXI_DISABLE_LINGXI_MDS").is_some_and(|value| !value.is_empty());
+        if !queue.begin(false, disabled) {
+            return Vec::new();
         }
-
-        // Snapshot the touched files from the shared read-state registry (the
-        // tools' live-cwd absolutized Read/Edit/Write/… paths).
-        let touched: Vec<std::path::PathBuf> = self
-            .prompt_runtime
-            .read_state_map
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .model_context_keys();
-        if touched.is_empty() {
-            return None;
-        }
-
-        // (2)+(3) MATCH + DELTA — collect newly-active rules not yet sent.
-        let mut newly_active: Vec<&crate::prompt::MemoryFile> = Vec::new();
+        let roots = if memory::lingxi_md::agents::attachments_enabled()
+            && (self.memory.filesystem_discovery()
+                || self.prompt_runtime.nested_memory_roots.is_some())
         {
-            let mut sent = self.prompt_runtime.sent_conditional_rules.lock().await;
-            for rule in &rules {
-                if sent.contains(&rule.path) {
-                    continue; // already injected this session
-                }
-                let active = touched.iter().any(|t| {
-                    crate::prompt::conditional_rules::rule_matches_touched_file(rule, t, &cwd)
-                });
-                if active {
-                    sent.insert(rule.path.clone());
-                    newly_active.push(rule);
-                }
-            }
-        }
-        if newly_active.is_empty() {
-            return None;
-        }
-
-        // (4) RENDER — one `<system-reminder>` block per rule, joined by a blank
-        // line into a single meta user message.
-        let content = newly_active
-            .iter()
-            .map(|r| crate::prompt::conditional_rules::render_reminder(r))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        Some(ConversationMessage::user_meta(MessageId::new(), content))
-    }
-
-    /// The per-turn NESTED MEMORY reminder: the `LINGXI.md` (and matching
-    /// `paths:`-gated rules) governing the directories of files the session has
-    /// TOUCHED. Guidance that lives next to the code reaches the model when the
-    /// model reaches the code.
-    ///
-    /// 1:1 with claude-code `k$o` (@237714543) driven by `Rop` (@237715260):
-    ///
-    /// ```js
-    /// for(let i of e){
-    ///   if(t.loadedNestedMemoryPaths?.[i.path])continue;
-    ///   if(!t.readFileState.has(i.path)){ n.push({type:"nested_memory",…});
-    ///     t.loadedNestedMemoryPaths[i.path]=!0;
-    ///     t.readFileState.set(i.path,{…,seededFromContext:!0,keepContent:!0}) }}
-    /// ```
-    ///
-    /// 1. DISCOVER — [`crate::prompt::nested_memory::discover`] per touched
-    ///    file. Stateless by design; see [`Self::sent_nested_memory`].
-    /// 2. SKIP — anything already sent (`loadedNestedMemoryPaths`), already
-    ///    claimed by [`Self::conditional_rules_reminder_message`], or already in
-    ///    `read_file_state` (the model has the real thing).
-    /// 3. SEED — [`Self::seed_nested_memory_read_state`], so the next `Read` of
-    ///    a surfaced file returns the dedup stub instead of the bytes again.
-    /// 4. RENDER — [`crate::prompt::conditional_rules::render_reminder`], the
-    ///    same bare `Contents of {path}:` shape the oracle's `nested_memory`
-    ///    attachment renders to.
-    ///
-    /// MUTATES the sent-set, so it must be called at most ONCE per outgoing
-    /// model step — the same constraint every reminder in this family carries.
-    ///
-    /// # Divergence (reason)
-    /// `Rop` opens with `if(!zK(e,r.toolPermissionContext))return n` — a
-    /// read-permission check on the TRIGGER file. LingXi's permission context
-    /// is not plumbed to this layer, and the trigger is by construction a file
-    /// a tool already read, so the gate would be a no-op here. Not invented.
-    ///
-    /// `pub` (unlike its `pub(crate)` siblings) only so `test-harness` can drive
-    /// it against a real `FileReadTool`: the end-to-end seed-then-dedup proof
-    /// needs the real tool's registration + permission plumbing, which does not
-    /// exist in this crate's unit tests. (`orchestrator` now carries a `tool-file`
-    /// dependency for REM-05's `structuredPatch`, but only the diff function —
-    /// not the tool.) Both turn drivers are still the only production callers.
-    pub async fn nested_memory_reminder_message(&self) -> Option<ConversationMessage> {
-        // Same env kill-switch the eager loader honors (`Rop`'s
-        // `CLAUDE_CODE_DISABLE_CLAUDE_MDS` guard). ANY non-empty value disables.
-        if std::env::var_os("LINGXI_DISABLE_LINGXI_MDS").is_some_and(|v| !v.is_empty()) {
-            return None;
-        }
-        let touched: Vec<std::path::PathBuf> = self
-            .prompt_runtime
-            .read_state_map
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .model_context_keys();
-        if touched.is_empty() {
-            return None;
-        }
-        let (home, managed) = match &self.prompt_runtime.nested_memory_roots {
-            Some((home, managed)) => (home.clone(), managed.clone()),
-            None => (
-                dirs::home_dir()?,
-                Some(memory::lingxi_md::hierarchy::managed_path()),
-            ),
+            self.prompt_runtime
+                .nested_memory_roots
+                .clone()
+                .or_else(|| self.memory.hierarchy_roots())
+        } else {
+            None
         };
-        // CANONICAL cwd, not the raw one. `split_ancestors` decides "is the
-        // touched file under cwd" with a prefix test, and the two sides reach
-        // it in different forms: `read_state_map` keys are whatever
-        // `canonicalize_and_validate` produced, while `session_cwd` is whatever
-        // the user launched in. On macOS that is `/private/var/...` against
-        // `/var/...`, so every touched file looks OUTSIDE cwd and nothing is
-        // ever discovered. The oracle has no such split (its `Li` is purely
-        // lexical, so both halves agree); LingXi has to normalize on ONE side,
-        // and cwd is the side that makes every derived path match the registry
-        // the seed writes to. Falls back to the raw cwd if it does not exist.
-        let cwd = tokio::fs::canonicalize(self.session_cwd.cwd())
+        let probe_cwd = self.prompt_probe_cwd(&self.session_cwd.cwd());
+        let cwd = tokio::fs::canonicalize(&probe_cwd)
             .await
-            .unwrap_or_else(|_| self.session_cwd.cwd());
+            .unwrap_or(probe_cwd);
+        let mode = self.memory.instruction_files_mode();
+        let prior = self.nested_memory_history().await;
         let excluder = self.memory.excluder();
-
-        let mut surfaced: Vec<crate::prompt::MemoryFile> = Vec::new();
-        {
-            let mut sent = self.prompt_runtime.sent_nested_memory.lock().await;
-            let mut sent_rules = self.prompt_runtime.sent_conditional_rules.lock().await;
-            for trigger in &touched {
-                for f in crate::prompt::nested_memory::discover_with_excludes(
-                    trigger,
+        let mut messages = Vec::new();
+        let mut cursor = 0;
+        while let Some(trigger) = queue.next(&mut cursor) {
+            let rules = self
+                .memory
+                .load_conditional_rules(&cwd, &trigger, mode)
+                .await
+                .into_iter()
+                .filter(|rule| {
+                    crate::prompt::conditional_rules::rule_matches_touched_file(
+                        rule, &trigger, &cwd,
+                    )
+                })
+                .collect();
+            messages.extend(
+                self.persist_nested_memory_files(rules, &trigger, &cwd, &prior)
+                    .await,
+            );
+            if let Some((home, managed)) = &roots {
+                let files = crate::prompt::nested_memory::discover_with_mode(
+                    &trigger,
                     &cwd,
-                    &home,
+                    home,
                     managed.as_deref(),
                     excluder.as_ref(),
-                ) {
-                    if sent.contains(&f.path) {
-                        continue;
-                    }
-                    // A `paths:`-gated rule is owned by BOTH mechanisms; the
-                    // shared set means whichever reaches the model first wins
-                    // and the other stands down. Unconditional memory files
-                    // never enter this set — conditional rules is not their
-                    // owner and marking them would be a lie.
-                    if f.globs.is_some() && sent_rules.contains(&f.path) {
-                        continue;
-                    }
-                    // `!t.readFileState.has(i.path)`, canonical-keyed like the
-                    // registry itself. Note the oracle does NOT mark such a
-                    // path as loaded — it stays in `readFileState` forever, so
-                    // it stays skipped either way.
-                    let key = tokio::fs::canonicalize(&f.path)
-                        .await
-                        .unwrap_or_else(|_| f.path.clone());
-                    if self
-                        .prompt_runtime
-                        .read_state_map
-                        .lock()
-                        .is_ok_and(|guard| guard.contains(&key))
-                    {
-                        continue;
-                    }
-                    sent.insert(f.path.clone());
-                    if f.globs.is_some() {
-                        sent_rules.insert(f.path.clone());
-                    }
-                    surfaced.push(f);
-                }
+                    mode,
+                );
+                messages.extend(
+                    self.persist_nested_memory_files(files, &trigger, &cwd, &prior)
+                        .await,
+                );
             }
         }
-        if surfaced.is_empty() {
-            return None;
-        }
-        // The oracle's `k$o` returns RECORDS, not text — the reminder is one
-        // rendering of them and the UI attachment line is the other. The port
-        // originally took only the text half, so the attachment cells the TUI
-        // already knows how to draw had no producer. `displayPath` is the
-        // oracle's `relative(cwd, path)`.
-        for file in &surfaced {
-            let display_path = file
-                .path
-                .strip_prefix(&cwd)
-                .unwrap_or(&file.path)
-                .display()
-                .to_string();
-            self.output
-                .emit_attachment(lingxi_core::host::AttachmentKind::NestedMemory { display_path })
-                .await;
-        }
-        self.seed_nested_memory_read_state(&surfaced).await;
-        let content = surfaced
-            .iter()
-            .map(crate::prompt::conditional_rules::render_reminder)
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        Some(ConversationMessage::user_meta(MessageId::new(), content))
+        messages
     }
 
     /// P0.1: arm the memory-selector prefetch for THIS turn, firing it
@@ -1728,7 +2372,9 @@ message with multiple tool uses so they run concurrently."
                     let text = content
                         .iter()
                         .filter_map(|block| match block {
-                            lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
+                            lingxi_core::types::ContentBlock::Text { text, .. } => {
+                                Some(text.as_str())
+                            }
                             _ => None,
                         })
                         .collect::<Vec<_>>()
@@ -1796,8 +2442,15 @@ message with multiple tool uses so they run concurrently."
         // non-stub prefetch derives the memdir from the post-swap worktree, not
         // the frozen boot cwd. Currently inert (the stub prefetch ignores its
         // cwd argument), so this is a no-behavior-change correctness fix.
+        let (model, profile) = self.current_prompt_route().await;
         let pending = prefetch
-            .start_for_session(query, self.session_cwd.cwd(), Some(session_id))
+            .start_for_session(
+                query,
+                model,
+                profile,
+                self.session_cwd.cwd(),
+                Some(session_id),
+            )
             .await;
         *self.prompt_runtime.pending_memory_prefetch.lock().await = Some(pending);
     }
@@ -2023,175 +2676,159 @@ message with multiple tool uses so they run concurrently."
         let body = delta.render_reminder()?;
         Some(ConversationMessage::user_meta(MessageId::new(), body))
     }
+}
 
-    pub(crate) async fn mod_prompt_attachment_with_detail(
-        &self,
-        kind: &str,
-        mut message: ConversationMessage,
-        origin: serde_json::Value,
-        detail: Option<serde_json::Value>,
-    ) -> Option<ConversationMessage> {
-        let Some(host) = (if let Some(registry) = &self.lifecycle_runtime.hook_registry {
-            registry.read().await.mod_host()
-        } else {
-            None
-        })
-        .filter(|host| host.has_event("prompt.attachment")) else {
-            return Some(message);
-        };
-        let message_id = message.id();
-        let ConversationMessage::User { content, .. } = &mut message else {
-            return Some(message);
-        };
-        use lingxi_core::types::utf16_json::{Utf16JsonProjection, Utf16JsonString};
-        use lingxi_core::types::ContentBlock;
-        let (units, citations, was_utf16) = match content.as_slice() {
-            [ContentBlock::Text { text, citations }] => (
-                text.encode_utf16().collect::<Vec<_>>(),
-                citations.clone(),
-                false,
-            ),
-            [ContentBlock::TextJsUtf16 {
-                utf16_code_units,
-                citations,
-                ..
-            }] => (utf16_code_units.clone(), citations.clone(), true),
-            _ => return Some(message),
-        };
-        let prefix = "<system-reminder>\n".encode_utf16().collect::<Vec<_>>();
-        let suffix = "\n</system-reminder>".encode_utf16().collect::<Vec<_>>();
-        let inner = units
-            .strip_prefix(prefix.as_slice())
-            .and_then(|body| body.strip_suffix(suffix.as_slice()));
-        let wrapped = inner.is_some();
-        let body_units = inner.unwrap_or(&units).to_vec();
-        let body = String::from_utf16_lossy(&body_units);
-        // Native JHo omits attachments whose unframed rendered text is blank.
-        if body.trim().is_empty() {
-            return Some(message);
-        }
-        let mut input = Utf16JsonProjection::plain(
-            serde_json::json!({"type":kind,"text":body,"origin":origin}),
+#[cfg(test)]
+mod native_read_route_normalization_tests {
+    use super::absolute_normalized_read_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn absolute_route_clamps_parent_components_at_the_root() {
+        assert_eq!(
+            absolute_normalized_read_path(Path::new("/../../tmp/read/a.rs")),
+            Some(PathBuf::from("/tmp/read/a.rs"))
         );
-        if body.encode_utf16().ne(body_units.iter().copied()) {
-            input.strings.push(Utf16JsonString {
-                pointer: "/text".into(),
-                code_units: body_units.clone(),
-            });
+        assert_eq!(
+            absolute_normalized_read_path(Path::new("/tmp/../read/./a.rs")),
+            Some(PathBuf::from("/read/a.rs"))
+        );
+    }
+
+    #[test]
+    fn relative_source_route_is_unavailable_without_its_session_cwd() {
+        assert_eq!(
+            absolute_normalized_read_path(Path::new("relative/read.rs")),
+            None
+        );
+    }
+}
+
+#[cfg(test)]
+mod async_hook_prompt_publication_tests {
+    use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    struct GenerationGuard(lingxi_core::host::CancellationToken);
+
+    impl HookPublicationGuard for GenerationGuard {
+        fn is_current(&self) -> bool {
+            !self.0.is_cancelled()
         }
-        if let Some(detail) = detail {
-            input.value["detail"] = detail;
+
+        fn generation_cancellation_token(&self) -> Option<lingxi_core::host::CancellationToken> {
+            Some(self.0.clone())
         }
-        let identity = host.registration_identity();
-        let (generation, cached) = {
-            let cache = self.prompt_runtime.mod_prompt_attachments.lock().await;
-            let cached = cache
-                .answers
-                .get(&message_id)
-                .and_then(|(source, catalog, answer)| {
-                    (source == &input && catalog == &identity).then_some(answer.clone())
-                });
-            (cache.generation, cached)
-        };
-        let answer = if let Some(cached) = cached {
-            cached
-        } else {
-            let pinned_kind = kind.to_owned();
-            let pinned_origin = origin.clone();
-            let log_output = self.output.clone();
-            let toast_output = self.output.clone();
-            let status_output = self.output.clone();
-            let result = host
-                .dispatch_with_utf16_at_context_scope(
-                    "prompt.attachment",
-                    input.clone(),
-                    &self.current_cwd(),
-                    Some(self),
-                    hooks::mods::ModUtf16DispatchScope::default(),
-                    lingxi_core::host::task_registry::FieldPresence::Missing,
-                    move |forwarded| {
-                        let pinned_kind = pinned_kind.clone();
-                        let pinned_origin = pinned_origin.clone();
-                        async move {
-                            if forwarded
-                                .value
-                                .get("type")
-                                .and_then(serde_json::Value::as_str)
-                                != Some(pinned_kind.as_str())
-                                || forwarded.value.get("origin") != Some(&pinned_origin)
-                                || forwarded.value.get("agentId").is_some()
-                            {
-                                return Err(hooks::mods::ModError::Hook(
-                                    "prompt.attachment type and origin are pinned".into(),
-                                ));
-                            }
-                            let text = forwarded.string_units("/text").ok_or_else(|| {
-                                hooks::mods::ModError::Hook("prompt.attachment needs text".into())
-                            })?;
-                            let display = String::from_utf16_lossy(&text);
-                            let mut result =
-                                Utf16JsonProjection::plain(serde_json::json!({"text":display}));
-                            if display.encode_utf16().ne(text.iter().copied()) {
-                                result.strings.push(Utf16JsonString {
-                                    pointer: "/text".into(),
-                                    code_units: text,
-                                });
-                            }
-                            Ok(result)
-                        }
-                    },
-                    move |plugin, text| {
-                        let output = log_output.clone();
-                        async move { output.emit_mod_log(&plugin, &text).await }
-                    },
-                    move |plugin, text, timeout_ms| {
-                        let output = toast_output.clone();
-                        async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
-                    },
-                    move |plugin, text| {
-                        let output = status_output.clone();
-                        async move { output.emit_mod_status(&plugin, text.as_deref()).await }
-                    },
-                )
-                .await;
-            let answer = match result {
-                Ok(result) if result.result.get("text") == Some(&serde_json::Value::Null) => None,
-                Ok(result) => hooks::mods::ModUtf16ValueProjection {
-                    value: result.result,
-                    strings: result.result_utf16_strings,
-                    keys: result.result_utf16_keys,
+
+        fn publish_if_current<'a>(
+            &'a self,
+            publication: Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            let root = self.0.clone();
+            Box::pin(async move {
+                tokio::select! {
+                    biased;
+                    () = root.cancelled() => false,
+                    () = publication => true,
                 }
-                .into_core_projection()
-                .ok()
-                .and_then(|projection| projection.string_units("/text")),
-                Err(error) => {
-                    tracing::warn!(attachment = kind, %error, "prompt.attachment Mod failed");
-                    Some(body_units)
-                }
-            };
-            let mut cache = self.prompt_runtime.mod_prompt_attachments.lock().await;
-            if cache.generation == generation {
-                cache
-                    .answers
-                    .insert(message_id, (input, identity, answer.clone()));
-            }
-            answer
+            })
+        }
+
+        fn commit_if_current<'a>(
+            &'a self,
+            mutation: Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            self.publish_if_current(mutation)
+        }
+    }
+
+    struct FutureDrop(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for FutureDrop {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_during_async_hook_mod_attachment_drops_stale_result() {
+        let root = lingxi_core::host::CancellationToken::new();
+        let guard: Arc<dyn HookPublicationGuard> = Arc::new(GenerationGuard(root.clone()));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (_release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dropped_for_work = Arc::clone(&dropped);
+        let work = async move {
+            let _drop = FutureDrop(dropped_for_work);
+            let _ = entered_tx.send(());
+            let _ = release_rx.await;
+            Some("stale modifier result")
         };
-        let answer = answer?;
-        let answer = if wrapped {
-            [prefix, answer, suffix].concat()
-        } else {
-            answer
-        };
-        content[0] = match String::from_utf16(&answer) {
-            Ok(text) if !was_utf16 => ContentBlock::Text { text, citations },
-            _ => ContentBlock::TextJsUtf16 {
-                text: String::from_utf16_lossy(&answer),
-                utf16_code_units: answer,
-                citations,
-            },
-        };
-        Some(message)
+        let attachment = tokio::spawn(crate::prompt::async_hook_response::run_hook_prompt_work(
+            guard, work,
+        ));
+
+        entered_rx.await.expect("modifier reached its gated await");
+        root.cancel();
+
+        assert_eq!(
+            attachment.await.expect("cancelled modifier wrapper"),
+            None,
+            "reset must not return a prompt message produced by the old generation"
+        );
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "reset must cancel the in-progress prompt modifier future"
+        );
+
+        let live: Arc<dyn HookPublicationGuard> =
+            Arc::new(GenerationGuard(lingxi_core::host::CancellationToken::new()));
+        assert_eq!(
+            crate::prompt::async_hook_response::run_hook_prompt_work(live, async { Some("live") },)
+                .await,
+            Some(Some("live")),
+            "a current generation remains able to attach its async-hook reminder"
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_before_prompt_request_admission_prunes_obsolete_hook_reminder() {
+        let root = lingxi_core::host::CancellationToken::new();
+        let guard: Arc<dyn HookPublicationGuard> = Arc::new(GenerationGuard(root.clone()));
+        let reminder = ConversationMessage::user_meta(MessageId::new(), "old hook result".into());
+        let reminder_id = reminder.id();
+        let user = ConversationMessage::user(MessageId::new(), "current request".into());
+        let mut messages = vec![reminder.clone(), user.clone()];
+        let mut turn_reminders = vec![reminder];
+        let mut guards = vec![(reminder_id, guard)];
+        root.cancel();
+        crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+            &mut messages,
+            &mut turn_reminders,
+            &mut guards,
+        );
+        let texts: Vec<_> = messages
+            .iter()
+            .map(ConversationMessage::text_content)
+            .collect();
+        assert_eq!(texts, ["current request"]);
+
+        let live_guard: Arc<dyn HookPublicationGuard> =
+            Arc::new(GenerationGuard(lingxi_core::host::CancellationToken::new()));
+        let live_reminder =
+            ConversationMessage::user_meta(MessageId::new(), "live hook result".into());
+        let live_reminder_id = live_reminder.id();
+        let mut live_messages = vec![live_reminder.clone(), user];
+        let mut live_turn_reminders = vec![live_reminder];
+        let mut live_guards = vec![(live_reminder_id, live_guard)];
+        crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+            &mut live_messages,
+            &mut live_turn_reminders,
+            &mut live_guards,
+        );
+        assert_eq!(live_messages.len(), 2, "a live hook reminder is admitted");
+        assert_eq!(live_guards.len(), 1);
     }
 }
 

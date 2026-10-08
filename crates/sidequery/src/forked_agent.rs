@@ -22,7 +22,7 @@
 //! issues ONE stateless LLM call and returns the assistant text + usage. No tool
 //! loop runs here — its consumers are summarization-shaped (autocompaction and
 //! the post-session memory extraction). When no client is wired, [`run`] returns
-//! the legacy `"[forked-agent-stub]"` sentinel.
+//! [`ForkError::MissingBackend`] without producing text or usage.
 //!
 //! **Cycle note:** `lingxi-sidequery` deliberately does not depend on
 //! `lingxi-agent` (the cycle would be `agent → memory → sidequery`). The
@@ -36,7 +36,7 @@
 
 use crate::cache_safe_params::CacheSafeParams;
 use crate::purposes::QuerySource;
-use crate::side_query::{SideQueryClient, SideQueryError, SideQueryRequest};
+use crate::side_query::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
 use lingxi_core::types::ConversationMessage;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -45,6 +45,11 @@ use thiserror::Error;
 /// Legacy output cap for non-compaction single-turn forks without an override.
 /// Compaction inherits the main model's ordinary request budget instead.
 const DEFAULT_FORK_MAX_TOKENS: u32 = 20_000;
+
+fn is_empty_instruction_projection(message: &ConversationMessage) -> bool {
+    matches!(message, ConversationMessage::System { content, subtype, .. }
+        if content.is_empty() && subtype.as_deref() == Some("model_reminder_attachment"))
+}
 
 /// Coarse purpose tag for a forked agent. Mirrors [`QuerySource`] for the
 /// subset of purposes that legitimately fork (full loops), and is carried
@@ -101,6 +106,9 @@ pub struct ForkedAgentResult {
 /// Forked-agent failure surface.
 #[derive(Debug, Clone, Error)]
 pub enum ForkError {
+    /// No single-turn model backend has been configured on the runner.
+    #[error("no forked-agent backend configured")]
+    MissingBackend,
     /// The shared [`crate::CacheSafeParamsSlot`] is empty — the parent has
     /// not completed a turn yet.
     #[error("no cache-safe params available")]
@@ -117,10 +125,10 @@ pub enum ForkError {
 ///
 /// When a [`SideQueryClient`] is wired via [`Self::with_side_query_client`],
 /// [`Self::run`] performs a real single-turn forked call (see the module
-/// docs); otherwise it returns the legacy stub sentinel.
+/// docs); otherwise it fails with [`ForkError::MissingBackend`].
 pub struct ForkedAgentRunner {
     /// Optional single-turn backend: `(client, model)`. `None` until a caller
-    /// opts in via [`Self::with_side_query_client`], preserving the stub path.
+    /// configures it via [`Self::with_side_query_client`].
     side_query: Option<(Arc<dyn SideQueryClient>, String)>,
     /// Session thinking configuration this runner's forked calls INHERIT
     /// (cc 2.1.198 "Subagents + compaction inherit extended thinking config"
@@ -139,7 +147,7 @@ impl Default for ForkedAgentRunner {
 
 impl ForkedAgentRunner {
     /// Build a runner with no single-turn backend; call
-    /// [`Self::with_side_query_client`] to opt into the real single-turn path.
+    /// [`Self::with_side_query_client`] before running a single-turn request.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -170,6 +178,21 @@ impl ForkedAgentRunner {
     #[must_use]
     pub fn has_side_query_client(&self) -> bool {
         self.side_query.is_some()
+    }
+
+    /// Run a stateless Mod completion through the same provider-backed client
+    /// as the fork runner. The request carries its own model and prompt; no
+    /// parent cache prefix or transcript is read or written.
+    pub async fn query_mod_complete(
+        &self,
+        request: SideQueryRequest,
+    ) -> Result<SideQueryResponse, SideQueryError> {
+        let Some((client, _)) = &self.side_query else {
+            return Err(SideQueryError::InvalidResponse(
+                "model.complete client unavailable".into(),
+            ));
+        };
+        client.query(request).await
     }
 
     /// Inherit the SESSION thinking configuration on this runner's forked
@@ -206,24 +229,18 @@ impl ForkedAgentRunner {
     ///    runner never starts a follow-up tool loop.
     /// 4. Issue exactly one [`SideQueryClient::query`] and map its response.
     ///
-    /// When no backend is wired the runner returns the legacy
-    /// `"[forked-agent-stub]"` sentinel, unchanged.
+    /// When no backend is wired the runner fails without producing a result.
     ///
     /// The FULL multi-turn, tool-using subagent loop runs through `AgentTool`
     /// (`StateMachinePool::run_subagent_loop`), not this single-turn runner.
     ///
     /// # Errors
     ///
-    /// Returns [`ForkError::Api`] when the wired
-    /// [`SideQueryClient::query`] call fails.
+    /// Returns [`ForkError::MissingBackend`] when no backend is configured,
+    /// or [`ForkError::Api`] when the wired [`SideQueryClient::query`] fails.
     pub async fn run(&self, req: ForkedAgentRequest) -> Result<ForkedAgentResult, ForkError> {
         let Some((client, model)) = &self.side_query else {
-            // No single-turn backend wired: preserve the legacy stub.
-            return Ok(ForkedAgentResult {
-                final_text: "[forked-agent-stub]".into(),
-                tool_calls: Vec::new(),
-                usage: cost::Usage::default(),
-            });
+            return Err(ForkError::MissingBackend);
         };
 
         let cp = &req.cache_safe_params;
@@ -239,6 +256,9 @@ impl ForkedAgentRunner {
         }
         messages.extend(cp.fork_context_messages.iter().cloned());
         messages.extend(req.prompt_messages.iter().cloned());
+        // Empty announcement projections carry a raw durable cursor, but the
+        // native renderer contributes no API message (or model tokens).
+        messages.retain(|message| !is_empty_instruction_projection(message));
 
         // Inherit the live parent's model so /model switches affect later forks.
         let model = if cp.tool_use_options.main_loop_model.trim().is_empty() {
@@ -286,7 +306,7 @@ impl ForkedAgentRunner {
             // thinking config wired at the composition root; `None` = legacy.
             thinking: self.session_thinking,
             effort: if req.query_source == QuerySource::Compaction
-                || matches!(&req.query_source, QuerySource::Custom(source) if source == "side_question")
+                || matches!(&req.query_source, QuerySource::Custom(source) if source == "side_question" || source == "hook_prompt")
             {
                 cp.effort.clone()
             } else {
@@ -431,15 +451,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_without_client_returns_stub() {
-        let runner = ForkedAgentRunner::new();
-        let req = request_with(vec![user_msg("prefix")], vec![user_msg("prompt")], None);
+    async fn run_without_backend_returns_typed_failure_without_a_result() {
+        for runner in [ForkedAgentRunner::new(), ForkedAgentRunner::default()] {
+            assert!(!runner.has_side_query_client());
+            for source in [
+                QuerySource::Compaction,
+                QuerySource::SessionMemoryExtraction,
+            ] {
+                let mut req =
+                    request_with(vec![user_msg("prefix")], vec![user_msg("prompt")], None);
+                req.query_source = source;
+                let error = runner
+                    .run(req)
+                    .await
+                    .expect_err("missing backend cannot produce body, tool calls, or usage");
+                assert!(matches!(&error, ForkError::MissingBackend));
+                assert_eq!(error.to_string(), "no forked-agent backend configured");
+            }
+        }
+    }
 
-        let result = runner.run(req).await.expect("stub run succeeds");
-
-        assert_eq!(result.final_text, "[forked-agent-stub]");
-        // `cost::Usage` does not implement `PartialEq`; assert on its fields.
-        assert_eq!(result.usage.tokens, Usage::default().tokens);
+    #[tokio::test]
+    async fn compaction_request_omits_only_empty_announcement_projections() {
+        let client = Arc::new(MockClient {
+            seen: Mutex::new(None),
+            canned_text: "SUMMARY".into(),
+            canned_usage: Usage::default(),
+        });
+        let runner = ForkedAgentRunner::new().with_side_query_client(client.clone(), "test".into());
+        let placeholder = ConversationMessage::System {
+            id: MessageId::new(),
+            content: String::new(),
+            subtype: Some("model_reminder_attachment".into()),
+            compact_metadata: None,
+            model_fallback: None,
+            refusal_fallback: None,
+        };
+        let boundary = ConversationMessage::System {
+            id: MessageId::new(),
+            content: String::new(),
+            subtype: Some("compact_boundary".into()),
+            compact_metadata: None,
+            model_fallback: None,
+            refusal_fallback: None,
+        };
+        let prefix = vec![user_msg("history"), placeholder, boundary.clone()];
+        let request = request_with(prefix.clone(), vec![user_msg("summarize")], None);
+        runner.run(request).await.unwrap();
+        let sent = client.seen.lock().unwrap().clone().unwrap();
+        assert_eq!(sent.messages.len(), 3);
+        assert!(!sent.messages.iter().any(is_empty_instruction_projection));
+        assert_eq!(sent.messages[1], boundary);
+        assert_eq!(prefix.len(), 3, "durable input history is not rewritten");
     }
 
     #[tokio::test]

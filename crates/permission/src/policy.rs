@@ -8,8 +8,8 @@ use crate::auto_edit_safety::{check_path_safety_for_auto_edit, AutoEditSafety};
 use crate::defaults_per_tool::tool_default;
 use crate::denial_tracking::DenialTrackingState;
 use crate::filesystem::{
-    file_tool_kind, input_path_for_tool, path_in_allowed_working_path, test_rule_pattern,
-    FileToolKind, FsRoots, RulePatternMatch,
+    file_tool_kind, input_path_for_tool, path_in_allowed_working_path,
+    permission_rule_path_forms, test_rule_pattern, FileToolKind, FsRoots, RulePatternMatch,
 };
 use crate::gate::PromptDefault;
 use crate::mode::PermissionMode;
@@ -53,6 +53,425 @@ const SOURCES_BY_PRIORITY: [PermissionRuleSource; 10] = [
     PermissionRuleSource::ToolsNarrowing,
     PermissionRuleSource::McpServerPolicy,
 ];
+
+/// Native `xl` tool-wide Read-deny source filter. Read content denies use the
+/// complete source list through `Un(..., "read", "deny")`.
+fn native_read_tool_wide_deny_sources() -> Vec<PermissionRuleSource> {
+    SOURCES_BY_PRIORITY
+        .into_iter()
+        .filter(|source| {
+            !matches!(
+                source,
+                PermissionRuleSource::ToolsNarrowing
+                    | PermissionRuleSource::CliArg
+                    | PermissionRuleSource::Command
+            )
+        })
+        .collect()
+}
+
+/// One permission walk's already-parsed Bash view. Native builds one AST view
+/// before checking the whole command, then reuses it for its per-command
+/// decisions. Keep the text rule candidates and source spans together so tree
+/// construction never reparses the parent command with a second grammar.
+#[derive(Default)]
+struct ShellCommandAnalysis {
+    #[cfg(feature = "bash-ast")]
+    bash_ast: Option<crate::bash_ast_security::ParseForSecurityResult>,
+    rule_candidates: Vec<String>,
+    reason_tree: Option<ShellReasonTree>,
+}
+
+/// Native has two distinct reason-tree producers. `m6o` reduces pipeline
+/// children with ordered `Map.set` (last duplicate value wins); `a6t` uses
+/// last-wins maps for its early Deny/Allow returns and a rank/tie reducer for
+/// its general Ask path. `TextFallback` keeps the existing feature-off text
+/// splitter behavior, but is not claimed as a Native parser path.
+enum ShellReasonTree {
+    Pipeline(Vec<String>),
+    Ast(Vec<String>),
+    #[cfg(not(feature = "bash-ast"))]
+    TextFallback(Vec<String>),
+}
+
+/// Native's fast `$4t` walk can object before the general `a6t` compound
+/// fallback. A final mode prompt represents its passthrough, while global
+/// checks (`cB`, dangerous removal, sandbox grants) return before a tree.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShellDecisionOrigin {
+    WholeCommand,
+    Preliminary,
+    ModeFallback,
+}
+
+/// Current Native checks have two different callers: y9t inspects permission
+/// before the Mod callback completes; z7o applies execution restrictions later.
+/// These are stages of the same protocol, not version-compatibility branches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PermissionCheckPhase {
+    ToolCheck,
+    Execution,
+}
+
+fn analyze_shell_command(tool_name: &str, input: &serde_json::Value) -> ShellCommandAnalysis {
+    if !shell_command::is_shell_tool(tool_name) {
+        return ShellCommandAnalysis::default();
+    }
+    let Some(command) = shell_command::command_from_input(input) else {
+        return ShellCommandAnalysis::default();
+    };
+
+    #[cfg(feature = "bash-ast")]
+    {
+        let (bash_ast, pipeline_segments) =
+            crate::bash_ast_security::parse_for_security_with_pipeline_segments(command);
+        let (rule_candidates, reason_tree) = match &bash_ast {
+            crate::bash_ast_security::ParseForSecurityResult::Simple { commands } => {
+                let rule_candidates = commands
+                    .iter()
+                    .filter(|command| !command.env_vars.is_empty())
+                    .map(|command| command.argv.join(" "))
+                    .filter(|command| !command.is_empty())
+                    .collect();
+                let reason_tree = if let Some(segments) =
+                    pipeline_segments.filter(|segments| segments.len() > 1)
+                {
+                    Some(ShellReasonTree::Pipeline(segments))
+                } else {
+                    let commands = commands
+                        .iter()
+                        .map(|command| command.text.trim().to_string())
+                        .filter(|command| !command.is_empty())
+                        .collect::<Vec<_>>();
+                    (!commands.is_empty()).then_some(ShellReasonTree::Ast(commands))
+                };
+                (rule_candidates, reason_tree)
+            }
+            // The existing shell-rule matcher keeps its own current-version
+            // text fallback. A reason tree needs parser-derived child spans;
+            // do not invent them after AST parsing is unavailable.
+            crate::bash_ast_security::ParseForSecurityResult::ParseUnavailable => {
+                (Vec::new(), None)
+            }
+            crate::bash_ast_security::ParseForSecurityResult::TooComplex { .. } => {
+                (Vec::new(), None)
+            }
+        };
+        return ShellCommandAnalysis {
+            bash_ast: Some(bash_ast),
+            rule_candidates,
+            reason_tree,
+        };
+    }
+
+    #[cfg(not(feature = "bash-ast"))]
+    ShellCommandAnalysis {
+        rule_candidates: Vec::new(),
+        reason_tree: Some(ShellReasonTree::TextFallback(shell_command::split_command(
+            command,
+        ))),
+    }
+}
+
+fn result_behavior(result: &PermissionResult) -> PermissionBehavior {
+    match result {
+        PermissionResult::Allow { .. } => PermissionBehavior::Allow,
+        PermissionResult::Deny { .. } => PermissionBehavior::Deny,
+        PermissionResult::Ask { .. } => PermissionBehavior::Ask,
+    }
+}
+
+fn result_reason(result: &PermissionResult) -> &PermissionDecisionReason {
+    match result {
+        PermissionResult::Allow { reason, .. }
+        | PermissionResult::Deny { reason, .. }
+        | PermissionResult::Ask { reason, .. } => reason,
+    }
+}
+
+/// The Native `Ast` Mod projection selects the first same-behavior child rule
+/// in insertion order.
+fn first_rule_for_behavior(
+    reason: &PermissionDecisionReason,
+    behavior: PermissionBehavior,
+) -> Option<&PermissionRule> {
+    match reason {
+        PermissionDecisionReason::MatchedRule { rule } => Some(rule),
+        PermissionDecisionReason::SubcommandResults { reasons } => {
+            reasons.values().find_map(|result| {
+                (result_behavior(result) == behavior)
+                    .then(|| first_rule_for_behavior(result_reason(result), behavior))
+                    .flatten()
+            })
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn first_subcommand_rule_for_behavior(
+    reasons: &indexmap::IndexMap<String, Box<PermissionResult>>,
+    behavior: PermissionBehavior,
+) -> Option<&PermissionRule> {
+    reasons.values().find_map(|result| {
+        (result_behavior(result) == behavior)
+            .then(|| first_rule_for_behavior(result_reason(result), behavior))
+            .flatten()
+    })
+}
+
+fn result_reason_with_subcommands(
+    result: PermissionResult,
+    reasons: indexmap::IndexMap<String, Box<PermissionResult>>,
+    producer: &ShellReasonTree,
+    original_input: &serde_json::Value,
+    tool_name: &str,
+) -> PermissionResult {
+    // Native m6o copies the first denied pipeline child message; a6t/O4t
+    // keeps the full-command message for ordinary AST compounds.
+    let pipeline_denial = matches!(producer, ShellReasonTree::Pipeline(_))
+        .then(|| {
+            reasons.values().find_map(|result| match result.as_ref() {
+                PermissionResult::Deny { explanation, .. } => Some(explanation.clone()),
+                _ => None,
+            })
+        })
+        .flatten();
+    let native_compound_input = matches!(
+        producer,
+        ShellReasonTree::Pipeline(_) | ShellReasonTree::Ast(_)
+    );
+    let reason = PermissionDecisionReason::SubcommandResults { reasons };
+    match result {
+        PermissionResult::Allow {
+            updated_input,
+            update_destination,
+            metadata,
+            ..
+        } => PermissionResult::Allow {
+            reason,
+            updated_input: if native_compound_input { Some(original_input.clone()) } else { updated_input },
+            update_destination,
+            metadata,
+        },
+        PermissionResult::Deny {
+            explanation,
+            metadata,
+            ..
+        } => {
+            PermissionResult::Deny {
+                reason,
+                explanation: if matches!(producer, ShellReasonTree::Ast(_)) {
+                    shell_command::command_from_input(original_input).map(|command| {
+                    format!("Permission to use {tool_name} with command {command} has been denied.")
+                }).or(explanation)
+                } else {
+                    pipeline_denial.unwrap_or(explanation)
+                },
+                metadata,
+            }
+        }
+        PermissionResult::Ask {
+            mut prompt,
+            pending_classifier_check,
+            metadata,
+            ..
+        } => {
+            if let PermissionDecisionReason::SubcommandResults { reasons } = &reason {
+                let parts = reasons
+                    .iter()
+                    .filter(|(_, child)| result_behavior(child) == PermissionBehavior::Ask)
+                    .map(|(command, _)| shell_command::strip_output_redirections(command))
+                    .collect::<Vec<_>>();
+                prompt.message = match parts.len() {
+                    0 => format!("This {tool_name} command contains multiple operations that require approval"),
+                    1 => format!("This {tool_name} command contains multiple operations. The following part requires approval: {}", parts[0]),
+                    _ => format!("This {tool_name} command contains multiple operations. The following parts require approval: {}", parts.join(", ")),
+                };
+            }
+            PermissionResult::Ask {
+                reason,
+                prompt,
+                pending_classifier_check,
+                metadata,
+            }
+        }
+    }
+}
+
+#[cfg(feature = "bash-ast")]
+fn native_inline_shell_script_may_be_checked(
+    parsed: Option<&crate::bash_ast_security::ParseForSecurityResult>,
+) -> bool {
+    use crate::bash_ast_security::ParseForSecurityResult;
+
+    let Some(ParseForSecurityResult::Simple { commands }) = parsed else {
+        // An unavailable or too-complex AST does not prove the Native inline
+        // checker has no script to inspect.
+        return true;
+    };
+    const NATIVE_SHELLS: &[&str] = &[
+        "bash", "sh", "zsh", "dash", "ksh", "mksh", "ash", "hush", "rbash",
+    ];
+    let normalized_name = |token: &str| {
+        let basename = token
+            .rsplit(|character| matches!(character, '/' | '\\'))
+            .next()
+            .unwrap_or(token)
+            .to_ascii_lowercase();
+        let Some((base, suffix)) = basename.rsplit_once('-') else {
+            return basename;
+        };
+        let numeric_version = !suffix.is_empty()
+            && suffix
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
+        if numeric_version {
+            base.to_string()
+        } else {
+            basename
+        }
+    };
+    commands.iter().any(|command| {
+        let Some(executable) = command.argv.first() else {
+            return false;
+        };
+        let executable = normalized_name(executable);
+        let argument_start = if matches!(executable.as_str(), "busybox" | "toybox") {
+            let Some(shell) = command.argv.get(1).map(|arg| normalized_name(arg)) else {
+                return false;
+            };
+            if !NATIVE_SHELLS.contains(&shell.as_str()) {
+                return false;
+            }
+            2
+        } else if NATIVE_SHELLS.contains(&executable.as_str()) {
+            1
+        } else {
+            return false;
+        };
+        // Native wgr() advances over arguments consumed by `-o`/`-O` and
+        // known long options while searching for `-c`. Inspecting only the
+        // initial flag run would miss e.g. `bash -o posix -c ...`; scan the
+        // remaining argv conservatively so that option ordering cannot skip an
+        // inline script which Native may send through sye()/Znn().
+        command.argv[argument_start..]
+            .iter()
+            .any(|arg| arg.starts_with('-') && arg.contains('c'))
+    })
+}
+
+fn safe_ast_child_allow_result(result: &PermissionResult) -> bool {
+    match result {
+        PermissionResult::Allow { reason, .. } => match reason {
+            PermissionDecisionReason::MatchedRule { rule } => rule.value.rule_content.is_some(),
+            PermissionDecisionReason::PermissionMode {
+                mode: PermissionMode::AcceptEdits,
+            } => true,
+            PermissionDecisionReason::Other { reason } => reason == "Read-only command is allowed",
+            PermissionDecisionReason::SubcommandResults { reasons } => {
+                !reasons.is_empty() && reasons.values().all(|child| safe_ast_child_allow_result(child))
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn subcommand_decision_rank(result: &PermissionResult) -> u8 {
+    match result_behavior(result) {
+        PermissionBehavior::Deny => 3,
+        PermissionBehavior::Ask => 2,
+        PermissionBehavior::Allow => 0,
+    }
+}
+
+fn tree_matches_parent(
+    parent: PermissionBehavior,
+    reasons: &indexmap::IndexMap<String, Box<PermissionResult>>,
+) -> bool {
+    match parent {
+        PermissionBehavior::Allow => reasons
+            .values()
+            .all(|result| result_behavior(result) == PermissionBehavior::Allow),
+        PermissionBehavior::Deny => reasons
+            .values()
+            .any(|result| result_behavior(result) == PermissionBehavior::Deny),
+        PermissionBehavior::Ask => {
+            !reasons
+                .values()
+                .any(|result| result_behavior(result) == PermissionBehavior::Deny)
+                && reasons
+                    .values()
+                    .any(|result| result_behavior(result) == PermissionBehavior::Ask)
+        }
+    }
+}
+
+fn preserve_rootless_content_rule(result: &PermissionResult, roots_available: bool) -> bool {
+    let PermissionDecisionReason::MatchedRule { rule } = result_reason(result) else {
+        return false;
+    };
+    // With no roots the existing phase-2 contract treats content rules as
+    // tool-wide. Do not manufacture a child attribution for that legacy API
+    // state; this producer must not redefine it as NoMatch.
+    if !roots_available && rule.value.rule_content.is_some() {
+        return true;
+    }
+    false
+}
+
+// Native fu searches SafetyCheck, including nested child reasons. The a6t
+// equal-rank reducer prefers a new safety objection; rule presence is unrelated.
+fn has_subcommand_safety_reason(reason: &PermissionDecisionReason) -> bool {
+    match reason {
+        PermissionDecisionReason::SafetyCheck { .. } => true,
+        PermissionDecisionReason::SubcommandResults { reasons } => reasons
+            .values()
+            .any(|result| has_subcommand_safety_reason(result_reason(result))),
+        _ => false,
+    }
+}
+
+fn replace_duplicate_child(
+    producer: &ShellReasonTree,
+    parent_behavior: PermissionBehavior,
+    existing: &PermissionResult,
+    replacement: &PermissionResult,
+) -> bool {
+    match producer {
+        // Native m6o calls Map.set in segment order. Replacing an existing key
+        // changes its value to the final child result while preserving its first
+        // insertion position.
+        ShellReasonTree::Pipeline(_) => true,
+        // Native a6t's Deny and all-Allow returns build `new Map(Ot.map(...))`,
+        // so duplicate keys keep their last child. Only the general Ask branch
+        // uses the behavior-rank/reason-presence reducer.
+        ShellReasonTree::Ast(_) if parent_behavior != PermissionBehavior::Ask => true,
+        ShellReasonTree::Ast(_) => {
+            let new_rank = subcommand_decision_rank(replacement);
+            let old_rank = subcommand_decision_rank(existing);
+            new_rank > old_rank
+                || (new_rank == old_rank
+                    && has_subcommand_safety_reason(result_reason(replacement))
+                    && !has_subcommand_safety_reason(result_reason(existing)))
+        }
+        #[cfg(not(feature = "bash-ast"))]
+        ShellReasonTree::TextFallback(_) => {
+            let new_rank = subcommand_decision_rank(replacement);
+            let old_rank = subcommand_decision_rank(existing);
+            new_rank > old_rank
+                || (new_rank == old_rank
+                    && first_rule_for_behavior(
+                        result_reason(replacement),
+                        result_behavior(replacement),
+                    )
+                    .is_some()
+                    && first_rule_for_behavior(result_reason(existing), result_behavior(existing))
+                        .is_none())
+        }
+    }
+}
 // ── 2.1.263 working-directory confinement copy (byte-locked) ────────────────
 
 /// Oracle `ov` — the `permissions.blockReadsOutsideWorkingDirectories`
@@ -260,6 +679,20 @@ pub struct PermissionPolicy {
     /// files, scratchpad, job `tmp/`, project temp. Empty by default so
     /// `authorize` is unchanged until the host publishes the session dirs.
     pub session_read_allowances: Vec<SessionReadAllowance>,
+}
+
+impl lingxi_core::host::permission_gate::ReadPathPolicySnapshot for PermissionPolicy {
+    fn facts(&self) -> lingxi_core::host::permission_gate::ReadPathPolicyFacts {
+        lingxi_core::host::permission_gate::ReadPathPolicyFacts {
+            read_deny_rules_active: self.native_read_deny_rules_active(),
+            restricted: self.restricted,
+            block_reads_outside_working_directories: self.block_reads_outside_working_directories,
+        }
+    }
+
+    fn check_path(&self, path: &Path) -> lingxi_core::host::permission_gate::ReadPathPolicyCheck {
+        self.read_path_policy_check(path)
+    }
 }
 
 /// One session directory that remains readable under the read block.
@@ -777,15 +1210,14 @@ impl PermissionPolicy {
     /// equals `agent_type` exactly. When several sources match, the one with the
     /// highest citation [`PermissionRuleSource::priority`] is returned (claude
     /// cites the first source in its walk). The deny rule keys on the `"Agent"`
-    /// tool name even when the call arrives via the legacy `Task` alias.
+    /// tool name.
     #[must_use]
     pub fn agent_type_deny_source(&self, agent_type: &str) -> Option<PermissionRuleSource> {
         self.deny_rules
             .values()
             .flat_map(|rules| rules.iter())
             .filter(|r| {
-                (r.value.tool_name == "Agent" || r.value.tool_name == "Task")
-                    && r.value.rule_content.as_deref() == Some(agent_type)
+                r.value.tool_name == "Agent" && r.value.rule_content.as_deref() == Some(agent_type)
             })
             .map(|r| r.source)
             .max_by_key(|s| s.priority())
@@ -799,10 +1231,7 @@ impl PermissionPolicy {
         self.deny_rules
             .values()
             .flat_map(|rules| rules.iter())
-            .filter(|r| {
-                (r.value.tool_name == "Agent" || r.value.tool_name == "Task")
-                    && r.value.rule_content.is_some()
-            })
+            .filter(|r| r.value.tool_name == "Agent" && r.value.rule_content.is_some())
             .filter_map(|r| r.value.rule_content.clone())
             .collect()
     }
@@ -859,7 +1288,9 @@ impl PermissionPolicy {
         input: &serde_json::Value,
         mode: PermissionMode,
     ) -> PermissionResult {
-        self.authorize_with_mode_and_workspace_lease(tool_name, input, mode, None)
+        self.authorize_with_mode_and_workspace_lease(
+            tool_name, input, mode, None, PermissionCheckPhase::Execution,
+        )
     }
 
     #[must_use]
@@ -869,7 +1300,30 @@ impl PermissionPolicy {
         input: &serde_json::Value,
         mode: PermissionMode,
         workspace_lease_token: Option<u64>,
+        phase: PermissionCheckPhase,
     ) -> PermissionResult {
+        self.authorize_with_mode_and_workspace_lease_inner(
+            tool_name,
+            input,
+            mode,
+            workspace_lease_token,
+            true,
+            &mut ShellDecisionOrigin::Preliminary,
+            phase,
+        )
+    }
+
+    fn authorize_with_mode_and_workspace_lease_inner(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        mode: PermissionMode,
+        workspace_lease_token: Option<u64>,
+        attach_shell_reason_tree: bool,
+        origin: &mut ShellDecisionOrigin,
+        phase: PermissionCheckPhase,
+    ) -> PermissionResult {
+        *origin = ShellDecisionOrigin::Preliminary;
         // SECURITY (Monitor→Bash): the oracle's Monitor `checkPermissions` is
         // `if(e.ws)return NU_(e.ws); return Lon({...e,command:e.command},t)` — a
         // COMMAND-monitor is evaluated by the FULL Bash resolver. Keyed by tool
@@ -895,6 +1349,7 @@ impl PermissionPolicy {
                     "Monitor",
                     input,
                     content,
+                    &[],
                 ) {
                     return deny_with_rule(rule);
                 }
@@ -908,6 +1363,7 @@ impl PermissionPolicy {
                     "Monitor",
                     input,
                     false,
+                    &[],
                 )
                 .or_else(|| {
                     self.first_match(
@@ -916,12 +1372,37 @@ impl PermissionPolicy {
                         "Monitor",
                         input,
                         true,
+                        &[],
                     )
                 })
             })
             .flatten();
         let tool_name = if monitor_command { "Bash" } else { tool_name };
-        let result = self.authorize_inner(tool_name, input, mode, workspace_lease_token);
+        let shell_analysis = analyze_shell_command(tool_name, input);
+        let attach_subcommand_results = |result, origin| {
+            if monitor_command || !attach_shell_reason_tree {
+                result
+            } else {
+                self.with_shell_subcommand_results(
+                    tool_name,
+                    input,
+                    mode,
+                    workspace_lease_token,
+                    &shell_analysis,
+                    result,
+                    origin,
+                    phase,
+                )
+            }
+        };
+        let result = self.authorize_inner(
+            tool_name,
+            input,
+            mode,
+            workspace_lease_token,
+            &shell_analysis,
+            origin,
+        );
         // BGOP-01 — `&` background-operator allow→ask downgrade (claude-code
         // `Yqr`, the Bash checkPermissions wrapper). After the whole flow, an
         // ALLOW for a shell command containing `&` is downgraded to a forced ask
@@ -929,9 +1410,13 @@ impl PermissionPolicy {
         // sandbox-auto-allow grant is exempt. Bash-ast-gated (Yqr's `a7t` is the
         // tree-sitter parse, which is only available under the feature).
         #[cfg(feature = "bash-ast")]
-        let result = self
-            .background_operator_ask(tool_name, input, &result)
-            .unwrap_or(result);
+        let result = match self.background_operator_ask(tool_name, input, &result) {
+            Some(ask) => {
+                *origin = ShellDecisionOrigin::WholeCommand;
+                ask
+            }
+            None => result,
+        };
         let result = if monitor_command && !matches!(result, PermissionResult::Deny { .. }) {
             if let Some(rule) = monitor_ask {
                 ask_with_rule(rule, "Monitor")
@@ -942,6 +1427,7 @@ impl PermissionPolicy {
                     "Monitor",
                     input,
                     false,
+                    &[],
                 ) {
                     Some(rule) if self.rule_is_available_in_mode(rule, mode) => {
                         allow_with_rule(rule)
@@ -960,10 +1446,37 @@ impl PermissionPolicy {
         // their own `checkPermissions` returns `allow` BEFORE this transform, so
         // they are never over-denied. Here the surviving `ask` is left for the
         // gate's read-only default ([`crate::policy_gate`]) to auto-allow.
-        if mode == PermissionMode::DontAsk
+        let result = if phase == PermissionCheckPhase::ToolCheck
+            && *origin == ShellDecisionOrigin::ModeFallback
+            && matches!(tool_name, "Bash" | "Shell")
+            && shell_command::command_from_input(input).is_some()
+        {
+            match result {
+                PermissionResult::Ask {
+                    mut prompt,
+                    pending_classifier_check,
+                    metadata,
+                    ..
+                } => {
+                    prompt.message = "This command requires approval".into();
+                    PermissionResult::Ask {
+                        reason: PermissionDecisionReason::Other {
+                            reason: prompt.message.clone(),
+                        },
+                        prompt,
+                        pending_classifier_check,
+                        metadata,
+                    }
+                }
+                other => other,
+            }
+        } else { result };
+        if phase == PermissionCheckPhase::Execution
+            && mode == PermissionMode::DontAsk
             && matches!(result, PermissionResult::Ask { .. })
             && !matches!(tool_default(tool_name), PromptDefault::AllowByDefault)
         {
+            *origin = ShellDecisionOrigin::WholeCommand;
             return deny_with_mode(PermissionMode::DontAsk);
         }
         // RESTRICTED-01: settings/git/tool-configuration writes require a
@@ -975,6 +1488,7 @@ impl PermissionPolicy {
             && self.is_restricted_protected_mutation(tool_name, input)
             && matches!(result, PermissionResult::Allow { .. })
         {
+            *origin = ShellDecisionOrigin::WholeCommand;
             return ask_for_restricted_protected_mutation(tool_name, input);
         }
         // OUTSIDE-READS-01 (2.1.263 `sc`): `--restricted` and
@@ -982,9 +1496,351 @@ impl PermissionPolicy {
         // READ tools to the working directories, in EVERY permission mode — so
         // this runs after the mode walk, like RESTRICTED-01 above.
         if let Some(denial) = self.outside_working_dirs_denial(tool_name, input, &result) {
+            *origin = ShellDecisionOrigin::WholeCommand;
             return denial;
         }
-        result
+        attach_subcommand_results(result, *origin)
+    }
+
+    #[cfg(feature = "bash-ast")]
+    fn shell_content_ask_compound_guards_pass(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        mode: PermissionMode,
+        workspace_lease_token: Option<u64>,
+        analysis: &ShellCommandAnalysis,
+    ) -> bool {
+        if !shell_command::is_shell_tool(tool_name) {
+            return false;
+        }
+        if shell_command::command_from_input(input).is_none() {
+            return false;
+        }
+        let Some(crate::bash_ast_security::ParseForSecurityResult::Simple { commands }) =
+            analysis.bash_ast.as_ref()
+        else {
+            return false;
+        };
+        if native_inline_shell_script_may_be_checked(analysis.bash_ast.as_ref()) {
+            return false;
+        }
+
+        // Native N2e walks child decisions, then P5 path checks and sye inline
+        // shell checks before its all-child-Allow return. A parent content Ask
+        // returns earlier in Host authorize_inner, so re-run the same current
+        // Host guard surfaces before allowing the AST aggregate to replace it.
+        if Self::shell_overlength_bash_ask(tool_name, input).is_some()
+            || Self::shell_dangerous_rm_variable_ask(tool_name, input, analysis.bash_ast.as_ref())
+                .is_some()
+        {
+            return false;
+        }
+        if !self.shell_content_ask_command_guards_pass(
+            tool_name,
+            input,
+            mode,
+            workspace_lease_token,
+            analysis,
+        ) || self
+            .background_operator_ask(tool_name, input, &allow_compound())
+            .is_some()
+        {
+            return false;
+        }
+
+        // The Native compound return is reached only after its simple-command
+        // path, redirect, Bash-safety, and sed guards have run for the walked
+        // children. The recovered Host AST is already a flattened list of
+        // those simple commands; re-run the same guards with each original
+        // command span as the input, without changing the parent text used by
+        // the permission result or approval UI.
+        for child in commands
+            .iter()
+            .filter(|child| !child.text.trim().is_empty())
+        {
+            let mut child_input = input.clone();
+            let Some(object) = child_input.as_object_mut() else {
+                return false;
+            };
+            object.insert(
+                "command".to_string(),
+                serde_json::Value::String(child.text.clone()),
+            );
+            let child_analysis = analyze_shell_command(tool_name, &child_input);
+            let Some(crate::bash_ast_security::ParseForSecurityResult::Simple { .. }) =
+                child_analysis.bash_ast.as_ref()
+            else {
+                return false;
+            };
+            if native_inline_shell_script_may_be_checked(child_analysis.bash_ast.as_ref())
+                || !self.shell_content_ask_command_guards_pass(
+                    tool_name,
+                    &child_input,
+                    mode,
+                    workspace_lease_token,
+                    &child_analysis,
+                )
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[cfg(feature = "bash-ast")]
+    fn shell_content_ask_command_guards_pass(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        mode: PermissionMode,
+        workspace_lease_token: Option<u64>,
+        analysis: &ShellCommandAnalysis,
+    ) -> bool {
+        let Some(command) = shell_command::command_from_input(input) else {
+            return false;
+        };
+        let sources = SOURCES_BY_PRIORITY;
+        if let Some(roots) = self.roots.as_ref() {
+            let home = roots
+                .home
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned());
+            if crate::dangerous_removal::check_dangerous_removal(
+                command,
+                &roots.cwd,
+                home.as_deref(),
+            )
+            .is_some()
+            {
+                return false;
+            }
+            if self.block_reads_outside_working_directories
+                && crate::command_path_containment::check_code_on_stdin_read_block(command)
+                    .is_some()
+            {
+                return false;
+            }
+            if self
+                .output_redirect_deny(&sources, tool_name, command, roots)
+                .is_some()
+                || self
+                    .input_redirect_deny(&sources, tool_name, command, roots)
+                    .is_some()
+                || self
+                    .command_path_deny(&sources, tool_name, command, roots)
+                    .is_some()
+            {
+                return false;
+            }
+            let read_block_dirs = self
+                .block_reads_outside_working_directories
+                .then(|| self.read_block_working_dirs(roots));
+            if crate::path_constraints::check_path_constraints(
+                command,
+                roots,
+                &self.additional_working_dirs.paths(),
+                read_block_dirs.as_deref(),
+            )
+            .is_some()
+                || crate::command_path_containment::check_command_path_containment(
+                    command,
+                    roots,
+                    &self.additional_working_dirs.paths(),
+                    self.block_reads_outside_working_directories
+                        .then(|| self.read_block_working_dirs(roots))
+                        .as_deref(),
+                )
+                .is_some()
+            {
+                return false;
+            }
+            if self.workspace_leases.as_ref().is_some_and(|leases| {
+                leases.denies_host_owned_for_token(workspace_lease_token, tool_name, input, roots)
+            }) || crate::WorkspacePermissionLeaseRegistry::denies_host_owned_for_workspace(
+                tool_name, input, roots,
+            ) || crate::WorkspacePermissionLeaseRegistry::escapes_local_app_workspace(
+                tool_name, input, roots,
+            ) {
+                return false;
+            }
+        }
+        !self.is_restricted_protected_mutation(tool_name, input)
+            && self
+                .shell_bash_safety_ask(tool_name, input, analysis.bash_ast.as_ref())
+                .is_none()
+            && self
+                .shell_sed_constraint_ask(tool_name, input, mode)
+                .is_none()
+    }
+
+    fn with_shell_subcommand_results(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        mode: PermissionMode,
+        workspace_lease_token: Option<u64>,
+        analysis: &ShellCommandAnalysis,
+        result: PermissionResult,
+        origin: ShellDecisionOrigin,
+        phase: PermissionCheckPhase,
+    ) -> PermissionResult {
+        if origin == ShellDecisionOrigin::WholeCommand || !matches!(tool_name, "Bash" | "Shell") {
+            return result;
+        }
+        let Some(producer) = analysis.reason_tree.as_ref() else {
+            return result;
+        };
+        let Some(parent_command) = shell_command::command_from_input(input) else {
+            return result;
+        };
+        let subcommands = match producer {
+            ShellReasonTree::Pipeline(commands) | ShellReasonTree::Ast(commands) => commands,
+            #[cfg(not(feature = "bash-ast"))]
+            ShellReasonTree::TextFallback(commands) => commands,
+        }
+        .iter()
+        .map(|command| command.trim().to_string())
+        .filter(|command| !command.is_empty())
+        .collect::<Vec<_>>();
+        if subcommands.is_empty()
+            || (subcommands.len() == 1
+                && (phase != PermissionCheckPhase::ToolCheck
+                    || result_behavior(&result) != PermissionBehavior::Allow))
+        {
+            return result;
+        }
+
+        let mut reasons: indexmap::IndexMap<String, Box<PermissionResult>> =
+            indexmap::IndexMap::new();
+        let mut non_allow_count = 0;
+        let mut preliminary_ask = None;
+        for command in subcommands {
+            let mut child_input = input.clone();
+            let Some(object) = child_input.as_object_mut() else {
+                return result;
+            };
+            object.insert("command".into(), serde_json::Value::String(command.clone()));
+            // Parser-derived pipeline segments are strict source slices around
+            // pipe tokens, and AST child commands are source spans. They must
+            // shrink before another tree-producing walk is allowed. A
+            // non-shrinking span still gets its full permission decision, but
+            // as a leaf; this exact progress guard replaces the old arbitrary
+            // fixed recursion-depth cutoff.
+            let allow_nested_tree = command.len() < parent_command.trim().len();
+            let mut child_origin = ShellDecisionOrigin::Preliminary;
+            let child = self.authorize_with_mode_and_workspace_lease_inner(
+                tool_name,
+                &child_input,
+                mode,
+                workspace_lease_token,
+                allow_nested_tree,
+                &mut child_origin,
+                phase,
+            );
+            if result_behavior(&child) != PermissionBehavior::Allow {
+                non_allow_count += 1;
+            }
+            if result_behavior(&child) == PermissionBehavior::Ask
+                && child_origin != ShellDecisionOrigin::ModeFallback
+                && preliminary_ask.is_none()
+            {
+                preliminary_ask = Some(child.clone());
+            }
+            let replace_existing = reasons.get(&command).is_some_and(|existing| {
+                replace_duplicate_child(producer, result_behavior(&result), existing, &child)
+            });
+            if !reasons.contains_key(&command) || replace_existing {
+                // IndexMap replacement keeps the first occurrence's order.
+                reasons.insert(command, Box::new(child));
+            }
+        }
+        // a6t returns its sole fast Ask directly when every other Ot result
+        // allows. An unmatched command is passthrough in Ot, represented by
+        // ModeFallback here, and therefore still belongs to the general tree.
+        // m6o pipelines always retain their tree, including a single Ask part.
+        let ast_compound = matches!(producer, ShellReasonTree::Ast(_));
+        #[cfg(not(feature = "bash-ast"))]
+        let ast_compound = ast_compound
+            || (matches!(producer, ShellReasonTree::TextFallback(_))
+                && !parent_command.contains('|'));
+        if ast_compound && result_behavior(&result) == PermissionBehavior::Ask && non_allow_count == 1 {
+            if let Some(ask) = preliminary_ask {
+                return ask;
+            }
+        }
+        // Native a6t can return an AST child Deny over a parent content-Ask,
+        // so reconcile child Deny for mode fallbacks and matched content-rule
+        // asks. All-child Allow requires a separate current Host guard pass for
+        // a content Ask, which otherwise returns before dangerous-removal,
+        // path, Bash-safety, sed, and background checks. ModeFallback already
+        // proves the ordered guard walk completed. Pipeline aggregation keeps
+        // its existing m6o behavior.
+        #[cfg(feature = "bash-ast")]
+        let parent_content_ask_guards_passed = ast_compound
+            && matches!(producer, ShellReasonTree::Ast(_))
+            && matches!(
+                result_reason(&result),
+                PermissionDecisionReason::MatchedRule { rule }
+                    if rule.value.rule_content.is_some()
+            )
+            && self.shell_content_ask_compound_guards_pass(
+                tool_name,
+                input,
+                mode,
+                workspace_lease_token,
+                analysis,
+            );
+        #[cfg(not(feature = "bash-ast"))]
+        let parent_content_ask_guards_passed = false;
+        let host_safety_guards_passed =
+            origin == ShellDecisionOrigin::ModeFallback || parent_content_ask_guards_passed;
+        let ast_ask_can_be_reconciled = host_safety_guards_passed
+            || matches!(
+                result_reason(&result),
+                PermissionDecisionReason::MatchedRule { rule }
+                    if rule.value.rule_content.is_some()
+            );
+        if ast_compound
+            && ast_ask_can_be_reconciled
+            && result_behavior(&result) == PermissionBehavior::Ask
+            && !reasons.is_empty()
+        {
+            if reasons
+                .values()
+                .any(|child| result_behavior(child) == PermissionBehavior::Deny)
+            {
+                return result_reason_with_subcommands(
+                    deny_with_mode(mode),
+                    reasons,
+                    producer,
+                    input,
+                    tool_name,
+                );
+            }
+            if host_safety_guards_passed && reasons.values().all(|child| safe_ast_child_allow_result(child))
+            {
+                return result_reason_with_subcommands(
+                    allow_compound(),
+                    reasons,
+                    producer,
+                    input,
+                    tool_name,
+                );
+            }
+        }
+        if reasons.is_empty() || !tree_matches_parent(result_behavior(&result), &reasons) {
+            return result;
+        }
+        // A direct whole-command citation can differ from Native's actual
+        // nested producer: `m6o`/`a6t` check children, then `Pst` projects the
+        // first same-behavior child rule. Preserve only the explicitly retained
+        // roots=None content-rule contract; otherwise expose the real child
+        // tree and let existing Mod projection walk it.
+        if preserve_rootless_content_rule(&result, self.roots.is_some()) {
+            return result;
+        }
+        result_reason_with_subcommands(result, reasons, producer, input, tool_name)
     }
 
     /// PARITY 2.1.263 `BK(path, input, forms, opts)` — the read-side filesystem
@@ -1010,18 +1866,20 @@ impl PermissionPolicy {
     /// `be()` is the config home (`~/.lingxi` here). The group is gated on
     /// `!restricted`, so `--restricted` gets no fence carve-out.
     ///
-    /// NOT yet ported (they need session-directory plumbing the `permission`
-    /// crate cannot reach): the session-scoped allowances that also survive the
-    /// block — plan files, tool-result files, scratchpad, job `tmp/`, project
-    /// temp — and `Rzt()` bundled skill reference files. Their absence makes the
-    /// block STRICTER than the oracle, never looser.
+    /// The live host supplies plan files and session allowances for tool
+    /// results, project temp, and background-job `tmp/`. Native also has a
+    /// current-session scratchpad allowance and bundled skill-reference
+    /// allowance; this policy snapshot does not currently receive those roots,
+    /// so those two cases remain a Native-parity gap.
     fn read_block_allowance(&self, path: &Path, roots: &FsRoots) -> Option<String> {
         if !self.restricted && !self.block_reads_outside_working_directories {
             return None;
         }
-        // Session-scoped carve-outs survive both `--restricted` and the
-        // read block (oracle `XY`: plan / tool-results / scratchpad / job tmp
-        // / project temp are not gated on `!restricted`).
+        // Plan files and configured session read allowances survive both
+        // `--restricted` and the read block (oracle `XY` is not gated on
+        // `!restricted`). The live boot producer supplies tool results,
+        // project temp, and background-job `tmp`; scratchpad is not yet
+        // supplied here.
         if let Some(plan_files) = self.plan_files.as_ref() {
             if plan_files.matches(path, Some(roots.cwd.as_path()), true) {
                 return Some(crate::plan_files::PLAN_FILE_READ_ALLOW_REASON.to_string());
@@ -1222,8 +2080,13 @@ impl PermissionPolicy {
         input: &serde_json::Value,
         mode: PermissionMode,
         workspace_lease_token: Option<u64>,
+        shell_analysis: &ShellCommandAnalysis,
+        origin: &mut ShellDecisionOrigin,
     ) -> PermissionResult {
         let sources = SOURCES_BY_PRIORITY;
+        #[cfg(feature = "bash-ast")]
+        let bash_ast = &shell_analysis.bash_ast;
+        let shell_ast_rule_candidates = shell_analysis.rule_candidates.as_slice();
 
         // Precedence mirrors claude-code's real decision fn `mSm`
         // (offset ~205931956). The KEY invariant (R-D1): the ENTIRE deny phase
@@ -1247,7 +2110,18 @@ impl PermissionPolicy {
         // `read_only_ask_rule_still_asks` + `sandbox_auto_allow_ask_rule_still_asks`,
         // where a content ask wins over the read-only / sandbox auto-allow.)
         // 1a. Tool-wide deny.
-        if let Some(rule) = self.first_match(&self.deny_rules, &sources, tool_name, input, false) {
+        if let Some(rule) = self.first_match(
+            &self.deny_rules,
+            &sources,
+            tool_name,
+            input,
+            false,
+            shell_ast_rule_candidates,
+        ) {
+            *origin = ShellDecisionOrigin::WholeCommand;
+            if tool_name == "Read" {
+                return deny_with_read_rule(rule, input);
+            }
             return deny_with_rule(rule);
         }
         // 1b. Content deny — runs as part of the deny phase, BEFORE any ask, so
@@ -1255,7 +2129,24 @@ impl PermissionPolicy {
         //     (mSm: `K5t(...,"deny")` precedes the tool-wide ask `EIo`). This is
         //     the R-D1 fix: previously tool-wide ask walked before content deny,
         //     downgrading a deny to an ask.
-        if let Some(rule) = self.first_match(&self.deny_rules, &sources, tool_name, input, true) {
+        let content_deny = if file_tool_kind(tool_name) == FileToolKind::Reader
+            && self.roots.is_some()
+        {
+            self.first_read_deny_match(&sources, tool_name, input)
+        } else {
+            self.first_match(
+                &self.deny_rules,
+                &sources,
+                tool_name,
+                input,
+                true,
+                shell_ast_rule_candidates,
+            )
+        };
+        if let Some(rule) = content_deny {
+            if tool_name == "Read" {
+                return deny_with_read_rule(rule, input);
+            }
             return deny_with_rule_content(rule, tool_name, input);
         }
         // 1c. Tool-wide ask (`EIo`). SBXASK-01 / SBX-ASKWIDE-03: the matched
@@ -1270,8 +2161,16 @@ impl PermissionPolicy {
         //     matching ask rule). [`Self::shell_sandbox_auto_allows`] is the C6
         //     analogue (shell-tool + sandbox enabled + auto-allow + would-sandbox)
         //     and is inert (`false`) when no sandbox runtime is wired.
-        if let Some(rule) = self.first_match(&self.ask_rules, &sources, tool_name, input, false) {
+        if let Some(rule) = self.first_match(
+            &self.ask_rules,
+            &sources,
+            tool_name,
+            input,
+            false,
+            shell_ast_rule_candidates,
+        ) {
             if !self.shell_sandbox_auto_allows(tool_name, input) {
+                *origin = ShellDecisionOrigin::WholeCommand;
                 return ask_with_rule(rule, tool_name);
             }
         }
@@ -1286,6 +2185,7 @@ impl PermissionPolicy {
         //     INERT unless a `bash_command_clamp` layer was folded in for this
         //     call ([`Self::bash_command_clamps`] is empty otherwise).
         if let Some(denied) = self.bash_command_clamp_deny(tool_name, input) {
+            *origin = ShellDecisionOrigin::WholeCommand;
             return denied;
         }
         // 1d. Content ask (`K5t(...,"ask")`, mSm step 5) — a matching content ask
@@ -1294,7 +2194,14 @@ impl PermissionPolicy {
         //     verdicts (sandbox auto-allow, read-only allow, exact-allow). The
         //     gate's read-only default may still auto-allow, but the rule is
         //     honored.
-        if let Some(rule) = self.first_match(&self.ask_rules, &sources, tool_name, input, true) {
+        if let Some(rule) = self.first_match(
+            &self.ask_rules,
+            &sources,
+            tool_name,
+            input,
+            true,
+            shell_ast_rule_candidates,
+        ) {
             return ask_with_rule(rule, tool_name);
         }
         // 1e. POSSIBLY-EMPTY `$VAR` REMOVAL FORCED-ASK (claude-code 2.1.205 `GIu`,
@@ -1357,19 +2264,14 @@ impl PermissionPolicy {
                 }
             }
         }
-        // Over-length bash input cannot be statically validated by the 10k-char
-        // parser path, so it must force an Ask before any allow-like shortcut
-        // (tool-wide/exact allow, sandbox auto-allow, read-only, mode auto-allow).
+        // Over-length Bash input cannot be statically validated by the 10k
+        // UTF-16-unit parser path, so it must force an Ask before any
+        // allow-like shortcut (tool-wide/exact allow, sandbox auto-allow,
+        // read-only, mode auto-allow).
         if let Some(ask) = Self::shell_overlength_bash_ask(tool_name, input) {
+            *origin = ShellDecisionOrigin::WholeCommand;
             return ask;
         }
-        #[cfg(feature = "bash-ast")]
-        let bash_ast = if shell_command::is_shell_tool(tool_name) {
-            shell_command::command_from_input(input)
-                .map(crate::bash_ast_security::parse_for_security)
-        } else {
-            None
-        };
         // BYPASS-01 / ALLOWOVER-01: every guard ASK below is routed through
         // `resolve_guard_ask`, which (1) lets bypassPermissions suppress a
         // type-`other` guard ask (returning allow), (2) lets a tool-wide allow
@@ -1400,6 +2302,7 @@ impl PermissionPolicy {
                         &roots.cwd,
                         home.as_deref(),
                     ) {
+                        *origin = ShellDecisionOrigin::WholeCommand;
                         return self.resolve_guard_ask(
                             ask_dangerous_removal(tool_name, danger),
                             bypass,
@@ -1434,6 +2337,7 @@ impl PermissionPolicy {
             #[cfg(feature = "bash-ast")]
             bash_ast.as_ref(),
         ) {
+            *origin = ShellDecisionOrigin::WholeCommand;
             return allow_sandbox_auto();
         }
         // 2. Path containment guards. The catastrophic removal guard used to
@@ -1471,10 +2375,20 @@ impl PermissionPolicy {
                     //     (The read-op command-path deny walk — `cat secret.env` vs
                     //     `Read(secret.env)` — needs the PATH_EXTRACTORS op split and
                     //     is a documented follow-up.)
-                    if let Some(deny) = self.output_redirect_deny(&sources, command, roots) {
+                    // a6t checks interpreter stdin before any per-path or
+                    // child decisions. Preserve that whole-command cB verdict.
+                    if self.block_reads_outside_working_directories {
+                        if let Some(ask) = crate::command_path_containment::check_code_on_stdin_read_block(command) {
+                            *origin = ShellDecisionOrigin::WholeCommand;
+                            return self.resolve_guard_ask(
+                                ask_path_constraint(tool_name, ask), bypass, mode, &sources, tool_name,
+                            );
+                        }
+                    }
+                    if let Some(deny) = self.output_redirect_deny(&sources, tool_name, command, roots) {
                         return deny;
                     }
-                    if let Some(deny) = self.input_redirect_deny(&sources, command, roots) {
+                    if let Some(deny) = self.input_redirect_deny(&sources, tool_name, command, roots) {
                         return deny;
                     }
                     // 2b-deny(read/cmd). PATH-01: a COMMAND-PATH target matching a
@@ -1485,7 +2399,7 @@ impl PermissionPolicy {
                     //     even inside cwd. Runs before the containment ask (deny
                     //     beats ask) and is bypass-immune (a deny short-circuits
                     //     before the mode layer in CC).
-                    if let Some(deny) = self.command_path_deny(&sources, command, roots) {
+                    if let Some(deny) = self.command_path_deny(&sources, tool_name, command, roots) {
                         return deny;
                     }
                     // Under the read block the cd target is validated against
@@ -1619,6 +2533,7 @@ impl PermissionPolicy {
         //     (the `matchMode: 'exact'` arm of `filterRulesByContentsMatchingInput`).
         if self.roots.is_some() && shell_command::is_shell_tool(tool_name) {
             if let Some(rule) = self.shell_exact_allow(tool_name, input, &sources, mode) {
+                *origin = ShellDecisionOrigin::WholeCommand;
                 return allow_with_rule(rule);
             }
         }
@@ -1628,6 +2543,7 @@ impl PermissionPolicy {
             #[cfg(feature = "bash-ast")]
             bash_ast.as_ref(),
         ) {
+            *origin = ShellDecisionOrigin::WholeCommand;
             return self.resolve_guard_ask(ask, bypass, mode, &sources, tool_name);
         }
         // Local-app build workflows receive a temporary, canonical-root lease.
@@ -1644,6 +2560,9 @@ impl PermissionPolicy {
         //    so they take a dedicated path rather than the per-rule walk.
         if self.roots.is_some() && shell_command::is_shell_tool(tool_name) {
             if let Some(rule) = self.shell_allow(tool_name, input, &sources, mode) {
+                if rule.value.rule_content.is_none() {
+                    *origin = ShellDecisionOrigin::WholeCommand;
+                }
                 return allow_with_rule(rule);
             }
         } else {
@@ -1856,6 +2775,7 @@ impl PermissionPolicy {
         // 4. Mode fallback. `DontAsk` falls through to the generic mode ask here;
         //    the `ask`→`deny` conversion (PERM.1) is applied last in
         //    [`Self::authorize`], so read-only tools are not over-denied.
+        *origin = ShellDecisionOrigin::ModeFallback;
         match mode {
             PermissionMode::BypassPermissions if !self.bypass_killswitch_active => {
                 allow_with_mode(PermissionMode::BypassPermissions)
@@ -1976,6 +2896,16 @@ impl PermissionPolicy {
         tool_name: &str,
         input: &serde_json::Value,
     ) -> RulePatternMatch {
+        self.rule_match_kind_with_shell_ast(rule, tool_name, input, &[])
+    }
+
+    fn rule_match_kind_with_shell_ast(
+        &self,
+        rule: &PermissionRule,
+        tool_name: &str,
+        input: &serde_json::Value,
+        shell_ast_candidates: &[String],
+    ) -> RulePatternMatch {
         let Some(roots) = self.roots.as_ref() else {
             // No roots → phase-2: file/shell content is ignored (matched
             // tool-wide). Tool-wide rules (`rule_content == None`) honor the
@@ -2032,7 +2962,11 @@ impl PermissionPolicy {
                     let Some(command) = shell_command::command_from_input(input) else {
                         return RulePatternMatch::NoMatch;
                     };
-                    return kind(shell_command::rule_matches_any_subcommand(pattern, command));
+                    return kind(shell_command::rule_matches_any_subcommand_with_candidates(
+                        pattern,
+                        command,
+                        shell_ast_candidates,
+                    ));
                 }
                 // PERM.3 — other NON-file tools: a CONTENT rule applies ONLY when
                 // the rule's content equals the tool-specific content key derived
@@ -2098,15 +3032,209 @@ impl PermissionPolicy {
         tool_name: &str,
         input: &serde_json::Value,
         content: bool,
+        shell_ast_candidates: &[String],
     ) -> Option<&'a PermissionRule> {
         for src in sources {
             if let Some(rules) = bucket.get(src) {
                 if let Some(rule) = decide_in_source(rules, |r| {
                     if r.value.rule_content.is_some() == content {
-                        self.rule_match_kind(r, tool_name, input)
+                        self.rule_match_kind_with_shell_ast(
+                            r,
+                            tool_name,
+                            input,
+                            shell_ast_candidates,
+                        )
                     } else {
                         RulePatternMatch::NoMatch
                     }
+                }) {
+                    return Some(rule);
+                }
+            }
+        }
+        None
+    }
+
+    /// Match Native `nor(context)` for the `sy(context)` fast-path predicate.
+    /// Read content denies are active in every source; a tool-wide Read deny
+    /// activates it except for the three sources Native filters from `xl`.
+    fn native_read_deny_rules_active(&self) -> bool {
+        self.deny_rules.iter().any(|(source, rules)| {
+            rules.iter().any(|rule| {
+                if rule.value.tool_name != "Read" {
+                    return false;
+                }
+                rule.value.rule_content.is_some()
+                    || !matches!(
+                        source,
+                        PermissionRuleSource::ToolsNarrowing
+                            | PermissionRuleSource::CliArg
+                            | PermissionRuleSource::Command
+                    )
+            })
+        })
+    }
+
+    /// Capture Native `Pne`'s Read-rule check and `hS(path, context)`'s held
+    /// path check for one spelling in the changed-file route Set. This reads
+    /// only live policy state; it does not run a mode fallback, classifier,
+    /// prompt transport, or generic tool query.
+    pub(crate) fn read_path_policy_check(
+        &self,
+        path: &Path,
+    ) -> lingxi_core::host::permission_gate::ReadPathPolicyCheck {
+        use lingxi_core::host::permission_gate::ReadPathPolicyMatch as Match;
+
+        let input = serde_json::json!({"file_path": path.to_string_lossy()});
+        let tool_wide_sources = native_read_tool_wide_deny_sources();
+        let tool_wide_denial = self
+            .first_match(
+                &self.deny_rules,
+                &tool_wide_sources,
+                "Read",
+                &input,
+                false,
+                &[],
+            )
+            .is_some();
+        let has_path_deny = self
+            .deny_rules
+            .values()
+            .flatten()
+            .any(|rule| rule.value.tool_name == "Read" && rule.value.rule_content.is_some());
+        let content_denial = if tool_wide_denial {
+            false
+        } else if self.roots.is_none() && has_path_deny {
+            false
+        } else {
+            self.first_match(
+                &self.deny_rules,
+                &SOURCES_BY_PRIORITY,
+                "Read",
+                &input,
+                true,
+                &[],
+            )
+            .is_some()
+        };
+        let denied_by_read_rule = if tool_wide_denial || content_denial {
+            Match::Match
+        } else if self.roots.is_none() && has_path_deny {
+            Match::Unavailable
+        } else {
+            Match::NoMatch
+        };
+        let held_outside = if !self.restricted && !self.block_reads_outside_working_directories {
+            Match::NoMatch
+        } else if let Some(roots) = self.roots.as_ref() {
+            if self.read_path_is_held_outside(path, roots) {
+                Match::Match
+            } else {
+                Match::NoMatch
+            }
+        } else {
+            Match::Unavailable
+        };
+        lingxi_core::host::permission_gate::ReadPathPolicyCheck {
+            denied_by_read_rule,
+            held_outside,
+        }
+    }
+
+    /// Native `hS` is the union of the restricted working-directory check and
+    /// the independent `blockReadsOutsideWorkingDirectories` check. Each
+    /// predicate compares Native path forms, then consults its own `hie`
+    /// allowances.
+    fn read_path_is_held_outside(&self, path: &Path, roots: &FsRoots) -> bool {
+        if !self.restricted && !self.block_reads_outside_working_directories {
+            return false;
+        }
+        let path_spellings = permission_rule_path_forms(path, roots).spellings;
+        if self.restricted
+            && !crate::filesystem::native_path_spellings_in_allowed_working_dirs(
+                &path_spellings,
+                &self.all_working_dirs(roots),
+                roots,
+            )
+            && !path_spellings
+                .iter()
+                .any(|spelling| self.read_path_hie_allowance(spelling, roots))
+        {
+            return true;
+        }
+        if self.block_reads_outside_working_directories
+            && !crate::filesystem::native_path_spellings_in_allowed_working_dirs(
+                &path_spellings,
+                &self.read_block_working_dirs(roots),
+                roots,
+            )
+            && !path_spellings
+                .iter()
+                .any(|spelling| self.read_path_hie_allowance(spelling, roots))
+        {
+            return true;
+        }
+        false
+    }
+
+    /// The current `hie` allowances. Roots for Native scratchpad and bundled
+    /// skill-reference allowances are not yet published by the host.
+    fn read_path_hie_allowance(&self, path: &Path, roots: &FsRoots) -> bool {
+        if self.read_block_allowance(path, roots).is_some() {
+            return true;
+        }
+        if !self.restricted && self.block_reads_outside_working_directories {
+            let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            return crate::filesystem::path_in_working_path(&canonical, &roots.cwd, roots);
+        }
+        false
+    }
+
+    /// Match Read-deny content rules against Native's ordered path spellings:
+    /// the supplied lexical path first, then symlink hops and the final landing
+    /// path. The path-form loop is outermost because Native completes the full
+    /// source-priority walk for each spelling before moving to the next.
+    fn first_read_deny_match<'a>(
+        &'a self,
+        sources: &[PermissionRuleSource],
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> Option<&'a PermissionRule> {
+        let roots = self.roots.as_ref()?;
+        let raw_path = input_path_for_tool(tool_name, input, roots)?;
+        let has_read_path_deny = sources.iter().any(|source| {
+            self.deny_rules.get(source).is_some_and(|rules| {
+                rules
+                    .iter()
+                    .any(|rule| rule.value.tool_name == "Read" && rule.value.rule_content.is_some())
+            })
+        });
+        if !has_read_path_deny {
+            return None;
+        }
+
+        let resolved_forms = permission_rule_path_forms(Path::new(raw_path.as_ref()), roots);
+        // Native checks partial spellings even when the final path is marked
+        // unresolved; the later Read validation converts that state to an ask.
+        for spelling in resolved_forms.spellings {
+            for source in sources {
+                let Some(rules) = self.deny_rules.get(source) else {
+                    continue;
+                };
+                if let Some(rule) = decide_in_source(rules, |rule| {
+                    if rule.value.tool_name != "Read" {
+                        return RulePatternMatch::NoMatch;
+                    }
+                    let Some(pattern) = rule.value.rule_content.as_deref() else {
+                        return RulePatternMatch::NoMatch;
+                    };
+                    test_rule_pattern(
+                        &spelling.to_string_lossy(),
+                        pattern,
+                        rule.source,
+                        rule.behavior,
+                        roots,
+                    )
                 }) {
                     return Some(rule);
                 }
@@ -2472,7 +3600,7 @@ impl PermissionPolicy {
     /// Deny an output redirection whose resolved target matches an `Edit(<path>)`
     /// CONTENT deny rule (claude-code `EUr`→`Ptt`, the `create`-op deny walk that
     /// runs before the containment ask). Returns a rule-typed `Deny` carrying the
-    /// byte-exact `Output redirection to '<path>' was blocked by a deny rule.`
+    /// Native 2.1.289 `Permission to use Bash with command … has been denied.`
     /// explanation, or `None` when no simple write target matches. Walks sources
     /// in priority order; only `Edit(pattern)` CONTENT deny rules participate (a
     /// tool-wide `Edit` deny, and the read-op command-path deny walk, are
@@ -2482,12 +3610,13 @@ impl PermissionPolicy {
     /// a Read-deny (read op) / Edit-deny (write/create op) CONTENT rule
     /// (claude-code `EUr`→`Ptt`, the `Ww(...,"deny")` walk that runs before
     /// containment). Mirrors [`Self::output_redirect_deny`] but over the
-    /// positional command paths, using the byte-exact containment-template
-    /// message CC reuses for a rule-typed deny. Returns the FIRST match, or
+    /// positional command paths, using Native 2.1.289's command-denial
+    /// message rather than the path-containment Ask copy. Returns the FIRST match, or
     /// `None`.
     fn command_path_deny(
         &self,
         sources: &[PermissionRuleSource],
+        tool_name: &str,
         command: &str,
         roots: &FsRoots,
     ) -> Option<PermissionResult> {
@@ -2512,7 +3641,10 @@ impl PermissionPolicy {
                 }) {
                     return Some(PermissionResult::Deny {
                         reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
-                        explanation: Some(target.blocked_message.clone()),
+                        explanation: Some(format!(
+                            "Permission to use {tool_name} with command {} has been denied.",
+                            command.trim()
+                        )),
                         metadata: PermissionMetadata::default(),
                     });
                 }
@@ -2524,6 +3656,7 @@ impl PermissionPolicy {
     fn output_redirect_deny(
         &self,
         sources: &[PermissionRuleSource],
+        tool_name: &str,
         command: &str,
         roots: &FsRoots,
     ) -> Option<PermissionResult> {
@@ -2544,7 +3677,8 @@ impl PermissionPolicy {
                     return Some(PermissionResult::Deny {
                         reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
                         explanation: Some(format!(
-                            "Output redirection to '{target}' was blocked by a deny rule."
+                            "Permission to use {tool_name} with command {} has been denied.",
+                            command.trim()
                         )),
                         metadata: PermissionMetadata::default(),
                     });
@@ -2557,6 +3691,7 @@ impl PermissionPolicy {
     fn input_redirect_deny(
         &self,
         sources: &[PermissionRuleSource],
+        tool_name: &str,
         command: &str,
         roots: &FsRoots,
     ) -> Option<PermissionResult> {
@@ -2577,7 +3712,8 @@ impl PermissionPolicy {
                     return Some(PermissionResult::Deny {
                         reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
                         explanation: Some(format!(
-                            "Input redirection from '{target}' was blocked by a deny rule."
+                            "Permission to use {tool_name} with command {} has been denied.",
+                            command.trim()
                         )),
                         metadata: PermissionMetadata::default(),
                     });
@@ -2595,55 +3731,31 @@ impl PermissionPolicy {
     ///   if(rws(t,"read","deny").size===0)return!1;
     ///   return Yy(e).some((n)=>Ww(n,t,"read","deny")!==null)}
     /// ```
-    /// (1) a TOOL-WIDE Read deny rule from a source NOT in
-    /// `$$y = {toolsNarrowing, cliArg, command}` (`toolsNarrowing` is unported),
-    /// OR (2) a read/deny CONTENT rule covering the resolved path
-    /// ([`test_rule_pattern`] handles the raw+resolved `Yy` variants).
+    /// (1) a TOOL-WIDE Read deny rule from a source not excluded by Native's
+    /// `xl`, OR (2) a Read-deny CONTENT rule covering a Native path spelling.
     /// Roots-gated (returns `false` without roots).
     fn edit_covered_by_read_deny(&self, tool_name: &str, input: &serde_json::Value) -> bool {
-        let Some(roots) = self.roots.as_ref() else {
+        if self.roots.is_none() {
             return false;
-        };
-        // (1) tool-wide Read deny rule (excluding cliArg / command sources).
-        for src in SOURCES_BY_PRIORITY {
-            if matches!(
-                src,
-                PermissionRuleSource::CliArg | PermissionRuleSource::Command
-            ) {
-                continue;
-            }
-            if let Some(rules) = self.deny_rules.get(&src) {
-                if rules
-                    .iter()
-                    .any(|r| r.value.rule_content.is_none() && r.value.tool_name == "Read")
-                {
-                    return true;
-                }
-            }
         }
-        // (2) read/deny CONTENT rule covering the path.
-        let Some(path) = input_path_for_tool(tool_name, input, roots) else {
-            return false;
-        };
-        for src in SOURCES_BY_PRIORITY {
-            let Some(rules) = self.deny_rules.get(&src) else {
-                continue;
-            };
-            if decide_in_source(rules, |rule| {
-                if rule.value.tool_name != "Read" {
-                    return RulePatternMatch::NoMatch;
-                }
-                let Some(pattern) = rule.value.rule_content.as_deref() else {
-                    return RulePatternMatch::NoMatch;
-                };
-                test_rule_pattern(&path, pattern, rule.source, rule.behavior, roots)
-            })
+        // (1) tool-wide Read deny rule from sources Native does not exclude.
+        let tool_wide_sources = native_read_tool_wide_deny_sources();
+        if self
+            .first_match(
+                &self.deny_rules,
+                &tool_wide_sources,
+                "Read",
+                input,
+                false,
+                &[],
+            )
             .is_some()
-            {
-                return true;
-            }
+        {
+            return true;
         }
-        false
+        // (2) Read-deny CONTENT rule covering a Native spelling.
+        self.first_read_deny_match(&SOURCES_BY_PRIORITY, tool_name, input)
+            .is_some()
     }
 
     /// BGOP-01: the `&` background-operator allow→ask downgrade — 1:1 with
@@ -2869,13 +3981,12 @@ impl PermissionPolicy {
             return None;
         }
         let command = shell_command::command_from_input(input)?;
-        if command.chars().count() <= 10_000 {
+        if command.encode_utf16().count() <= 10_000 {
             return None;
         }
         Some(ask_bash_safety(
             tool_name,
-            "Command exceeds maximum length of 10000 characters and cannot be statically analyzed"
-                .to_string(),
+            "Parser aborted (timeout, resource limit, or over-length)".to_string(),
         ))
     }
 
@@ -3200,7 +4311,7 @@ fn cached_glob_regex(pattern: &str) -> Option<regex::Regex> {
 ///
 /// - `WebFetch` → `domain:{hostname}` from `input.url`
 ///   (`WebFetchTool.ts:50-63`).
-/// - `Agent` (and its legacy alias `Task`) → the `subagent_type`, defaulting to
+/// - `Agent` → the `subagent_type`, defaulting to
 ///   `general-purpose` when omitted (claude-code `getDenyRuleForAgent`:
 ///   `ruleContent === agentType`, with the general-purpose default).
 /// - any other tool → `None` (no content scheme ⇒ a content rule never matches).
@@ -3210,7 +4321,7 @@ fn tool_content_key(tool_name: &str, input: &serde_json::Value) -> Option<String
             let url = input.get("url")?.as_str()?;
             Some(format!("domain:{}", url_hostname(url)?))
         }
-        "Agent" | "Task" => {
+        "Agent" => {
             // TS resolves an omitted `subagent_type` to the general-purpose
             // agent's type before matching deny rules.
             let agent_type = input
@@ -3475,6 +4586,39 @@ fn deny_with_rule(rule: &PermissionRule) -> PermissionResult {
     }
 }
 
+fn deny_with_read_rule(rule: &PermissionRule, input: &serde_json::Value) -> PermissionResult {
+    let path = input
+        .get("file_path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    PermissionResult::Deny {
+        reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
+        explanation: Some(format!(
+            "Permission to read {} has been denied.",
+            native_read_path_display(path)
+        )),
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+/// Native `ld` escapes terminal/control characters for Read permission
+/// messages while preserving ordinary punctuation such as `<` and `&`.
+fn native_read_path_display(path: &str) -> String {
+    path.chars()
+        .map(|character| {
+            let code = character as u32;
+            if (0x00..=0x1f).contains(&code)
+                || (0x7f..=0x9f).contains(&code)
+                || matches!(code, 0x2028 | 0x2029)
+            {
+                format!("&#{code};")
+            } else {
+                character.to_string()
+            }
+        })
+        .collect()
+}
+
 /// Deny from a CONTENT (command-specific) rule match. For the command tools
 /// (`Bash` / `PowerShell`) this carries the command in the model-facing message,
 /// 1:1 with `bashPermissions.ts:1003` / `powershellPermissions.ts:396`:
@@ -3573,13 +4717,11 @@ fn allow_read_only() -> PermissionResult {
     }
 }
 
-/// Compound-command allow grant (claude-code `bashToolHasPermission`'s
-/// `subcommandPermissionDecisions.every(_ => _.behavior === 'allow')` branch,
-/// `bashPermissions.ts:2368-2385`, `decisionReason: { type:
-/// 'subcommandResults', … }`). The port has no `subcommandResults` decision
-/// reason, so this is tagged [`PermissionDecisionReason::Other`] with a
-/// descriptive reason — functionally irrelevant to the gate, which maps every
-/// `Allow` to `Allow` regardless of reason.
+/// Compound-command allow marker. The outer authorization walk replaces this
+/// aggregate `Other` reason with ordered per-child results only after it has
+/// independently authorized each parser-derived subcommand. If parsing is
+/// unavailable, or child outcomes do not all agree with the parent Allow, this
+/// reason remains the conservative aggregate explanation.
 fn allow_compound() -> PermissionResult {
     PermissionResult::Allow {
         reason: PermissionDecisionReason::Other {
@@ -4104,6 +5246,10 @@ fn ask_plan_mutation(tool_name: &str, write_path: Option<&str>) -> PermissionRes
 #[cfg(test)]
 #[path = "policy_test.rs"]
 mod policy_test;
+
+#[cfg(test)]
+#[path = "policy_subcommand_results_test.rs"]
+mod policy_subcommand_results_test;
 
 // AUTO-03: separate inline module (kept out of `policy_test.rs`) covering the
 // `autoMode.classifyAllShell` escalation at the two policy call sites.

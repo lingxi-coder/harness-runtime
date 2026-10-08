@@ -2,6 +2,79 @@
 
 use super::*;
 
+/// Session owner for tool-hook publication generations. A normal per-turn
+/// executor may finish while an admitted async hook is still running, so its
+/// generation must remain current until the session changes. Session switches
+/// cancel the old parent token and drain durable commits before publishing the
+/// new owner.
+pub(crate) struct SessionToolHookGeneration {
+    state: std::sync::Mutex<SessionToolHookGenerationState>,
+}
+
+struct SessionToolHookGenerationState {
+    root: lingxi_core::host::CancellationToken,
+    publication_commit_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl SessionToolHookGeneration {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(SessionToolHookGenerationState {
+                root: lingxi_core::host::CancellationToken::new(),
+                publication_commit_lock: Arc::new(tokio::sync::Mutex::new(())),
+            }),
+        }
+    }
+
+    /// Capture the current immutable session owner for a new streaming
+    /// executor. Its per-executor root is a child of this token.
+    pub(crate) fn current(
+        &self,
+    ) -> (
+        lingxi_core::host::CancellationToken,
+        Arc<tokio::sync::Mutex<()>>,
+    ) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            state.root.clone(),
+            Arc::clone(&state.publication_commit_lock),
+        )
+    }
+
+    /// Invalidate every retired executor generation first, then wait for any
+    /// durable mutation already admitted under the old session's lease. New
+    /// sessions receive a distinct token and commit lock.
+    pub(crate) async fn reset(&self) {
+        let old = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let replacement = SessionToolHookGenerationState {
+                root: lingxi_core::host::CancellationToken::new(),
+                publication_commit_lock: Arc::new(tokio::sync::Mutex::new(())),
+            };
+            let old = std::mem::replace(&mut *state, replacement);
+            old.root.cancel();
+            old
+        };
+        let _lease = old.publication_commit_lock.lock_owned().await;
+    }
+}
+
+impl Drop for SessionToolHookGeneration {
+    fn drop(&mut self) {
+        self.state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .root
+            .cancel();
+    }
+}
+
 /// Transcript persistence and the side tables consumed while serializing a turn.
 pub(crate) struct TranscriptStore {
     /// Per-session provider recovery ownership, replaced when switching sessions.
@@ -101,8 +174,15 @@ pub(crate) struct TranscriptStore {
     /// `tool_result` line lands, preserving claude's chain order. Keyed by
     /// tool so a concurrent streaming batch cannot interleave one tool's
     /// attachments behind another's result.
-    pub(crate) pending_hook_attachments:
-        Mutex<std::collections::HashMap<String, Vec<serde_json::Value>>>,
+    pub(crate) pending_hook_attachments: Mutex<
+        std::collections::HashMap<
+            String,
+            Vec<(
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+                Option<Arc<dyn hooks::attachment::HookPublicationGuard>>,
+            )>,
+        >,
+    >,
     /// Lazily-resolved git branch for the cwd — the parity analog of TS
     /// `getBranch()`, which claude-code calls once per `insertMessageChain`
     /// (`sessionStorage.ts:1012-1019`) and stamps onto every line of that chain.
@@ -128,6 +208,8 @@ pub(crate) struct TranscriptStore {
     /// attachments that survived in its preserved tail.
     pub(crate) post_compact_skill_attachments:
         std::sync::Mutex<std::collections::HashMap<MessageId, Vec<String>>>,
+    pub(crate) model_reminder_attachments:
+        std::sync::Mutex<std::collections::HashMap<MessageId, serde_json::Value>>,
 }
 
 impl TranscriptStore {
@@ -146,6 +228,7 @@ impl TranscriptStore {
             pending_hook_attachments: Mutex::new(std::collections::HashMap::new()),
             git_branch_cache: Mutex::new(None),
             post_compact_skill_attachments: std::sync::Mutex::new(std::collections::HashMap::new()),
+            model_reminder_attachments: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -166,15 +249,207 @@ impl TranscriptStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+        self.model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 }
 
 /// State owned by system-prompt assembly and per-turn reminder pipelines.
+#[derive(Default)]
+pub(crate) struct ModPromptSectionCache {
+    pub(crate) generation: u64,
+    pub(crate) context: Option<(String, std::path::PathBuf, Option<(u64, u64)>)>,
+    pub(crate) answers: std::collections::HashMap<
+        Vec<u16>,
+        (
+            Option<Vec<u16>>,
+            Option<lingxi_llm_client::providers::anthropic::system_prompt::PromptText>,
+        ),
+    >,
+}
+
+#[derive(Default)]
+pub(crate) struct ModPromptContextCache {
+    pub(crate) generation: u64,
+    pub(crate) context: Option<(String, std::path::PathBuf, Option<(u64, u64)>)>,
+    pub(crate) resolved: Option<hooks::mods::ModUtf16ValueProjection>,
+    pub(crate) instruction_load: Option<
+        lingxi_core::host::instruction_context_cache::InstructionContextLoad<
+            crate::prompt::MemoryFile,
+        >,
+    >,
+}
+
+#[derive(Default)]
+pub(crate) struct ModPromptAttachmentCache {
+    pub(crate) generation: u64,
+    /// Claude Code keys attachment answers by attachment UUID. The outgoing
+    /// message ID is the stable identity for this runtime's retry snapshots.
+    pub(crate) answers: std::collections::HashMap<
+        MessageId,
+        (
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+            (u64, u64),
+            Option<Vec<u16>>,
+        ),
+    >,
+}
+
+#[derive(Default)]
+pub(crate) struct ModToolDescribeCache {
+    pub(crate) generation: u64,
+    /// Each tool is described once for its exact source text, default defer
+    /// flag, provider identity, and loaded Mod catalog.
+    pub(crate) answers:
+        std::collections::HashMap<String, (serde_json::Value, (u64, u64), serde_json::Value)>,
+}
+
+#[derive(Default)]
+pub(crate) struct ModCommandDescribeCache {
+    pub(crate) generation: u64,
+    /// Native `Jre` keeps the pending Promise in the same map as its settled
+    /// answer. Loaded Mod registrations are part of our cache identity.
+    pub(crate) answers:
+        std::collections::HashMap<String, ((u64, u64), Arc<ModCommandDescribeEntry>)>,
+}
+
+pub(crate) struct ModCommandDescribeEntry {
+    /// A watch channel gives every slash-menu or `/help` caller its own wait
+    /// handle while keeping the in-flight result alive after any caller drops.
+    pub(crate) result: tokio::sync::watch::Sender<Option<Arc<ModCommandDescribeAnswer>>>,
+    /// Unbound callers cannot detach work from `&self`; serialize their inline
+    /// dispatches so a canceled initializer leaves the entry retryable.
+    pub(crate) inline_init: tokio::sync::Mutex<()>,
+}
+
+pub(crate) struct ModCommandDescribeAnswer {
+    pub(crate) value: serde_json::Value,
+    /// A rejected Mod Promise yields the original command but is removed from
+    /// the native cache so the next lookup can retry.
+    pub(crate) cacheable: bool,
+}
+
+/// Owner-published facts for one completed external streaming turn.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TurnExecutionMetrics {
+    /// The shared driver's own turn counter, independent of cumulative usage.
+    pub num_turns: u32,
+    /// Actual terminal reason emitted by the driver; absent if it emitted none.
+    pub stop_reason: Option<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct TurnExecutionMetricsState {
+    active: Option<TurnExecutionMetrics>,
+    completed: Option<TurnExecutionMetrics>,
+}
+
+impl ConversationOrchestrator {
+    /// Read the last completed external turn after its execution and cleanup.
+    /// Returns None while a new external turn owns execution.
+    pub fn completed_turn_metrics(&self) -> Option<TurnExecutionMetrics> {
+        self.prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .completed
+            .clone()
+    }
+
+    pub(super) fn begin_turn_metrics(&self) {
+        let mut state = self
+            .prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.active = Some(TurnExecutionMetrics::default());
+        state.completed = None;
+    }
+
+    pub(super) fn note_turn_count(&self, num_turns: u32) {
+        if let Some(active) = self
+            .prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .as_mut()
+        {
+            active.num_turns = num_turns;
+        }
+    }
+
+    pub(super) fn note_turn_terminal_reason(&self, stop_reason: &str) {
+        if let Some(active) = self
+            .prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .as_mut()
+        {
+            active.stop_reason = Some(stop_reason.to_owned());
+        }
+    }
+
+    pub(super) fn complete_turn_metrics(
+        &self,
+        outcome: &Result<ConversationOutcome, OrchestratorError>,
+    ) {
+        let mut state = self
+            .prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(mut active) = state.active.take() {
+            if let Ok(
+                ConversationOutcome::EndTurn { turn_count, .. }
+                | ConversationOutcome::StopHookPrevented { turn_count, .. },
+            ) = outcome
+            {
+                active.num_turns = *turn_count;
+            }
+            state.completed = Some(active);
+        }
+    }
+
+    /// Record the same reason that reaches output, without inferring it from
+    /// the lossy external TurnOutcome enum or the latest history row.
+    pub(super) async fn emit_turn_terminal(
+        &self,
+        stop_reason: &str,
+        cost: &lingxi_core::host::CostSnapshot,
+    ) {
+        self.note_turn_terminal_reason(stop_reason);
+        self.output.emit_end_turn(stop_reason, cost).await;
+    }
+}
+
 pub(crate) struct PromptRuntime {
     /// Frozen gitStatus probe + rendered attachment for this conversation.
     /// Claude documents gitStatus as a start-of-conversation snapshot that does
     /// not update, including after a worktree/session-cwd swap.
     pub(crate) git_status_snapshot: Mutex<Option<GitStatusSnapshot>>,
+    /// Named section answers cached for this session until invalidated.
+    pub(crate) mod_prompt_sections: Mutex<ModPromptSectionCache>,
+    /// Resolved leading context, asked once per session/cwd/Mod registration.
+    pub(crate) mod_prompt_context: Mutex<ModPromptContextCache>,
+    pub(crate) mod_prompt_attachments: Mutex<ModPromptAttachmentCache>,
+    /// Persistent hook attachment renderings retain their original history
+    /// message. This side table supplies provenance when a model request is
+    /// rendered, so invalidation can rerun Mods against the original body.
+    pub(crate) mod_persisted_attachments:
+        Mutex<std::collections::HashMap<MessageId, (String, serde_json::Value)>>,
+    /// Message ids accepted from a generation-owned PostToolBatch result.
+    /// The message itself stays in ordinary session history; this private
+    /// side table lets the next prompt admission remove it if its producer
+    /// generation was retired after append-through.
+    pub(crate) guarded_prompt_messages:
+        Mutex<Vec<(MessageId, Arc<dyn hooks::attachment::HookPublicationGuard>)>>,
+    pub(crate) mod_tool_descriptions: Mutex<ModToolDescribeCache>,
+    pub(crate) mod_command_descriptions: Arc<Mutex<ModCommandDescribeCache>>,
     /// Stable per-prompt id for the IN-FLIGHT turn — the parity analog of TS
     /// `getPromptId()` (`sessionStorage.ts:1045-1046`), which stamps the same id
     /// on the user prompt line AND every `tool_result` `user` line of that turn.
@@ -183,6 +458,7 @@ pub(crate) struct PromptRuntime {
     /// carrier) and reuses it for the turn's `tool_result` `user` lines; non-`user`
     /// lines never read it. `None` until the first user prompt is persisted.
     pub(crate) current_prompt_id: Mutex<Option<String>>,
+    pub(crate) turn_execution_metrics: std::sync::Mutex<TurnExecutionMetricsState>,
     /// Live plugin output-style registry. Disk/builtin styles remain sourced
     /// from [`OrchestratorConfig`]; this optional registry makes plugin reloads
     /// visible to prompt assembly without rebuilding the orchestrator.
@@ -258,7 +534,7 @@ pub(crate) struct PromptRuntime {
     /// offset, limit}`) — the 1:1 port of claude-code's single
     /// `context.readFileState` LRU (`FileReadTool.ts:1032`). This is the sole
     /// source of truth for every read-state consumer. Model-context consumers
-    /// (`/files`, conditional-rule matching, relevant-memory dedup, and
+    /// (`/files`, relevant-memory dedup, and
     /// post-compact restore) read the MODEL-VISIBLE subset; the Read dedup +
     /// staleness guards inside the file tools consume the full shared map,
     /// including non-model host seed snapshots.
@@ -276,6 +552,7 @@ pub(crate) struct PromptRuntime {
     /// (D/E/F) and Read dedup (A) are additional in-tool consumers of the SAME
     /// shared map.
     pub(crate) read_state_map: tool_api::read_file_state::ReadFileStateMap,
+    pub(crate) nested_memory_triggers: Arc<tool_api::nested_memory_triggers::NestedMemoryTriggers>,
     /// SKILLLIST.1: supplies the model-invocable skill entries for the per-turn
     /// `skill_listing` reminder (TS `getSkillToolCommands` →
     /// `getSkillListingAttachments`). `None` when not wired (every test + any
@@ -286,7 +563,7 @@ pub(crate) struct PromptRuntime {
     pub(crate) skill_listing: Option<Arc<dyn crate::prompt::skill_listing::SkillListingProvider>>,
     /// Source of completed background (`async`) hook responses to fold back into
     /// the next turn (claude-code `getAsyncHookResponseAttachments`). `None` ⇒
-    /// [`Self::async_hook_response_reminder_message`] is a strict no-op (the
+    /// [`Self::async_hook_response_mod_messages`] is a strict no-op (the
     /// default — keeps fixtures byte-identical). Wired at the desktop
     /// composition root from the `AsyncHookRegistry` completion channel.
     pub(crate) async_hook_responses:
@@ -309,46 +586,28 @@ pub(crate) struct PromptRuntime {
     /// `tool_task::todo_store::TodoStore`.
     pub(crate) todo_reminder_tasks:
         Option<Arc<dyn crate::prompt::todo_reminder::TodoReminderTaskProvider>>,
-    /// §F: cache of the CONDITIONAL (`paths:`-gated) memory rules, populated the
-    /// first time [`Self::conditional_rules_reminder_message`] runs (filled via
-    /// the same `memory.load(&cwd)` the system prompt uses, then re-filtered to
-    /// `globs.is_some()`). Avoids re-walking disk every turn while still
-    /// letting lazy activation re-test the cached rules against the latest
-    /// `read_file_state`. `None` = not yet filled OR invalidated; an empty
-    /// `Vec` (once filled) means the hierarchy has no conditional rules.
-    ///
-    /// Task 5 (worktree 206 session-cwd plumbing): this is CWD-DEPENDENT
-    /// cached state — the one genuine cache this port keeps keyed by cwd (the
-    /// env block / gitStatus / `additional_context_message` all re-derive
-    /// fresh every turn instead, so they need no invalidation, only a live cwd
-    /// source — see [`Self::session_cwd`]). A plain `std::sync::Mutex` (not
-    /// the prior `tokio::sync::OnceCell`) so [`Self::with_session_cwd`] can
-    /// register a synchronous [`tool_api::SessionCwd::set_on_swap`] callback
-    /// that clears it (`*cache.lock() = None`) on every `EnterWorktree`/
-    /// `ExitWorktree` swap, forcing the next turn to re-walk disk under the
-    /// new cwd instead of replaying the pre-swap directory's rules forever.
-    pub(crate) conditional_rules_cache:
-        Arc<std::sync::Mutex<Option<Vec<crate::prompt::MemoryFile>>>>,
-    /// §F sent-tracking ("delta"): the paths of conditional rules already
-    /// injected this session, so each rule is rendered ONCE when first activated
-    /// and never re-injected on later turns. 1:1 with TS `loadedNestedMemoryPaths`
-    /// (attachments.ts:1722-1732 — a non-evicting Set keyed by rule path).
-    pub(crate) sent_conditional_rules: Mutex<std::collections::HashSet<std::path::PathBuf>>,
-    /// Nested-memory sent-tracking — 1:1 with the oracle's
-    /// `loadedNestedMemoryPaths` as `k$o` (@237714543) uses it:
-    /// `if(t.loadedNestedMemoryPaths?.[i.path])continue`. Session-lifetime and
-    /// non-evicting, so each discovered memory file is surfaced ONCE.
-    ///
-    /// This is the ONLY dedup state the feature keeps.
-    /// [`crate::prompt::nested_memory::discover`] is deliberately stateless
-    /// (the oracle's `seen` is per-call), so a `LINGXI.md` written mid-session
-    /// is still found — it is this set, not the walk, that stops re-sending.
-    ///
-    /// NOT cleared on a worktree swap, unlike
-    /// [`Self::conditional_rules_cache`]: that is a CACHE (stale after a swap),
-    /// while this is a record of what the model has already been told, which a
-    /// change of cwd does not undo.
-    pub(crate) sent_nested_memory: Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    /// Frozen eager instructions plus the session-local lazy discovery cursor.
+    pub(crate) instruction_context:
+        Mutex<Option<lingxi_core::host::instructions::InstructionContext>>,
+    /// One explicit root owner for native Gv/qb; cwd is load provenance.
+    pub(crate) instruction_cache: Arc<
+        lingxi_core::host::instruction_context_cache::InstructionContextCache<
+            crate::prompt::MemoryFile,
+        >,
+    >,
+    /// The frozen Gv build from which the independently mutable lazy cursor
+    /// was last seeded. A retired producer cannot replace the active cursor.
+    pub(crate) instruction_context_key:
+        std::sync::Mutex<Option<lingxi_core::host::instructions::InstructionContextKey>>,
+    pub(crate) instruction_context_origin:
+        std::sync::Mutex<Option<Arc<lingxi_core::host::instructions::InstructionContext>>>,
+    /// Cause frozen with Or's current query snapshot, independently of a later
+    /// Gv invalidation while compaction or model recovery runs.
+    pub(crate) instruction_context_reason:
+        std::sync::Mutex<lingxi_core::host::instructions::InstructionRefreshReason>,
+    /// Optional host authority for the current first-party user identity.
+    pub(crate) instruction_user_email_provider:
+        Option<Arc<dyn crate::prompt::memory_block::InstructionUserEmailProvider>>,
     /// Test-only override for the two filesystem roots nested-memory discovery
     /// needs: `(home, managed_dir)`. `None` (production) resolves them exactly
     /// as `RealMemoryHierarchyProvider::load` does — `dirs::home_dir()` and
@@ -401,7 +660,7 @@ pub(crate) struct PromptRuntime {
     pub(crate) pending_memory_prefetch: Mutex<Option<memory::prefetch::PendingMemoryPrefetch>>,
     /// P0.1 surfacing dedup: paths already surfaced via the
     /// `relevant_memories` channel this session, so a memory surfaced once is
-    /// never re-injected on a later turn. Mirrors [`Self::sent_conditional_rules`]
+    /// never re-injected on a later turn within the AGENTS instruction cursor.
     /// (TS `loadedNestedMemoryPaths` / the prefetch's per-iteration consume
     /// guard). Distinct from [`Self::read_state_map`], which the SHARED dedup
     /// also consults so a file already loaded as a nested/conditional attachment
@@ -436,6 +695,14 @@ pub(crate) struct PromptRuntime {
     /// Optional carved-slate snapshot of the static prompt and inline tool
     /// descriptions. Dynamic system context remains live per request.
     pub(crate) prompt_snapshot: Mutex<Option<lingxi_core::host::PromptSnapshot>>,
+    /// Exact source vector built with the current provider gate, held only
+    /// between prompt rendering and the first request's snapshot capture.
+    pub(crate) pending_prompt_source_vector:
+        Mutex<Option<Vec<lingxi_llm_client::providers::anthropic::system_prompt::PromptText>>>,
+    /// Latest raw prompt_snapshot routing hint, independently of the last
+    /// valid static prefix. None on resume means announced routing.
+    pub(crate) context_rendering_hint:
+        Mutex<Option<lingxi_core::host::instructions::InstructionRendering>>,
     /// True while the mounted session came from resume. Missing snapshots on
     /// resumed sessions must remain missing rather than being created by the
     /// next turn.
@@ -446,7 +713,15 @@ impl PromptRuntime {
     pub(crate) fn new() -> Self {
         Self {
             git_status_snapshot: Mutex::new(None),
+            mod_prompt_sections: Mutex::new(ModPromptSectionCache::default()),
+            mod_prompt_context: Mutex::new(ModPromptContextCache::default()),
+            mod_prompt_attachments: Mutex::new(ModPromptAttachmentCache::default()),
+            mod_persisted_attachments: Mutex::new(std::collections::HashMap::new()),
+            guarded_prompt_messages: Mutex::new(Vec::new()),
+            mod_tool_descriptions: Mutex::new(ModToolDescribeCache::default()),
+            mod_command_descriptions: Arc::new(Mutex::new(ModCommandDescribeCache::default())),
             current_prompt_id: Mutex::new(None),
+            turn_execution_metrics: std::sync::Mutex::new(TurnExecutionMetricsState::default()),
             output_style_registry: None,
             live_output_style: Mutex::new(None),
             wire_tool_schema_cache: Mutex::new(None),
@@ -460,14 +735,22 @@ impl PromptRuntime {
             new_diagnostics_source: None,
             current_turn_system_prompt: Mutex::new(None),
             read_state_map: tool_api::read_file_state::new_read_file_state_map(),
+            nested_memory_triggers: Arc::default(),
             skill_listing: None,
             async_hook_responses: None,
             task_notifications: None,
             task_lifecycle_relay: None,
             todo_reminder_tasks: None,
-            conditional_rules_cache: Arc::new(std::sync::Mutex::new(None)),
-            sent_conditional_rules: Mutex::new(std::collections::HashSet::new()),
-            sent_nested_memory: Mutex::new(std::collections::HashSet::new()),
+            instruction_context: Mutex::new(None),
+            instruction_cache: Arc::new(
+                lingxi_core::host::instruction_context_cache::InstructionContextCache::new(),
+            ),
+            instruction_context_key: std::sync::Mutex::new(None),
+            instruction_context_origin: std::sync::Mutex::new(None),
+            instruction_context_reason: std::sync::Mutex::new(
+                lingxi_core::host::instructions::InstructionRefreshReason::SessionStart,
+            ),
+            instruction_user_email_provider: None,
             nested_memory_roots: None,
             sent_skill_names: Mutex::new(std::collections::HashSet::new()),
             plan_reminder_cadence: Mutex::new(PlanReminderCadence::default()),
@@ -481,8 +764,43 @@ impl PromptRuntime {
             surfaced_skill_names: Mutex::new(std::collections::HashSet::new()),
             app_agent_prompt_profile: std::sync::RwLock::new(None),
             prompt_snapshot: Mutex::new(None),
+            pending_prompt_source_vector: Mutex::new(None),
+            context_rendering_hint: Mutex::new(None),
             prompt_snapshot_resume: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    pub(crate) async fn remember_guarded_prompt_message(
+        &self,
+        message_id: MessageId,
+        guard: Arc<dyn hooks::attachment::HookPublicationGuard>,
+    ) {
+        // Keep even a now-stale guard: the matching history row may have
+        // crossed an admitted durable commit just before reset. The final
+        // request-admission filter drops that ID, while clearing it here would
+        // let the committed row enter a later Main request unguarded.
+        let mut pending = self.guarded_prompt_messages.lock().await;
+        if !pending.iter().any(|(id, _)| *id == message_id) {
+            pending.push((message_id, guard));
+        }
+    }
+
+    pub(crate) async fn guarded_prompt_message_guard(
+        &self,
+        message_id: MessageId,
+    ) -> Option<Arc<dyn hooks::attachment::HookPublicationGuard>> {
+        self.guarded_prompt_messages
+            .lock()
+            .await
+            .iter()
+            .find(|(id, _)| *id == message_id)
+            .map(|(_, guard)| Arc::clone(guard))
+    }
+
+    pub(crate) async fn take_guarded_prompt_message_guards(
+        &self,
+    ) -> Vec<(MessageId, Arc<dyn hooks::attachment::HookPublicationGuard>)> {
+        std::mem::take(&mut *self.guarded_prompt_messages.lock().await)
     }
 
     /// Clear the prompt-owned read registry at its original session-reset stage.
@@ -494,9 +812,22 @@ impl PromptRuntime {
             .for_each(drop);
     }
 
-    /// Clear every prompt-owned value whose lifetime is one conversation.
-    pub(crate) async fn reset_session_scoped(&self) {
+    /// Prepare prompt-owned conversation state before session activation.
+    /// Gv authority and its date/cursor are retired only in the synchronous
+    /// activation commit while the current session identity is locked.
+    pub(crate) async fn prepare_session_scoped_reset(&self) {
         *self.git_status_snapshot.lock().await = None;
+        let mut sections = self.mod_prompt_sections.lock().await;
+        sections.generation = sections.generation.wrapping_add(1);
+        sections.context = None;
+        sections.answers.clear();
+        drop(sections);
+        self.invalidate_mod_prompt_context().await;
+        self.invalidate_mod_prompt_attachments().await;
+        self.mod_persisted_attachments.lock().await.clear();
+        self.guarded_prompt_messages.lock().await.clear();
+        self.invalidate_mod_tool_descriptions().await;
+        self.invalidate_mod_command_descriptions().await;
         *self.current_prompt_id.lock().await = None;
         self.silent_turn_reminder_marks
             .lock()
@@ -514,27 +845,72 @@ impl PromptRuntime {
             tool_api::read_file_state::mtime_ms_floor(std::time::SystemTime::now()),
             std::sync::atomic::Ordering::Relaxed,
         );
-        *self
-            .conditional_rules_cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        self.sent_conditional_rules.lock().await.clear();
-        self.sent_nested_memory.lock().await.clear();
         self.sent_skill_names.lock().await.clear();
         self.sent_agent_names.lock().await.clear();
         self.surfaced_memory_paths.lock().await.clear();
         self.surfaced_skill_names.lock().await.clear();
         *self.plan_reminder_cadence.lock().await = PlanReminderCadence::default();
+        *self.current_turn_system_prompt.lock().await = None;
+        *self.pending_memory_prefetch.lock().await = None;
+        *self.pending_skill_prefetch.lock().await = None;
+        *self.pending_prompt_source_vector.lock().await = None;
+        *self.prompt_snapshot.lock().await = None;
+        *self.context_rendering_hint.lock().await = None;
+        self.prompt_snapshot_resume
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+    /// Retire the root's Gv/qb authority beside publication of the new session
+    /// identity. The caller holds both the session and instruction cursor
+    /// guards; this method does not await or cancel original build waiters.
+    pub(crate) fn commit_instruction_session_reset(
+        &self,
+        cursor: &mut Option<lingxi_core::host::instructions::InstructionContext>,
+    ) {
+        self.instruction_cache.reset_session_context();
+        *self
+            .instruction_context_origin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *self
+            .instruction_context_key
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *self
+            .instruction_context_reason
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            lingxi_core::host::instructions::InstructionRefreshReason::SessionStart;
         *self
             .date_change
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = DateChangeState::default();
-        *self.current_turn_system_prompt.lock().await = None;
-        *self.pending_memory_prefetch.lock().await = None;
-        *self.pending_skill_prefetch.lock().await = None;
-        *self.prompt_snapshot.lock().await = None;
-        self.prompt_snapshot_resume
-            .store(false, std::sync::atomic::Ordering::Release);
+        *cursor = None;
+    }
+
+    pub(crate) async fn invalidate_mod_prompt_context(&self) {
+        let mut cache = self.mod_prompt_context.lock().await;
+        cache.generation = cache.generation.wrapping_add(1);
+        cache.context = None;
+        cache.resolved = None;
+        cache.instruction_load = None;
+    }
+
+    pub(crate) async fn invalidate_mod_prompt_attachments(&self) {
+        let mut cache = self.mod_prompt_attachments.lock().await;
+        cache.generation = cache.generation.wrapping_add(1);
+        cache.answers.clear();
+    }
+
+    pub(crate) async fn invalidate_mod_tool_descriptions(&self) {
+        let mut cache = self.mod_tool_descriptions.lock().await;
+        cache.generation = cache.generation.wrapping_add(1);
+        cache.answers.clear();
+    }
+
+    pub(crate) async fn invalidate_mod_command_descriptions(&self) {
+        let mut cache = self.mod_command_descriptions.lock().await;
+        cache.generation = cache.generation.wrapping_add(1);
+        cache.answers.clear();
     }
 }
 
@@ -550,6 +926,22 @@ mod prompt_runtime_tests {
             block: Some("old git status".to_string()),
         });
         *runtime.current_prompt_id.lock().await = Some("old-prompt".to_string());
+        runtime.mod_prompt_sections.lock().await.answers.insert(
+            "memory".encode_utf16().collect(),
+            (
+                Some("old input".encode_utf16().collect()),
+                Some(
+                    lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
+                        "old answer",
+                    ),
+                ),
+            ),
+        );
+        runtime.mod_prompt_context.lock().await.resolved = Some(
+            hooks::mods::ModUtf16ValueProjection::plain(serde_json::json!({
+                "blocks": [{"name":"old","text":"answer"}]
+            })),
+        );
         runtime
             .silent_turn_reminder_marks
             .lock()
@@ -571,7 +963,6 @@ mod prompt_runtime_tests {
         runtime
             .last_memory_scan_ms
             .store(0, std::sync::atomic::Ordering::Relaxed);
-        *runtime.conditional_rules_cache.lock().unwrap() = Some(Vec::new());
         runtime
             .plan_reminder_cadence
             .lock()
@@ -590,10 +981,13 @@ mod prompt_runtime_tests {
             .prompt_snapshot_resume
             .store(true, std::sync::atomic::Ordering::Release);
 
-        runtime.reset_session_scoped().await;
+        runtime.prepare_session_scoped_reset().await;
+        runtime.commit_instruction_session_reset(&mut *runtime.instruction_context.lock().await);
 
         assert!(runtime.git_status_snapshot.lock().await.is_none());
         assert!(runtime.current_prompt_id.lock().await.is_none());
+        assert!(runtime.mod_prompt_sections.lock().await.answers.is_empty());
+        assert!(runtime.mod_prompt_context.lock().await.resolved.is_none());
         assert!(runtime
             .silent_turn_reminder_marks
             .lock()
@@ -615,7 +1009,6 @@ mod prompt_runtime_tests {
                 .load(std::sync::atomic::Ordering::Relaxed)
                 > 0
         );
-        assert!(runtime.conditional_rules_cache.lock().unwrap().is_none());
         assert_eq!(
             runtime
                 .plan_reminder_cadence
@@ -675,14 +1068,14 @@ pub(crate) struct CompactionRuntime {
     /// [`Self::last_response_input_tokens`] by
     /// [`Self::record_response_input_tokens`].
     ///
-    /// Together the two reconstruct claude-code's `hoe(messages)` (2.1.238
-    /// @294688350) — the LAST assistant message's
-    /// `input + cache_creation + cache_read + output` — which the
-    /// `total_tokens_reminder` producer `D3T` (@296556375) feeds to the padded
-    /// countdown. `protocol` carries no per-message `usage` object, so the
-    /// orchestrator caches the scalar the same way the PTL prefix guard already
-    /// caches the input total. `0` until the first successful call.
+    /// This is the output half of the last API-usage snapshot. The reminder's
+    /// model-context snapshot below has a separate compaction lifetime.
+    /// `0` until the first successful call.
     pub(crate) last_response_output_tokens: std::sync::atomic::AtomicU64,
+    /// Last assistant usage in the current model context (`u4` in 2.1.286).
+    /// Compaction zeroes this reminder-only snapshot while the API accounting
+    /// and prefix-overflow snapshots above retain their own lifetimes.
+    pub(crate) total_tokens_reminder_usage: std::sync::atomic::AtomicU64,
     /// `Z3f` (2.1.238 @292021xxx) — the per-agent padded-countdown ledger
     /// behind the `total_tokens_reminder`. Keyed by agent id (`"main"` for this
     /// orchestrator, which is always depth-0). A `std::sync::Mutex` because the
@@ -729,6 +1122,7 @@ impl CompactionRuntime {
             compaction_cumulative_dropped_tokens: std::sync::atomic::AtomicU64::new(0),
             last_response_input_tokens: std::sync::atomic::AtomicU64::new(0),
             last_response_output_tokens: std::sync::atomic::AtomicU64::new(0),
+            total_tokens_reminder_usage: std::sync::atomic::AtomicU64::new(0),
             total_tokens_ledger: std::sync::Mutex::new(
                 crate::prompt::total_tokens::TotalTokensLedger::default(),
             ),
@@ -753,18 +1147,6 @@ impl CompactionRuntime {
         }
     }
 
-    /// Clear token counters after model accounting and before refusal state.
-    pub(crate) fn reset_token_accounting(&self) {
-        self.last_response_input_tokens
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-        self.last_response_output_tokens
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-        self.output_token_pool
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-        self.turn_start_output_baseline
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-    }
-
     /// Carry the full prior context usage into the padded countdown before an
     /// automatic compact, PTL recovery or clear. The oracle ledger belongs to
     /// the root session object, which survives hot resume and clear; it is not
@@ -784,12 +1166,43 @@ impl CompactionRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .roll_over_context("main", used);
     }
+
+    /// Clear token counters after model accounting and before refusal state.
+    pub(crate) fn reset_token_accounting(&self) {
+        self.last_response_input_tokens
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.last_response_output_tokens
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.total_tokens_reminder_usage
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.output_token_pool
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.turn_start_output_baseline
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
 }
+
+#[cfg(test)]
+#[path = "tests/context_announcements_tests.rs"]
+mod context_announcements_tests;
+#[cfg(test)]
+#[path = "tests/instruction_cache_race_tests.rs"]
+mod instruction_cache_race_tests;
+#[cfg(test)]
+#[path = "tests/instruction_cache_tests.rs"]
+mod instruction_cache_tests;
+#[cfg(test)]
+#[path = "tests/total_tokens_lifecycle_tests.rs"]
+mod total_tokens_lifecycle_tests;
 
 /// State owned by lifecycle hooks, goal checks, and main-thread agents.
 pub(crate) struct LifecycleRuntime {
     pub(crate) goal_retry: std::sync::Mutex<super::goal_retry_impl::GoalRetryState>,
     pub(crate) goal_retry_owner: std::sync::OnceLock<std::sync::Weak<ConversationOrchestrator>>,
+    /// Parent cancellation/commit scope shared by every streaming executor in
+    /// this mounted session. Normal iteration drop preserves async-hook work;
+    /// clear, hot resume, and orchestrator teardown retire this scope.
+    pub(crate) session_tool_hook_generation: SessionToolHookGeneration,
     /// Hook registry (M5-06). `None` when not wired — `list_hooks` then
     /// returns `vec![]`. The CLI binary populates from settings + plugin
     /// sources at startup.
@@ -868,6 +1281,7 @@ impl LifecycleRuntime {
             main_thread_agent_hook_id: Mutex::new(None),
             goal_retry: std::sync::Mutex::new(super::goal_retry_impl::GoalRetryState::default()),
             goal_retry_owner: std::sync::OnceLock::new(),
+            session_tool_hook_generation: SessionToolHookGeneration::new(),
             goal_checkin: Arc::new(std::sync::Mutex::new(
                 crate::prompt::goal_checkin::GoalDeferralState::default(),
             )),
@@ -880,6 +1294,70 @@ impl LifecycleRuntime {
             session_switch_supervisor: SessionSwitchSupervisor::new(),
             session_activation_observer: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod session_tool_hook_generation_tests {
+    use super::*;
+    use hooks::attachment::HookPublicationGuard;
+
+    #[tokio::test]
+    async fn reset_cancels_before_waiting_for_admitted_session_commit() {
+        let owner = SessionToolHookGeneration::new();
+        let (old_root, old_commit_lock) = owner.current();
+        let old_child = old_root.child_token();
+        let commit_started = Arc::new(tokio::sync::Notify::new());
+        let release_commit = Arc::new(tokio::sync::Notify::new());
+        let fence = crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(
+            old_child.clone(),
+            Arc::clone(&old_commit_lock),
+        );
+        let commit_started_task = Arc::clone(&commit_started);
+        let release_commit_task = Arc::clone(&release_commit);
+        let admitted_commit = tokio::spawn(async move {
+            HookPublicationGuard::commit_if_current(
+                &fence,
+                Box::pin(async move {
+                    commit_started_task.notify_one();
+                    release_commit_task.notified().await;
+                }),
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), commit_started.notified())
+            .await
+            .expect("commit lease enters its durable mutation under the session lock");
+
+        let reset_owner = Arc::new(owner);
+        let reset_owner_task = Arc::clone(&reset_owner);
+        let reset = tokio::spawn(async move { reset_owner_task.reset().await });
+        tokio::time::timeout(std::time::Duration::from_secs(1), old_root.cancelled())
+            .await
+            .expect("session reset invalidates the previous root immediately");
+        assert!(old_child.is_cancelled());
+        assert!(
+            !reset.is_finished(),
+            "reset waits for durable work admitted under the old session lease"
+        );
+
+        release_commit.notify_one();
+        assert!(admitted_commit.await.expect("commit task joins"));
+        tokio::time::timeout(std::time::Duration::from_secs(1), reset)
+            .await
+            .expect("reset completes after the admitted commit releases")
+            .expect("reset task completes");
+        let (new_root, new_commit_lock) = reset_owner.current();
+        assert!(!new_root.is_cancelled());
+        assert!(!Arc::ptr_eq(&old_commit_lock, &new_commit_lock));
+    }
+
+    #[test]
+    fn lifecycle_owner_drop_cancels_the_session_hook_scope() {
+        let owner = SessionToolHookGeneration::new();
+        let (root, _) = owner.current();
+        drop(owner);
+        assert!(root.is_cancelled());
     }
 }
 
@@ -1118,10 +1596,12 @@ pub(crate) struct ModelRuntime {
     /// carrying a previous conversation's misses into a fresh one would report
     /// faults against a prefix that no longer exists.
     pub(crate) prompt_cache_ledger:
-        tokio::sync::Mutex<cost::prompt_cache_ledger::PromptCacheLedger>,
+        tokio::sync::Mutex<super::prompt_cache_impl::PromptCacheDiagnostics>,
+    pub(crate) prompt_cache_capture: llm_runtime::prompt_cache::RequestCapture,
     /// Live main-loop effort. Unlike `config.effort`, this can change through
     /// stream-json control requests and in-place resume.
     pub(crate) current_effort: std::sync::RwLock<Option<String>>,
+    pub(crate) ultracode_enabled: std::sync::atomic::AtomicBool,
     /// Provider-neutral live reasoning selection for subsequent requests.
     pub(crate) current_reasoning_selection:
         std::sync::RwLock<lingxi_core::host::ReasoningSelection>,
@@ -1146,6 +1626,8 @@ pub(crate) struct ModelRuntime {
     /// most ONCE per session — matching the binary, where the latch makes the
     /// `mainLoopModel` override sticky.
     pub(crate) refusal_cascade: Mutex<lingxi_core::host::refusal_driver::RefusalCascadeState>,
+    pub(crate) refusal_selection:
+        std::sync::Mutex<lingxi_core::host::refusal_state::ModelSelection>,
 
     /// Cost tracker wired by [`Self::with_cost_tracker`] (M6-06). `None`
     /// when not configured — `snapshot_cost` then falls back to the M5-10
@@ -1233,18 +1715,22 @@ impl ModelRuntime {
         current_effort: Option<String>,
         current_reasoning_selection: lingxi_core::host::ReasoningSelection,
         current_effort_explicit: bool,
+        ultracode: bool,
     ) -> Self {
         Self {
             prompt_cache_ledger: tokio::sync::Mutex::new(
-                cost::prompt_cache_ledger::PromptCacheLedger::new(),
+                super::prompt_cache_impl::PromptCacheDiagnostics::default(),
             ),
+            prompt_cache_capture: llm_runtime::prompt_cache::RequestCapture::default(),
             current_effort: std::sync::RwLock::new(current_effort),
+            ultracode_enabled: std::sync::atomic::AtomicBool::new(ultracode),
             current_reasoning_selection: std::sync::RwLock::new(current_reasoning_selection),
             current_effort_explicit: std::sync::atomic::AtomicBool::new(current_effort_explicit),
             current_effort_from_resume: std::sync::atomic::AtomicBool::new(false),
             refusal_cascade: Mutex::new(
                 lingxi_core::host::refusal_driver::RefusalCascadeState::default(),
             ),
+            refusal_selection: Default::default(),
             cost_tracker: None,
             loop_usage: None,
             observer_pairings: None,
@@ -1378,65 +1864,6 @@ impl Drop for SessionMemoryInFlightReset {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct BoundedUtf8Read {
-    pub(super) content: String,
-    pub(super) truncated: bool,
-}
-
-/// Read at most `max_bytes` without allocating for the complete file, plus one
-/// look-ahead byte so the caller can distinguish an exact-fit file from a
-/// truncated prefix. Invalid UTF-8 in the retained prefix remains an error,
-/// matching `read_to_string`; only an incomplete scalar at a bounded-read edge
-/// is discarded.
-pub(super) async fn read_utf8_prefix(
-    path: &std::path::Path,
-    max_bytes: usize,
-    max_chars: usize,
-) -> std::io::Result<BoundedUtf8Read> {
-    use tokio::io::AsyncReadExt as _;
-
-    let file = tokio::fs::File::open(path).await?;
-    let read_limit = max_bytes.saturating_add(1);
-    let mut bytes = Vec::with_capacity(read_limit.min(64 * 1024));
-    file.take(u64::try_from(read_limit).unwrap_or(u64::MAX))
-        .read_to_end(&mut bytes)
-        .await?;
-    let mut truncated = bytes.len() > max_bytes;
-    bytes.truncate(max_bytes);
-    let mut text = match std::str::from_utf8(&bytes) {
-        Ok(text) => text.to_string(),
-        Err(error) if error.error_len().is_none() => {
-            truncated = true;
-            bytes.truncate(error.valid_up_to());
-            String::from_utf8(bytes)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
-        }
-        Err(error) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
-    };
-    // Claude's limit is JavaScript `String.length` (UTF-16 code units), not
-    // Rust scalar count. Never split a scalar, and count astral characters as
-    // two units just like the model-facing implementation.
-    let mut utf16_units = 0usize;
-    let mut truncate_at = None;
-    for (byte_index, ch) in text.char_indices() {
-        let units = ch.len_utf16();
-        if utf16_units.saturating_add(units) > max_chars {
-            truncate_at = Some(byte_index);
-            break;
-        }
-        utf16_units = utf16_units.saturating_add(units);
-    }
-    if let Some(byte_index) = truncate_at {
-        text.truncate(byte_index);
-        truncated = true;
-    }
-    Ok(BoundedUtf8Read {
-        content: text,
-        truncated,
-    })
-}
-
 /// Model-visible body for Claude Code's `compact_file_reference` attachment.
 ///
 /// Byte-exact with the 2.1.246 attachment renderer (`F7r`) after substituting
@@ -1535,19 +1962,4 @@ mod session_switch_supervisor_tests {
         assert!(errors.is_empty());
         assert!(supervisor.claim().is_err(), "shutdown closes admission");
     }
-}
-
-#[derive(Default)]
-pub(crate) struct ModPromptAttachmentCache {
-    pub(crate) generation: u64,
-    /// Claude Code keys attachment answers by attachment UUID. The outgoing
-    /// message ID is the stable identity for this runtime's retry snapshots.
-    pub(crate) answers: std::collections::HashMap<
-        MessageId,
-        (
-            lingxi_core::types::utf16_json::Utf16JsonProjection,
-            (u64, u64),
-            Option<Vec<u16>>,
-        ),
-    >,
 }

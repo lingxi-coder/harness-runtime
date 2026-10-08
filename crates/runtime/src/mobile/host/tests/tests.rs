@@ -3,6 +3,8 @@ include!("../permission_preference_tests.rs");
 include!("../model_preference_tests.rs");
 include!("../provider_region_tests.rs");
 include!("../reasoning_preference_tests.rs");
+#[path = "bash_precommit_wiring_tests.rs"]
+mod bash_precommit_wiring_tests;
 #[path = "device_tools_tests.rs"]
 mod device_tools_tests;
 use std::collections::HashMap;
@@ -177,7 +179,7 @@ async fn session_agent_helpers_find_nested_workflow_transcripts() {
             "message": lingxi_core::types::ConversationMessage::Assistant {
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
-                    text: "nested child".to_string(),
+                    text: "nested child".to_string(), citations: None,
                 }],
                 stop_reason: None,
             }
@@ -205,14 +207,14 @@ fn session_agent_transcript_revision_advances_for_hidden_compact_record() {
     let visible = lingxi_core::types::ConversationMessage::Assistant {
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
-            text: "visible".to_string(),
+            text: "visible".to_string(), citations: None,
         }],
         stop_reason: None,
     };
     let compact = lingxi_core::types::ConversationMessage::User {
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
-            text: "replacement summary".to_string(),
+            text: "replacement summary".to_string(), citations: None,
         }],
         is_meta: false,
         is_compact_summary: true,
@@ -232,6 +234,71 @@ fn session_agent_transcript_revision_advances_for_hidden_compact_record() {
 }
 
 #[test]
+fn main_session_agent_snapshot_joins_outer_uuids_to_stable_index_sidecar() {
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
+
+    let first_id = MessageId::new();
+    let api_row = lingxi_core::host::ServerFallbackApiErrorRow::new(
+        "declined fallback",
+        "2026-10-04T00:00:00.000Z".into(),
+    );
+    let first_message = ConversationMessage::Assistant {
+        id: first_id,
+        content: vec![ContentBlock::Text {
+            text: "kept main row".into(), citations: None,
+        }],
+        stop_reason: Some("end_turn".into()),
+    };
+    let first_uuid = first_id.as_uuid().to_string();
+    let api_uuid = api_row.uuid.as_uuid().to_string();
+    let raw = [
+        serde_json::json!({
+            "type":"assistant", "uuid":first_uuid, "message":first_message
+        }),
+        serde_json::json!({
+            "type":"attachment", "uuid":first_uuid,
+            "message":first_message, "attachment":{"type":"test"}
+        }),
+        serde_json::to_value(&api_row).unwrap(),
+    ]
+    .iter()
+    .map(|row| serde_json::to_string(row).unwrap())
+    .collect::<Vec<_>>()
+    .join("\n");
+    let raw = format!("{raw}\n");
+    let identities = session::jsonl::SessionMessageIdentitySnapshot {
+        by_uuid: HashMap::from([(first_uuid.clone(), 2), (api_uuid.clone(), 5)]),
+        next_message_index: 6,
+    };
+
+    let rows = super::parse_main_session_agent_message_rows(raw.as_bytes(), &identities).unwrap();
+    assert_eq!(
+        rows.len(),
+        2,
+        "attachment sidecar is not a duplicate message row"
+    );
+    assert_eq!(rows[0].message_uuid, first_uuid);
+    assert_eq!(rows[0].message_index, 2);
+    assert_eq!(rows[1].message_uuid, api_uuid);
+    assert_eq!(
+        rows[1].message_index, 5,
+        "deleted indices are not renumbered"
+    );
+    let decoded_api_error: lingxi_core::host::ServerFallbackApiErrorRow =
+        serde_json::from_str(rows[1].api_error_json.as_deref().unwrap()).unwrap();
+    assert_eq!(decoded_api_error, api_row);
+    assert_eq!(identities.next_message_index, 6);
+
+    let missing_identity = session::jsonl::SessionMessageIdentitySnapshot {
+        by_uuid: HashMap::new(),
+        next_message_index: 6,
+    };
+    let error = super::parse_main_session_agent_message_rows(raw.as_bytes(), &missing_identity)
+        .expect_err("a missing main-row identity must not be inferred from visible order");
+    assert!(error.contains("stable identity index"));
+}
+
+#[test]
 fn session_agent_transcript_event_is_dropped_after_session_switch() {
     let requested_session_id = lingxi_core::types::SessionId::new();
     let current_session_id = lingxi_core::types::SessionId::new();
@@ -242,6 +309,7 @@ fn session_agent_transcript_event_is_dropped_after_session_switch() {
         "agent:test".to_string(),
         Vec::new(),
         0,
+        0,
     )
     .is_none());
 
@@ -250,6 +318,7 @@ fn session_agent_transcript_event_is_dropped_after_session_switch() {
         requested_session_id,
         "agent:test".to_string(),
         Vec::new(),
+        0,
         7,
     )
     .expect("same-session transcript event");
@@ -288,7 +357,7 @@ fn session_agent_index_excludes_hidden_transcript_records() {
     let hidden_meta = lingxi_core::types::ConversationMessage::User {
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
-            text: "<runtime-reminder>internal</runtime-reminder>".to_string(),
+            text: "<runtime-reminder>internal</runtime-reminder>".to_string(), citations: None,
         }],
         is_meta: true,
         is_compact_summary: false,
@@ -361,7 +430,7 @@ async fn session_agent_observer_binds_metadata_at_allocate_time() {
             message: lingxi_core::types::ConversationMessage::Assistant {
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
-                    text: "working".to_string(),
+                    text: "working".to_string(), citations: None,
                 }],
                 stop_reason: None,
             },
@@ -391,10 +460,10 @@ async fn session_agent_observer_binds_metadata_at_allocate_time() {
     )));
     assert!(events.iter().any(|event| matches!(
         event,
-        ClientEvent::SessionAgentMessage { session_id, agent_id: event_agent_id, message_index, .. }
+        ClientEvent::SessionAgentMessage { session_id, agent_id: event_agent_id, row }
             if session_id == "session-a"
                 && event_agent_id == &agent_id.to_string()
-                && *message_index == 0
+                && row.message_index == 0
     )));
     assert!(events.iter().any(|event| matches!(
         event,
@@ -446,6 +515,7 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
                 subtype: Some("agent_idle".to_string()),
                 content: "idle".to_string(),
                 compact_metadata: None,
+                model_fallback: None,
                 refusal_fallback: None,
             },
         })
@@ -477,7 +547,7 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
             message: lingxi_core::types::ConversationMessage::User {
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
-                    text: "follow-up".to_string(),
+                    text: "follow-up".to_string(), citations: None,
                 }],
                 is_meta: true,
                 is_compact_summary: false,
@@ -505,7 +575,7 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
             message: lingxi_core::types::ConversationMessage::Assistant {
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
-                    text: "resumed".to_string(),
+                    text: "resumed".to_string(), citations: None,
                 }],
                 stop_reason: None,
             },
@@ -516,7 +586,10 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
     assert!(matches!(
         &events[2],
         ClientEvent::SessionAgentMessage {
-            message_index: 3,
+            row: client::protocol::listings::SessionAgentMessageRowDto {
+                message_index: 3,
+                ..
+            },
             ..
         }
     ));
@@ -524,6 +597,86 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
         &events[3],
         ClientEvent::SessionAgentUpdated { agent, .. } if agent.status == "running"
     ));
+}
+
+#[tokio::test]
+async fn session_agent_fallback_row_keeps_envelope_and_tombstone_leaves_index_gap() {
+    let listener = Arc::new(FakeListener::default());
+    let observer = MobileSessionAgentObserver::new(
+        ListenerSink::arc(listener.clone()),
+        Arc::new(std::sync::Mutex::new("session-a".to_string())),
+    );
+    let agent_id = lingxi_core::types::AgentId::new();
+    observer
+        .on_event(SubagentObservation::Allocated {
+            agent_id,
+            agent_type: "researcher".into(),
+            name: Some("Research".into()),
+            model: "test-model".into(),
+            model_profile: None,
+            persistent: true,
+            initial_message_index: 0,
+            origin_session_id: None,
+        })
+        .await;
+    let mut api_error = lingxi_core::host::ServerFallbackApiErrorRow::new(
+        "fallback declined",
+        "2026-10-04T00:00:00.000Z".into(),
+    );
+    api_error.set_refusal(
+        Some("request-id".into()),
+        serde_json::json!({"type":"refusal","category":"safety"}),
+    );
+    observer
+        .on_event(SubagentObservation::ServerFallbackApiErrorRow {
+            agent_id,
+            row: api_error.clone(),
+            message_index: 0,
+        })
+        .await;
+    observer
+        .on_event(SubagentObservation::ServerFallbackTombstone {
+            agent_id,
+            message: lingxi_core::host::ServerFallbackTombstoneMessage {
+                uuid: api_error.uuid,
+                message_type: "assistant".into(),
+                timestamp: api_error.timestamp.clone(),
+                request_id: api_error.request_id.clone(),
+                request_ref: None,
+                provider_message_id: Some(api_error.message.id.as_uuid().to_string()),
+                model: Some(api_error.message.model.clone()),
+                stop_reason: Some(api_error.message.stop_reason.clone()),
+                stop_details: api_error.message.stop_details.clone(),
+                usage: Some(api_error.message.usage.clone()),
+                content: api_error.message.content.clone(),
+                is_api_error_message: Some(true),
+                supersedes_uuids: None,
+            },
+            display_only: true,
+        })
+        .await;
+
+    let events = listener.received.lock().await.clone();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::SessionAgentMessage { row, .. }
+            if row.message_index == 0
+                && row.message_uuid == api_error.uuid.as_uuid().to_string()
+                && row.api_error_json.as_deref().is_some_and(|json| {
+                    serde_json::from_str::<serde_json::Value>(json)
+                        .is_ok_and(|value| value["requestId"] == "request-id"
+                            && value["message"]["stop_details"]["category"] == "safety")
+                })
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::SessionAgentTombstone { message_uuid, display_only: true, .. }
+            if message_uuid == &api_error.uuid.as_uuid().to_string()
+    )));
+    let cache = observer.transcript_cache.lock().await;
+    let snapshot = &cache[&agent_id.to_string()];
+    assert!(snapshot.rows.is_empty());
+    assert_eq!(snapshot.next_message_index, 1);
 }
 
 #[tokio::test]
@@ -1776,13 +1929,13 @@ async fn mobile_boot_materializes_the_builtin_bundle() {
         .get()
         .expect("mobile subagent skill-preload cell must be filled");
     let preloaded = agent_skill_loader
-        .resolve_and_load("frontend-qa", "lingxi-local-app:verifier", None)
+        .resolve_and_load("frontend-qa", "lingxi-local-app:verifier", None, None)
         .await
         .expect("checked skill preload")
         .expect("Plugin agent bare skill must resolve through its namespace");
     assert!(matches!(
         preloaded.content.as_slice(),
-        [lingxi_core::types::ContentBlock::Text { text }]
+        [lingxi_core::types::ContentBlock::Text { text, .. }]
             if text.contains("# Frontend QA")
                 && text.contains("Verify the running app, not only the build output.")
     ));
@@ -2608,6 +2761,8 @@ async fn build_mobile_with_injected_memory_reaches_system_prompt() {
     let memory_path = cfg.cwd.join("LINGXI.md");
     let memory_body = "PROJECT MEMORY: always be terse.";
     let memory_file = orchestrator::prompt::MemoryFile {
+        parent: None,
+        source_content: None,
         path: memory_path.clone(),
         body: memory_body.to_string(),
         is_local_override: false,
@@ -2629,7 +2784,7 @@ async fn build_mobile_with_injected_memory_reaches_system_prompt() {
         .await
         .expect("build_mobile with an injected memory provider must succeed");
 
-    // R-P1: claudeMd lives in the leading additional-context `<system-reminder>`
+    // R-P1: instructions lives in the leading additional-context `<system-reminder>`
     // meta now (same `memory_block::format`), NOT the system prompt.
     let ctx = rt
         .orchestrator
@@ -4668,46 +4823,148 @@ fn build_mobile_applies_explicit_workflow_settings_from_user_project_local() {
 
 #[test]
 fn submit_lists_and_loads_nested_workflow_agents() {
+    use futures_util::StreamExt as _;
+    use lingxi_core::host::subagent_spawn::SubagentSpawner as _;
+
+    struct TranscriptModel;
+    #[async_trait::async_trait]
+    impl agent::SubagentApiClient for TranscriptModel {
+        async fn stream(
+            &self,
+            _request: agent::api::SubagentApiRequest,
+        ) -> Result<
+            futures_util::stream::BoxStream<
+                'static,
+                Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+            >,
+            llm_runtime::LlmError,
+        > {
+            let response = llm_runtime::HistoryResponse {
+                id: "nested-workflow-child".into(),
+                model: "claude-sonnet-5".into(),
+                content: vec![llm_runtime::ContentBlock::Text {
+                    text: "nested workflow child".into(),
+                    cache_control: None, citations: None,
+                }],
+                stop_reason: Some("end_turn".into()),
+                stop_details: None,
+                usage: llm_runtime::ExecutionUsage::default(),
+                cost: None,
+                provider_metadata: serde_json::Value::Null,
+            };
+            let events = llm_runtime::stream_accumulator::response_to_stream_events(response);
+            Ok(futures_util::stream::iter(events.into_iter().map(Ok)).boxed())
+        }
+    }
+
+    struct NoToolUse;
+    #[async_trait::async_trait]
+    impl lingxi_core::host::ToolInvoker for NoToolUse {
+        async fn invoke(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+        ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
+            unreachable!("the scripted child response does not call tools")
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+    #[async_trait::async_trait]
+    impl lingxi_core::host::BudgetEnforcerHandle for NoToolUse {
+        async fn check_and_charge(&self, _: u64) -> Result<(), lingxi_core::host::BudgetError> {
+            Ok(())
+        }
+
+        async fn snapshot_total_nano_usd(&self) -> u64 {
+            0
+        }
+    }
+
     let tmp = tempfile::tempdir().expect("tempdir");
     let (handle, listener) = build_submit_handle(tmp.path());
 
     handle.runtime().block_on(async {
         let session_id = handle.inner.orchestrator.current_session_id().await;
-        let dir = orchestrator::transcript_paths::subagents_dir(
+        let subagents_dir = orchestrator::transcript_paths::subagents_dir(
             &handle.lingxi_home,
             &handle.session_cwd,
             &session_id.as_uuid().to_string(),
-        )
-        .join("workflows")
-        .join("wf_nested");
+        );
+        let dir = subagents_dir.join("workflows").join("wf_nested");
         tokio::fs::create_dir_all(&dir)
             .await
             .expect("create nested workflow dir");
-        let expected_agent_id = lingxi_core::types::AgentId::new().to_string();
+
+        let route_context: Arc<dyn agent::model_resolution::ModelResolutionContextProvider> =
+            Arc::new(|model: &str, profile: Option<&str>| {
+                Ok(agent::model_resolution::ModelResolutionContext {
+                    route: agent::model_resolution::ModelRouteFacts {
+                        model: model.to_string(),
+                        profile: profile.map(str::to_owned),
+                        provider: Some(agent::model_resolution::ModelProviderKind::FirstParty),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+            });
+        let transcript_fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+            platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
+        );
+        let spawner = agent::PoolSubagentSpawner::new(Arc::new(agent::StateMachinePool::new(
+            Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+            2,
+        )))
+        .with_api_client(Arc::new(TranscriptModel))
+        .with_default_model("claude-sonnet-5")
+        .with_model_resolution_context_provider(route_context)
+        .with_hook_context(session_id, tmp.path().to_path_buf(), Some(subagents_dir))
+        .with_transcript_fs(transcript_fs)
+        .with_session_interactive(false);
+        let result = agent::with_transcript_subdir_override(Some(dir.clone()), async {
+            spawner
+                .spawn(
+                    lingxi_core::host::SubagentSpawnRequest {
+                        subagent_type: agent::builtins::WORKFLOW_SUBAGENT_TYPE.into(),
+                        prompt: "Nested workflow child".into(),
+                        name: Some("wf child".into()),
+                        origin_session_id: Some(session_id),
+                        ..Default::default()
+                    },
+                    lingxi_core::host::SubagentInheritance {
+                        tool_invoker: Arc::new(NoToolUse),
+                        budget: Arc::new(NoToolUse),
+                    },
+                )
+                .await
+        })
+        .await
+        .expect("run nested workflow child through the production Agent writer");
+        let expected_agent_id = match result {
+            lingxi_core::host::SubagentResult::Completed { agent_id, .. } => agent_id.to_string(),
+            other => panic!("nested workflow child did not complete: {other:?}"),
+        };
         let transcript_path = dir.join(format!("agent-{expected_agent_id}.jsonl"));
-        let body = [
-            serde_json::to_string(&serde_json::json!({
-                "agent_name": "wf child",
-                "agent_type": "workflow-subagent",
-                "status": "running"
-            }))
-            .unwrap(),
-            serde_json::to_string(&serde_json::json!({
-                "message": lingxi_core::types::ConversationMessage::Assistant {
-                    id: lingxi_core::types::MessageId::new(),
-                    content: vec![lingxi_core::types::ContentBlock::Text {
-                        text: "nested workflow child".to_string(),
-                    }],
-                    stop_reason: None,
-                }
-            }))
-            .unwrap(),
-        ]
-        .join("\n")
-            + "\n";
-        tokio::fs::write(&transcript_path, body)
+        let transcript = tokio::fs::read_to_string(&transcript_path)
             .await
-            .expect("write nested transcript");
+            .expect("production Agent writer creates the nested transcript");
+        let persisted_indexes = transcript
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|row| row.get("message_index").and_then(serde_json::Value::as_u64))
+            .collect::<Vec<_>>();
+        assert_eq!(persisted_indexes, vec![0, 1]);
+        let metadata_path = std::path::PathBuf::from(format!("{}.meta", transcript_path.display()));
+        let metadata: serde_json::Value = serde_json::from_slice(
+            &tokio::fs::read(&metadata_path)
+                .await
+                .expect("read writer high-water sidecar"),
+        )
+        .expect("parse writer high-water sidecar");
+        assert_eq!(metadata["next_message_index"], 2);
 
         handle
             .submit(ClientCommand::ListSessionAgents)
@@ -4727,18 +4984,36 @@ fn submit_lists_and_loads_nested_workflow_agents() {
             .await
             .expect("load nested session agent transcript");
         let loaded = listener.received.lock().await.clone();
-        assert!(loaded.iter().any(|event| matches!(
-            event,
-            Ev::SessionAgentTranscript { agent_id, messages, .. }
-                if agent_id == &expected_agent_id
-                    && messages.iter().any(|message| message.blocks.iter().any(|block| {
-                        matches!(
-                            block,
-                            client::protocol::message::MessageBlockDto::Text { text }
-                                if text.contains("nested workflow child")
-                        )
-                    }))
-        )));
+        let (messages, next_message_index) = loaded
+            .iter()
+            .find_map(|event| match event {
+                Ev::SessionAgentTranscript {
+                    agent_id,
+                    messages,
+                    next_message_index,
+                    ..
+                } if agent_id == &expected_agent_id => Some((messages, next_message_index)),
+                _ => None,
+            })
+            .expect("nested session-agent transcript event");
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.message_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1],
+            "loaded rows retain the production writer's stable stream indices"
+        );
+        assert_eq!(*next_message_index, 2);
+        assert!(messages
+            .iter()
+            .any(|message| message.message.blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    client::protocol::message::MessageBlockDto::Text { text }
+                        if text.contains("nested workflow child")
+                )
+            })));
     });
 }
 
@@ -6215,6 +6490,63 @@ async fn lifecycle_listener_drops_unowned_live_payloads_but_forwards_questions()
 }
 
 #[tokio::test]
+async fn late_connection_question_does_not_undo_a_paused_checkpoint() {
+    for quiescing in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::mobile::turn_durability::DurableTurnStore::new(
+            temp.path().join("turns"),
+        ));
+        store
+            .begin("session-a", 12, "hello".into(), None, vec![])
+            .unwrap();
+        store
+            .transition(
+                "session-a",
+                12,
+                TurnRecoveryStateDto::PausedRecoverable,
+                true,
+                Some("background_time_expired".into()),
+            )
+            .unwrap();
+        let turn = Arc::new(super::ActiveTurn::new_owned(
+            Some(12),
+            "session-a".into(),
+            1,
+        ));
+        if quiescing {
+            turn.request_quiesce();
+        }
+        let active = Arc::new(tokio::sync::Mutex::new(Some(turn)));
+        let inner = Arc::new(FakeListener::default());
+        let listener =
+            super::TurnLifecycleListener::new_durable(inner.clone(), active, store.clone());
+        listener
+            .on_event(Ev::AskUserQuestion {
+                request: client::protocol::ask_user_question::AskUserQuestionRequestDto {
+                    request_id: 7,
+                    questions: vec![],
+                    timeout_secs: None,
+                },
+            })
+            .await;
+        let checkpoint = store.load("session-a", 12).unwrap();
+        assert_eq!(checkpoint.state, TurnRecoveryStateDto::PausedRecoverable);
+        assert_eq!(
+            checkpoint.reason.as_deref(),
+            Some("background_time_expired")
+        );
+        assert!(checkpoint.safe_to_resume);
+        let events = inner.received.lock().await;
+        assert!(events.iter().any(
+            |event| matches!(event, Ev::AskUserQuestion { request } if request.request_id == 7)
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Ev::TurnRecoveryState { .. })));
+    }
+}
+
+#[tokio::test]
 async fn lifecycle_listener_emits_raw_event_before_replay_ack() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = Arc::new(crate::mobile::turn_durability::DurableTurnStore::new(
@@ -6657,6 +6989,46 @@ fn submit_question_answer_bypasses_a_held_transition_lock() {
             event,
             ClientEvent::AskUserQuestionResolved { request_id: 1 }
         )));
+    });
+}
+
+/// Mod UI control responses are session-bound but not turn-owned. They must
+/// remain correlated and answerable while an unrelated turn holds the normal
+/// command transition lock.
+#[test]
+fn submit_mod_ui_control_bypasses_turn_transition_and_returns_correlated_result() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (handle, listener) = build_submit_handle(tmp.path());
+
+    handle.runtime().block_on(async {
+        let _transition = handle.loop_transition.lock().await;
+        *handle.active_cancel.lock().await = Some(Arc::new(super::ActiveTurn::new(None)));
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            handle.submit(ClientCommand::UiClientModule {
+                request_id: "module-while-turn-active".into(),
+                plugin: "uninstalled-plugin".into(),
+            }),
+        )
+        .await
+        .expect("UI control must not wait on an unrelated turn transition")
+        .expect("UI control command is acknowledged through its response event");
+
+        let events = listener.received.lock().await;
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ClientEvent::UiControlResult {
+                    request_id,
+                    response_json,
+                    error,
+                    ..
+                } if request_id == "module-while-turn-active"
+                    && (response_json.is_some() || error.is_some())
+            )),
+            "the current handle must answer the correlated UI request: {events:?}"
+        );
     });
 }
 
@@ -10191,6 +10563,143 @@ fn create_app_accepts_shell_and_rejects_scaffolded_mode() {
         assert!(
             message.contains("shell"),
             "the rejection must explain the shell-only contract, got {message}"
+        );
+    });
+}
+
+#[test]
+fn mobile_handback_admission_wakes_a_real_model_turn_with_peer_meta_and_stable_id() {
+    use crate::mobile::test_support::new_engine_with_streaming;
+    use lingxi_core::host::handback::*;
+    use lingxi_core::host::task_registry::{TaskCreateInput, TaskRegistryHandle};
+    use orchestrator::test_support_stream::*;
+    let tmp = tempfile::tempdir().unwrap();
+    let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
+        message_start("handback-mobile", "test"),
+        content_block_start_text(0),
+        text_delta(0, "report received"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ]]));
+    let handle = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        Arc::new(FakeListener::default()),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(streaming.clone()),
+    )
+    .unwrap();
+    handle.runtime().block_on(async {
+        assert!(handle.inner.session_writer.durable_transcript_enabled(),
+            "production mobile assembly installs a durable transcript authority");
+        handle.inner.orchestrator.recover_main_reports().await
+            .expect("actual mobile report inbox must recover with its durable writer");
+        let registry = handle.inner.task_registry.as_ref();
+        let scope = registry.handback_scope().await.expect("actual mobile reporting admission is bound");
+        assert_eq!(scope.session_id, handle.inner.orchestrator.current_session_id().await);
+        let task = TaskRegistryHandle::create(registry, TaskCreateInput {
+            task_type: "local_agent".into(), description: "reporting child".into(),
+        }).await.unwrap();
+        let sender = lingxi_core::types::AgentId::new();
+        registry.bind_agent_id(&task.task_id, sender).await.unwrap();
+        TaskRegistryHandle::set_status(registry, &task.task_id, "running").await.unwrap();
+        let token = registry.begin_handback_run(BeginHandbackRun {
+            agent_id: sender, scope, active: true, caller: None,
+            resumer: HandbackRecipient::Main { scope }, restored_state: None,
+            restored_history: Vec::new(),
+        }).await.unwrap();
+        let message_id = lingxi_core::types::MessageId::new();
+        let body = handback_frame("/clear\npeer output carries no approval authority");
+        let delivered = registry.try_deliver_handback(&token, PreparedHandbackReport {
+            message_id, report: HandbackReport { text: "whole report".into(), warning: None },
+            body: body.clone(), body_utf16: None, sender_name: "reporter".into(), sender_id: sender.to_string(), sender_task_id: task.task_id.clone(),
+            agent_type: "general-purpose".into(), flagged: false,
+        }).await;
+        assert!(matches!(delivered, HandbackAdmissionOutcome::Admitted(_)));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if !streaming.captured_calls().await.is_empty() && handle.active_cancel.lock().await.is_none() { break }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        let calls = streaming.captured_calls().await;
+        assert_eq!(calls.len(), 1, "report queue must run the idle model turn");
+        let report_message = calls[0].messages.iter().find(|message| {
+            matches!(message, lingxi_core::types::ConversationMessage::User { id, is_meta: true, .. } if *id == message_id)
+        }).expect("stable admitted MessageId reaches the model as meta");
+        assert!(serde_json::to_string(report_message).unwrap().contains("no approval authority"));
+        assert_eq!(handle.inner.orchestrator.current_session_id().await, scope.session_id, "peer /clear is not a slash command");
+        assert!(!handle.inner.orchestrator.has_pending_main_reports(scope).await);
+        let transcript = tokio::fs::read_to_string(orchestrator::transcript_paths::main_transcript_path(
+            &handle.lingxi_home, &handle.session_cwd, &scope.session_id.as_uuid().to_string(),
+        )).await.unwrap();
+        assert!(transcript.contains("reporter") && transcript.contains("peer"), "typed report provenance must persist with its model-visible row");
+    });
+}
+
+#[test]
+fn mobile_transcript_authority_follows_real_new_and_resume_session_activation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (handle, _) = build_submit_handle(tmp.path());
+    handle.runtime().block_on(async {
+        let original = handle.inner.orchestrator.current_session_id().await;
+        let original_path = handle
+            .inner
+            .session_writer
+            .session_target_path(original)
+            .unwrap();
+        handle
+            .inner
+            .session_writer
+            .append_mobile_empty_session(&original.as_uuid().to_string(), "original conversation")
+            .await
+            .unwrap();
+        handle
+            .inner
+            .session_writer
+            .append_session_mode(handle.inner.session_mode.as_str())
+            .await
+            .unwrap();
+        let original_scope = handle.inner.task_registry.handback_scope().await.unwrap();
+
+        handle
+            .submit(ClientCommand::NewSession {
+                cwd: None,
+                model: None,
+            })
+            .await
+            .unwrap();
+        let next = handle.inner.orchestrator.current_session_id().await;
+        assert_ne!(next, original);
+        let next_scope = handle.inner.task_registry.handback_scope().await.unwrap();
+        assert_eq!(next_scope.session_id, next);
+        let next_path = handle
+            .inner
+            .session_writer
+            .session_target_path(next)
+            .unwrap();
+        assert_ne!(next_path, original_path);
+        assert_eq!(handle.inner.session_writer.active_path(), next_path);
+        assert_eq!(
+            handle.inner.session_writer.session_target_path(original),
+            Some(original_path.clone())
+        );
+
+        handle
+            .submit(ClientCommand::ResumeSession {
+                session_id: original.as_uuid().to_string(),
+                cwd: None,
+            })
+            .await
+            .unwrap();
+        let resumed_scope = handle.inner.task_registry.handback_scope().await.unwrap();
+        assert_eq!(resumed_scope.session_id, original);
+        assert!(resumed_scope.activation_epoch > original_scope.activation_epoch);
+        assert_eq!(handle.inner.session_writer.active_path(), original_path);
+        assert_eq!(
+            handle.inner.session_writer.session_target_path(next),
+            Some(next_path)
         );
     });
 }

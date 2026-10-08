@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
 
 /// `TeamFile` — 1:1 with the TS `TeamFile` type (`teamHelpers.ts:64-90`),
 /// typed projection used by readers. Mutations preserve unmodeled metadata
@@ -58,6 +59,9 @@ pub struct TeamMember {
     /// Model id resolved for the member.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub model: Option<String>,
+    /// Configured provider profile serving the resolved member model.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub model_profile: Option<String>,
     /// Join timestamp (Unix milliseconds).
     #[serde(rename = "joinedAt")]
     pub joined_at: u64,
@@ -70,17 +74,14 @@ pub struct TeamMember {
     pub subscriptions: Vec<String>,
 }
 
-/// `sanitizeName` (`teamHelpers.ts:100-102`): replace every non-alphanumeric
-/// char with `-` and lowercase.
+/// `sanitizeName` (`teamHelpers.ts:100-102`): replace every non-ASCII
+/// alphanumeric UTF-16 code unit with `-`, then lowercase ASCII letters.
 #[must_use]
 pub fn sanitize_name(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
+    name.encode_utf16()
+        .map(|unit| match u8::try_from(unit) {
+            Ok(byte) if byte.is_ascii_alphanumeric() => char::from(byte).to_ascii_lowercase(),
+            _ => '-',
         })
         .collect()
 }
@@ -100,7 +101,19 @@ pub fn lingxi_home() -> Option<PathBuf> {
 /// `getTeamDir` (`teamHelpers.ts:115-117`): `<lingxi_home>/teams/{sanitize}`.
 #[must_use]
 pub fn team_dir(home: &Path, name: &str) -> PathBuf {
-    home.join("teams").join(sanitize_name(name))
+    normalize_nfc_path(home)
+        .join("teams")
+        .join(sanitize_name(name))
+}
+
+/// Native `oze` NFC-normalizes its resolved config-home before addressing the
+/// teams directory (2.1.289 source bytes `[179346876,179347230)`, SHA-256
+/// `b8b17cee2f781f08b5041a50342e8ec5380c18a4f0acad783a15d239c2cd5b90`).
+/// Preserve non-UTF-8 host paths unchanged; Native config-home values are strings.
+fn normalize_nfc_path(path: &Path) -> PathBuf {
+    path.to_str()
+        .map(|value| PathBuf::from(value.nfc().collect::<String>()))
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
 /// `getTeamFilePath` (`teamHelpers.ts:122-124`):
@@ -108,6 +121,36 @@ pub fn team_dir(home: &Path, name: &str) -> PathBuf {
 #[must_use]
 pub fn team_file_path(home: &Path, name: &str) -> PathBuf {
     team_dir(home, name).join("config.json")
+}
+
+/// Host adapter for actual teammate query/stop/failure lifecycle boundaries.
+/// The config root is captured at construction so later process-environment
+/// changes cannot redirect activity updates to another team's storage.
+#[derive(Debug, Clone)]
+pub struct TeamFileMemberActivity {
+    home: PathBuf,
+}
+
+impl TeamFileMemberActivity {
+    #[must_use]
+    pub fn new(home: impl Into<PathBuf>) -> Self {
+        Self { home: home.into() }
+    }
+}
+
+#[async_trait::async_trait]
+impl lingxi_core::host::team_registry::TeamMemberActivityHandle for TeamFileMemberActivity {
+    async fn set_active(
+        &self,
+        team_name: &str,
+        member_name: &str,
+        active: bool,
+    ) -> Result<(), String> {
+        set_team_member_active(&self.home, team_name, member_name, active)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
 }
 
 /// `getTasksDir` analog: `<lingxi_home>/tasks/{sanitize}`.
@@ -232,6 +275,51 @@ pub async fn remove_team_member(
     .await
 }
 
+/// Persist the Native team member `isActive` transition for the first member
+/// whose display `name` matches exactly. The complete config is changed under
+/// the same cross-process lock used by membership writers, and the JSON-level
+/// update preserves every field this crate does not model.
+///
+/// Returns `true` only when a matching member's value changed. A missing team,
+/// malformed member row, missing member, or an already-equal value is a no-op.
+pub async fn set_team_member_active(
+    home: &Path,
+    team_name: &str,
+    member_name: &str,
+    active: bool,
+) -> std::io::Result<bool> {
+    // Unlike team creation, an activity notification must never materialize a
+    // missing team directory or config file.
+    match std::fs::metadata(team_file_path(home, team_name)) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    update_team_file(home, team_name, |current| {
+        let Some(members) = current
+            .as_mut()
+            .and_then(|value| value.get_mut("members"))
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            return Ok(false);
+        };
+        let Some(member) = members.iter_mut().find(|member| {
+            member.get("name").and_then(serde_json::Value::as_str) == Some(member_name)
+        }) else {
+            return Ok(false);
+        };
+        let Some(object) = member.as_object_mut() else {
+            return Ok(false);
+        };
+        if object.get("isActive").and_then(serde_json::Value::as_bool) == Some(active) {
+            return Ok(false);
+        }
+        object.insert("isActive".into(), active.into());
+        Ok(true)
+    })
+    .await
+}
+
 /// Unix-millisecond timestamp (TS `Date.now()`).
 #[must_use]
 pub fn now_unix_millis() -> u64 {
@@ -244,6 +332,7 @@ pub fn now_unix_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lingxi_core::host::team_registry::TeamMemberActivityHandle as _;
 
     #[test]
     fn sanitize_matches_ts() {
@@ -251,6 +340,9 @@ mod tests {
         assert_eq!(sanitize_name("My_Team!"), "my-team-");
         assert_eq!(sanitize_name("ABC123"), "abc123");
         assert_eq!(sanitize_name("a/b\\c"), "a-b-c");
+        // JavaScript's global regex replaces UTF-16 code units, so an astral
+        // character contributes two replacements rather than one scalar.
+        assert_eq!(sanitize_name("x😀y"), "x--y");
     }
 
     #[test]
@@ -263,6 +355,39 @@ mod tests {
         assert_eq!(
             task_dir(&home, "Alpha Team"),
             PathBuf::from("/home/u/.lingxi/tasks/alpha-team")
+        );
+    }
+
+    #[tokio::test]
+    async fn team_file_write_normalizes_decomposed_home_and_supplementary_team_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let decomposed_home = tmp.path().join("config-cafe\u{301}");
+        let composed_home = tmp.path().join("config-café");
+        let team_name = "Team😀";
+        let expected_path = composed_home
+            .join("teams")
+            .join("team--")
+            .join("config.json");
+
+        assert_eq!(team_file_path(&decomposed_home, team_name), expected_path);
+        assert_eq!(team_file_path(&composed_home, team_name), expected_path);
+
+        let file = TeamFile {
+            name: team_name.into(),
+            description: None,
+            created_at: 1,
+            lead_agent_id: "team-lead@team".into(),
+            lead_session_id: None,
+            members: Vec::new(),
+        };
+        write_team_file(&decomposed_home, team_name, &file)
+            .await
+            .unwrap();
+
+        assert!(expected_path.is_file());
+        assert_eq!(
+            read_team_file(&composed_home, team_name).unwrap().name,
+            team_name
         );
     }
 
@@ -283,6 +408,7 @@ mod tests {
                 name: "team-lead".into(),
                 agent_type: Some("team-lead".into()),
                 model: Some("claude-x".into()),
+                model_profile: None,
                 joined_at: 123,
                 tmux_pane_id: String::new(),
                 cwd: "/work".into(),
@@ -325,6 +451,66 @@ mod tests {
         assert_eq!(remaining["members"].as_array().unwrap().len(), 1);
         assert_eq!(remaining["members"][0]["backendType"], "in-process");
         assert_eq!(remaining["members"][0]["color"], "red");
+    }
+
+    #[tokio::test]
+    async fn active_transition_updates_exact_named_row_and_preserves_unmodeled_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = team_file_path(tmp.path(), "session");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "name": "session",
+                "futureTeamField": {"preserve": true},
+                "members": [
+                    {"agentId":"first@session", "name":"first", "isActive":true, "futureMemberField":[1,2]},
+                    {"agentId":"second@session", "name":"second", "futureMemberField":"untouched"},
+                    {"agentId":"duplicate@session", "name":"second", "isActive":true}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        TeamFileMemberActivity::new(tmp.path())
+            .set_active("session", "second", false)
+            .await
+            .unwrap();
+        assert!(
+            !set_team_member_active(tmp.path(), "session", "second", false)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !set_team_member_active(tmp.path(), "session", "missing", true)
+                .await
+                .unwrap()
+        );
+
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(value["futureTeamField"]["preserve"], true);
+        assert_eq!(value["members"][0]["isActive"], true);
+        assert_eq!(
+            value["members"][0]["futureMemberField"],
+            serde_json::json!([1, 2])
+        );
+        assert_eq!(value["members"][1]["isActive"], false);
+        assert_eq!(value["members"][1]["futureMemberField"], "untouched");
+        assert_eq!(value["members"][2]["isActive"], true);
+    }
+
+    #[tokio::test]
+    async fn activity_update_does_not_create_missing_team_storage() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!team_dir(tmp.path(), "missing").exists());
+        assert!(
+            !set_team_member_active(tmp.path(), "missing", "member", true)
+                .await
+                .unwrap()
+        );
+        assert!(!team_dir(tmp.path(), "missing").exists());
     }
     #[tokio::test]
     async fn transaction_locks_before_reading_the_latest_config() {

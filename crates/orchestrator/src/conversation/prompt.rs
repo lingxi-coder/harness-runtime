@@ -2,6 +2,169 @@
 
 use super::*;
 
+/// Agent state prepared before a resumed session crosses its activation boundary.
+#[derive(Debug)]
+pub(crate) struct PreparedMainThreadAgentRestore {
+    wanted: Option<String>,
+    definition: Option<agent::AgentDefinition>,
+    model_override: Option<agent::model_resolution::ResolvedModelSelection>,
+    hooks_trusted: bool,
+}
+
+fn mod_instruction_files(files: &[crate::prompt::MemoryFile]) -> Vec<serde_json::Value> {
+    files
+        .iter()
+        .filter(|file| crate::prompt::memory_block::is_rendered_into_context(file))
+        .map(|file| {
+            let kind = match file.tier {
+                memory::lingxi_md::LingxiMdTier::Managed => "managed",
+                memory::lingxi_md::LingxiMdTier::User => "user",
+                memory::lingxi_md::LingxiMdTier::Project => "project",
+                memory::lingxi_md::LingxiMdTier::Local => "local",
+            };
+            let mut entry = serde_json::json!({
+                "path": file.path.to_string_lossy(),
+                "kind": kind,
+                "content": file.source_content.as_deref().unwrap_or(&file.body),
+            });
+            if let Some(parent) = &file.parent {
+                entry["parent"] = serde_json::Value::String(parent.to_string_lossy().into_owned());
+            }
+            entry
+        })
+        .collect()
+}
+
+fn projection_string_units(
+    projection: &hooks::mods::ModUtf16ValueProjection,
+    pointer: &str,
+    display: &str,
+) -> Vec<u16> {
+    projection
+        .strings
+        .iter()
+        .find(|sidecar| sidecar.pointer == pointer)
+        .map(|sidecar| sidecar.code_units.clone())
+        .unwrap_or_else(|| display.encode_utf16().collect())
+}
+
+fn projection_prompt_text(
+    projection: &hooks::mods::ModUtf16ValueProjection,
+    pointer: &str,
+    display: &str,
+) -> lingxi_llm_client::providers::anthropic::system_prompt::PromptText {
+    lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(
+        projection_string_units(projection, pointer, display),
+    )
+}
+
+fn prompt_text_sidecar(
+    pointer: String,
+    text: &lingxi_llm_client::providers::anthropic::system_prompt::PromptText,
+) -> Option<hooks::mods::ModUtf16StringSidecar> {
+    String::from_utf16(text.utf16_code_units())
+        .is_err()
+        .then(|| hooks::mods::ModUtf16StringSidecar {
+            pointer,
+            code_units: text.utf16_code_units().to_vec(),
+        })
+}
+
+fn public_prompt_name(
+    name: &lingxi_llm_client::providers::anthropic::system_prompt::PromptText,
+) -> lingxi_llm_client::providers::anthropic::system_prompt::PromptText {
+    lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(
+        name.utf16_code_units()
+            .iter()
+            .copied()
+            .take_while(|unit| *unit != b':' as u16)
+            .collect(),
+    )
+}
+
+fn escape_json_pointer_segment(segment: &str) -> String {
+    segment.replace('~', "~0").replace('/', "~1")
+}
+
+fn prefix_projection_pointer(key: &str, pointer: &str) -> String {
+    format!("/{}{}", escape_json_pointer_segment(key), pointer)
+}
+
+fn projection_pointer_is_member(pointer: &str, key: &str) -> bool {
+    let member = format!("/{}", escape_json_pointer_segment(key));
+    pointer == member || pointer.starts_with(&format!("{member}/"))
+}
+
+fn add_unpaired_prompt_string(
+    sidecars: &mut Vec<hooks::mods::ModUtf16StringSidecar>,
+    pointer: String,
+    code_units: Vec<u16>,
+) {
+    if String::from_utf16(&code_units).is_err() {
+        sidecars.push(hooks::mods::ModUtf16StringSidecar {
+            pointer,
+            code_units,
+        });
+    }
+}
+
+fn render_mod_prompt_context(
+    resolved: &hooks::mods::ModUtf16ValueProjection,
+) -> Option<ConversationMessage> {
+    let blocks = resolved
+        .value
+        .get("blocks")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, block)| {
+            let name = block.get("name")?.as_str()?;
+            let text = block.get("text")?.as_str()?;
+            let mut units = "# ".encode_utf16().collect::<Vec<_>>();
+            units.extend(projection_string_units(
+                resolved,
+                &format!("/blocks/{index}/name"),
+                name,
+            ));
+            units.push(b'\n' as u16);
+            units.extend(projection_string_units(
+                resolved,
+                &format!("/blocks/{index}/text"),
+                text,
+            ));
+            Some(units)
+        })
+        .collect::<Vec<_>>();
+    if blocks.is_empty() {
+        return None;
+    }
+    let mut body_units = Vec::new();
+    for (index, block) in blocks.into_iter().enumerate() {
+        if index > 0 {
+            body_units.push(b'\n' as u16);
+        }
+        body_units.extend(block);
+    }
+    if body_units.is_empty() {
+        return None;
+    }
+    // The six leading spaces are part of the model-visible bytes. Keep this
+    // literal on one line because Rust line continuations strip indentation.
+    let important = format!("      {} attached this context automatically; it isn't part of the user's message. It describes the user's own account and workspace, so they don't need it reported back.", branding::PRODUCT_NAME);
+    let prefix = "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n";
+    let suffix = format!("\n\n{important}\n</system-reminder>\n");
+    let mut exact_units = prefix.encode_utf16().collect::<Vec<_>>();
+    exact_units.extend(body_units);
+    exact_units.extend(suffix.encode_utf16());
+    let content = String::from_utf16_lossy(&exact_units);
+    Some(ConversationMessage::user_meta_js_utf16(
+        MessageId::new(),
+        content,
+        exact_units,
+    ))
+}
+
 fn prompt_tool_descriptions(
     wire_tools: &[serde_json::Value],
 ) -> Vec<lingxi_core::host::PromptToolDescription> {
@@ -29,12 +192,166 @@ fn prompt_tool_descriptions(
 }
 
 fn valid_prompt_snapshot(snapshot: &lingxi_core::host::PromptSnapshot) -> bool {
-    !snapshot.system_prompt.is_empty()
-        && snapshot.system_prompt.iter().all(|part| !part.is_empty())
-        && snapshot.tools.iter().all(|tool| !tool.name.is_empty())
+    !snapshot.system_prompt.is_empty() && snapshot.tools.iter().all(|tool| !tool.name.is_empty())
+}
+
+fn mod_prompt_compose_facts(
+    ctx: &crate::prompt::SystemPromptContext,
+    style: Option<crate::prompt::ActiveOutputStyle<'_>>,
+    surfaces: &[&str],
+) -> serde_json::Value {
+    let lean = lingxi_core::host::model_capabilities::prompt_profile_for(&ctx.model)
+        == lingxi_core::host::model_capabilities::PromptProfile::ClaudeLean;
+    let mut traits = Vec::new();
+    if lean {
+        traits.push("lean");
+    }
+    if ctx.exclude_dynamic_sections {
+        traits.push("sdk-preset");
+    }
+    if !ctx.is_interactive {
+        traits.push("print");
+    }
+    if ctx.skills_available {
+        traits.push("skills");
+    }
+    serde_json::json!({
+        "model":ctx.model,
+        "promptModel":ctx.model,
+        "surfaces":surfaces,
+        "tools":ctx.tool_names,
+        "outputStyle":style.map(|style| serde_json::json!({
+            "name":style.name,
+            "isKeepingCodingInstructions":style.keep_coding_instructions,
+        })),
+        "traits":traits,
+    })
+}
+
+fn mod_prompt_compose_result(
+    sections: &[crate::prompt::PromptSection],
+) -> hooks::mods::ModUtf16ValueProjection {
+    let mut strings = Vec::new();
+    let values = sections
+        .iter()
+        .enumerate()
+        .map(|(index, section)| {
+            let id = section.public_id_prompt();
+            if let Some(units) = section.id_utf16_code_units.as_ref() {
+                let public_units = units
+                    .iter()
+                    .copied()
+                    .take_while(|unit| *unit != b':' as u16)
+                    .collect::<Vec<_>>();
+                add_unpaired_prompt_string(
+                    &mut strings,
+                    format!("/sections/{index}/id"),
+                    public_units,
+                );
+            }
+            if let Some(units) = section.text_utf16_code_units.as_ref() {
+                add_unpaired_prompt_string(
+                    &mut strings,
+                    format!("/sections/{index}/text"),
+                    units.clone(),
+                );
+            }
+            serde_json::json!({
+                "id":id.display_text(),
+                "text":section.text,
+                "scope":if section.scope == crate::prompt::PromptSectionScope::Shared {
+                    "shared"
+                } else {
+                    "session"
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    hooks::mods::ModUtf16ValueProjection {
+        value: serde_json::json!({"sections":values}),
+        strings,
+        keys: Vec::new(),
+    }
+}
+
+fn validate_mod_prompt_compose_facts(
+    facts: &serde_json::Value,
+) -> Result<(), hooks::mods::ModError> {
+    let invalid = || hooks::mods::ModError::Hook("prompt.compose needs valid prompt facts".into());
+    if facts["model"].as_str().is_none_or(str::is_empty)
+        || facts["promptModel"].as_str().is_none_or(str::is_empty)
+        || !facts["tools"].as_array().is_some_and(|tools| {
+            tools
+                .iter()
+                .all(|tool| tool.as_str().is_some_and(|s| !s.is_empty()))
+        })
+        || !facts["surfaces"].as_array().is_some_and(|surfaces| {
+            surfaces.iter().all(|surface| {
+                matches!(
+                    surface.as_str(),
+                    Some("terminal" | "desktop" | "mobile" | "vscode")
+                )
+            })
+        })
+        || !facts["traits"].as_array().is_some_and(|traits| {
+            traits.iter().all(|trait_name| {
+                matches!(
+                    trait_name.as_str(),
+                    Some(
+                        "bare"
+                            | "lean"
+                            | "sdk-preset"
+                            | "teammate"
+                            | "analysis"
+                            | "print"
+                            | "skills"
+                            | "send-user-message"
+                    )
+                )
+            })
+        })
+    {
+        return Err(invalid());
+    }
+    let style = &facts["outputStyle"];
+    if !style.is_null()
+        && (style
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+            || style
+                .get("isKeepingCodingInstructions")
+                .and_then(serde_json::Value::as_bool)
+                .is_none())
+    {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 impl ConversationOrchestrator {
+    pub(crate) fn mod_prompt_surfaces(&self, interactive: bool) -> Vec<&'static str> {
+        let mut surfaces = if self.mobile_runtime_environment.is_some() {
+            if interactive {
+                vec!["mobile"]
+            } else {
+                Vec::new()
+            }
+        } else if let Some(surface) = self.config.mod_render_surface {
+            vec![surface.as_str()]
+        } else if interactive {
+            vec!["terminal"]
+        } else {
+            Vec::new()
+        };
+        for surface in self.mod_surface_roster.surfaces() {
+            let surface = surface.as_str();
+            if !surfaces.contains(&surface) {
+                surfaces.push(surface);
+            }
+        }
+        surfaces
+    }
     /// Assemble the system prompt this orchestrator would send on the next
     /// turn, WITHOUT running a turn (no API call, no message mutation).
     ///
@@ -72,24 +389,28 @@ impl ConversationOrchestrator {
     /// `tool_policy` / `disallowed_tools` narrow the advertised tool pool (claude
     /// `HJ(agentDef,to,!1,!0)`).
     ///
-    /// `model_override` is the agent's frontmatter `model` ALREADY resolved to a
-    /// concrete wire id and gated by the caller (claude-code
+    /// `model_override` pairs the agent's frontmatter `model`, already resolved
+    /// to a concrete wire id, with its selected provider profile. The caller
+    /// gates the override (claude-code
     /// `if(!userSpecifiedModel&&y.model&&y.model!=="inherit"){jb(Zo(y.model))}` —
     /// the `!userSpecifiedModel` / `!=="inherit"` checks live at the composition
-    /// root, which owns `--model`). When `Some`, it replaces the session model
-    /// (profile cleared: agent frontmatter carries a bare id, no provider profile).
+    /// root, which owns `--model`). When `Some`, both route fields are applied
+    /// together. An empty profile remains distinct from an absent profile.
     pub async fn set_main_thread_agent(
         &self,
         agent_type: String,
         system_prompt: Option<String>,
         tool_policy: agent::AgentToolPolicy,
         disallowed_tools: Vec<String>,
-        model_override: Option<String>,
+        model_override: Option<(String, Option<String>)>,
     ) {
-        if let Some(model) = model_override {
-            let mut s = self.session.lock().await;
-            s.model = model;
-            s.model_profile = None;
+        if let Some((model, profile)) = model_override {
+            {
+                let mut s = self.session.lock().await;
+                s.model.clone_from(&model);
+                s.model_profile.clone_from(&profile);
+            }
+            self.refresh_main_loop_model_for_route(&model, profile.as_deref());
         }
         *self.lifecycle_runtime.main_thread_agent.write().await = Some(MainThreadAgentState {
             agent_type,
@@ -127,16 +448,16 @@ impl ConversationOrchestrator {
             .await = Some(agent_id);
     }
 
-    /// Restore the main-thread agent selected by a resumed session. Prefer the
-    /// immutable, integrity-checked transcript snapshot; legacy transcripts
-    /// fall back to the current live catalog by agent type. A missing or
-    /// unresolvable selection explicitly restores default behavior instead of
-    /// retaining state from the session that was previously mounted.
-    pub(crate) async fn restore_main_thread_agent_from_resume(
+    /// Resolve the agent against the target session's route before preparing
+    /// or activating any session-owned state. Keep its complete definition and
+    /// route so the eventual application has no second fallible model lookup.
+    pub(crate) async fn prepare_main_thread_agent_from_resume(
         &self,
         wanted: Option<String>,
         snapshot: Option<serde_json::Value>,
-    ) {
+        target_model: &str,
+        target_profile: Option<&str>,
+    ) -> Result<PreparedMainThreadAgentRestore, agent::model_resolution::ModelResolutionError> {
         let mut resolved = match (wanted.as_deref(), snapshot) {
             (Some(wanted), Some(value)) => serde_json::from_value::<agent::AgentDefinition>(value)
                 .ok()
@@ -160,16 +481,80 @@ impl ConversationOrchestrator {
             }
         }
 
-        match resolved {
+        let mut model_override = None;
+        let mut hooks_trusted = false;
+        if let Some(definition) = resolved.as_ref() {
+            // (cc 2.1.218 `mvo`) ORIGIN TRUST — the RESUME surface. The
+            // resumed `agent-setting` snapshot carries the definition's
+            // `frontmatter_hooks` verbatim, so without this check a
+            // definition whose hooks were correctly REFUSED at `--agent`
+            // time would be silently installed on the next resume of that
+            // session. Evaluated BEFORE the fields are moved below.
+            hooks_trusted = agent::hooks_trust::agent_hooks_origin_trusted(&definition, &self.cwd);
+            // (gap218 #43 / cc 2.1.218 `NQe`) Adopt the resumed agent's
+            // frontmatter `model`, resolved to a wire id — the hot-resume twin
+            // of the composition root's COLD-resume gate. Applied ONLY when the
+            // user did NOT pass `--model` (`apply_resumed_agent_model` is
+            // `!default_model_explicit`, set at the root) AND the agent declares
+            // a concrete model (`AgentModel != Inherit`, oracle `i.model &&
+            // i.model!=="inherit"`); an explicit `--model` is never overridden.
+            // Evaluated BEFORE `definition.*` moves into the call below.
+            model_override = if self.config.apply_resumed_agent_model {
+                match &definition.model {
+                    agent::AgentModel::Alias(spec) | agent::AgentModel::Explicit(spec) => {
+                        let provider = self.model_resolution_context_provider.as_ref().ok_or_else(
+                            || agent::model_resolution::ModelResolutionError::RouteUnavailable {
+                                model: spec.clone(),
+                                profile: target_profile.map(str::to_owned),
+                                reason: "model route resolver is unavailable".into(),
+                            },
+                        )?;
+                        // The saved model may have left the catalog. The
+                        // agent's preference owns the next model selection;
+                        // only its relative aliases need this profile's defaults.
+                        let context = agent::model_resolution::ModelResolutionContext {
+                            route: agent::model_resolution::ModelRouteFacts {
+                                model: target_model.to_owned(),
+                                profile: target_profile.map(str::to_owned),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        };
+                        let selection = agent::model_resolution::resolve_user_model_selection(
+                            spec,
+                            None,
+                            &context,
+                            provider.as_ref(),
+                        )?;
+                        Some(selection)
+                    }
+                    agent::AgentModel::Inherit => None,
+                }
+            } else {
+                None
+            };
+        }
+        Ok(PreparedMainThreadAgentRestore {
+            wanted,
+            definition: resolved,
+            model_override,
+            hooks_trusted,
+        })
+    }
+
+    /// Apply a previously prepared agent after session activation.
+    pub(crate) async fn restore_main_thread_agent_from_resume(
+        &self,
+        prepared: PreparedMainThreadAgentRestore,
+    ) {
+        let PreparedMainThreadAgentRestore {
+            wanted,
+            definition,
+            model_override,
+            hooks_trusted,
+        } = prepared;
+        match definition {
             Some(definition) => {
-                // (cc 2.1.218 `mvo`) ORIGIN TRUST — the RESUME surface. The
-                // resumed `agent-setting` snapshot carries the definition's
-                // `frontmatter_hooks` verbatim, so without this check a
-                // definition whose hooks were correctly REFUSED at `--agent`
-                // time would be silently installed on the next resume of that
-                // session. Evaluated BEFORE the fields are moved below.
-                let hooks_trusted =
-                    agent::hooks_trust::agent_hooks_origin_trusted(&definition, &self.cwd);
                 if !hooks_trusted {
                     agent::hooks_trust::report_untrusted_hooks(
                         &definition,
@@ -178,31 +563,24 @@ impl ConversationOrchestrator {
                         false,
                     );
                 }
-                // (gap218 #43 / cc 2.1.218 `NQe`) Adopt the resumed agent's
-                // frontmatter `model`, resolved to a wire id — the hot-resume twin
-                // of the composition root's COLD-resume gate. Applied ONLY when the
-                // user did NOT pass `--model` (`apply_resumed_agent_model` is
-                // `!default_model_explicit`, set at the root) AND the agent declares
-                // a concrete model (`AgentModel != Inherit`, oracle `i.model &&
-                // i.model!=="inherit"`); an explicit `--model` is never overridden.
-                // `resolve_user_specified_model` is `Zo` (alias → wire id).
-                // Evaluated BEFORE `definition.*` moves into the call below.
-                let model_override = if self.config.apply_resumed_agent_model {
-                    match &definition.model {
-                        agent::AgentModel::Alias(spec) | agent::AgentModel::Explicit(spec) => {
-                            Some(agent::model_resolution::resolve_user_specified_model(spec))
-                        }
-                        agent::AgentModel::Inherit => None,
+                if let Some(selection) = model_override {
+                    {
+                        let mut state = self.session.lock().await;
+                        state.model.clone_from(&selection.model);
+                        state.model_profile.clone_from(&selection.model_profile);
                     }
-                } else {
-                    None
-                };
+                    self.tools
+                        .set_main_loop_model(super::tooling_impl::canonical_main_loop_model(
+                            &selection.model,
+                            Some(&selection.model_resolution_context),
+                        ));
+                }
                 self.set_main_thread_agent(
                     definition.agent_type,
                     definition.system_prompt,
                     definition.tools,
                     definition.disallowed_tools,
-                    model_override,
+                    None,
                 )
                 .await;
                 if hooks_trusted {
@@ -229,6 +607,23 @@ impl ConversationOrchestrator {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) async fn restore_main_thread_agent_for_test(
+        &self,
+        wanted: Option<String>,
+        snapshot: Option<serde_json::Value>,
+    ) -> Result<(), agent::model_resolution::ModelResolutionError> {
+        let (model, profile) = {
+            let state = self.session.lock().await;
+            (state.model.clone(), state.model_profile.clone())
+        };
+        let prepared = self
+            .prepare_main_thread_agent_from_resume(wanted, snapshot, &model, profile.as_deref())
+            .await?;
+        self.restore_main_thread_agent_from_resume(prepared).await;
+        Ok(())
+    }
+
     /// The adopted main-thread agent's `agentType` (claude-code `MB()`), or
     /// `None` when no `--agent` was applied. Threaded into main-thread lifecycle
     /// hook payloads.
@@ -246,20 +641,149 @@ impl ConversationOrchestrator {
     /// adopted main-thread agent's prompt (`mainThreadAgentDefinition`
     /// `.getSystemPrompt()`); else the freshly assembled default.
     pub(crate) async fn effective_system_prompt(&self) -> String {
+        self.effective_system_prompt_parts().await.text
+    }
+
+    /// Preserve the source vector through SDK selection and provider egress.
+    /// Native snapshots the static array before separately appending the
+    /// current query's dynamic system context.
+    pub(crate) async fn provider_system_prompt(
+        &self,
+    ) -> lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput {
         if let Some(custom) = &self.config.system_prompt_override {
-            return custom.clone();
+            *self
+                .prompt_runtime
+                .pending_prompt_source_vector
+                .lock()
+                .await = None;
+            return lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::custom_prompt(
+                lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
+                    custom.clone(),
+                ),
+            );
+        }
+        let prompt = self.effective_system_prompt_parts().await;
+        let system_prompt = match prompt.snapshot_system_prompt.clone() {
+            Some(snapshot) => snapshot,
+            None if !prompt.source_sections.is_empty() => {
+                let (model, profile) = self.current_prompt_route().await;
+                let sections = prompt
+                    .source_sections
+                    .iter()
+                    .map(|section| {
+                        lingxi_llm_client::providers::anthropic::system_prompt::SourceSection {
+                            text: section.text_prompt(),
+                            scope: match section.scope {
+                                crate::prompt::PromptSectionScope::Shared => {
+                                    lingxi_llm_client::providers::anthropic::system_prompt::SectionScope::Shared
+                                }
+                                crate::prompt::PromptSectionScope::Session => {
+                                    lingxi_llm_client::providers::anthropic::system_prompt::SectionScope::Session
+                                }
+                            },
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                self.api
+                    .prompt_snapshot_source_vector(&model, profile.as_deref(), &sections)
+            }
+            None => Vec::new(),
+        };
+        let dynamic_context = prompt
+            .dynamic_system_context
+            .map(lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string);
+        let input = lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
+            system_prompt.clone(),
+            dynamic_context,
+            Some(lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
+                crate::prompt::locked_templates::HEADER,
+            )),
+        );
+        let pending = self
+            .prompt_snapshot_eligible()
+            .then_some(system_prompt)
+            .filter(|vector| !vector.is_empty());
+        *self
+            .prompt_runtime
+            .pending_prompt_source_vector
+            .lock()
+            .await = pending;
+        input
+    }
+
+    pub(super) async fn current_prompt_route(&self) -> (String, Option<String>) {
+        if let Some(settings) = crate::scheduled_turn::current() {
+            return (settings.model, Some(settings.provider));
+        }
+        if let Some(route) = crate::query_model::current() {
+            return (route.model, route.profile);
+        }
+        let session = self.session.lock().await;
+        (session.model.clone(), session.model_profile.clone())
+    }
+
+    async fn effective_system_prompt_parts(&self) -> crate::prompt::RenderedPromptSections {
+        use crate::prompt::RenderedPromptSections;
+        if let Some(custom) = &self.config.system_prompt_override {
+            return RenderedPromptSections {
+                text: custom.clone(),
+                static_text: custom.clone(),
+                source_sections: Vec::new(),
+                snapshot_system_prompt: None,
+                dynamic_system_context: None,
+            };
         }
         if self.prompt_snapshot_eligible() {
-            if let Some(snapshot) = self.prompt_runtime.prompt_snapshot.lock().await.clone() {
+            // Context routing also reads this slot. Drop the guard before
+            // awaiting dynamic context; an if-let temporary retains it through
+            // the entire body and would re-enter the same mutex.
+            let snapshot = { self.prompt_runtime.prompt_snapshot.lock().await.clone() };
+            if let Some(snapshot) = snapshot {
                 if valid_prompt_snapshot(&snapshot) {
                     // Carved-slate freezes only the static getSystemPrompt
                     // members. `systemContext` (currently the git-status block
                     // in this port) is intentionally recomputed for every
                     // request, so a cwd/context change never gets baked into
                     // the cacheable prefix.
-                    let mut prompt = snapshot.system_prompt.join("\n\n");
-                    self.append_dynamic_system_context(&mut prompt).await;
-                    return prompt;
+                    let snapshot_system_prompt = snapshot
+                        .system_prompt
+                        .iter()
+                        .enumerate()
+                        .map(|(index, section)| {
+                            snapshot
+                                .system_prompt_utf16
+                                .get(index)
+                                .and_then(Option::as_ref)
+                                .map_or_else(
+                                    || {
+                                        lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(section.clone())
+                                    },
+                                    |units| {
+                                        lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(units.clone())
+                                    },
+                                )
+                        })
+                        .collect::<Vec<_>>();
+                    let static_text = snapshot_system_prompt
+                        .iter()
+                        .filter(|section| {
+                            !section.equals_ascii(
+                                lingxi_llm_client::providers::anthropic::system_prompt::DYNAMIC_BOUNDARY,
+                            )
+                        })
+                        .map(|section| section.display_text())
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    let mut prompt = static_text.clone();
+                    let dynamic_system_context =
+                        self.append_dynamic_system_context(&mut prompt).await;
+                    return RenderedPromptSections {
+                        text: prompt,
+                        static_text,
+                        source_sections: Vec::new(),
+                        snapshot_system_prompt: Some(snapshot_system_prompt),
+                        dynamic_system_context,
+                    };
                 }
             }
         }
@@ -270,18 +794,47 @@ impl ConversationOrchestrator {
             .await
             .as_ref()
             .and_then(|agent| agent.system_prompt.clone());
+        let is_default_prompt = main_thread_prompt.is_none();
         let mut prompt = match main_thread_prompt {
-            Some(prompt) => prompt,
-            None => self.build_system_prompt().await,
+            Some(text) => RenderedPromptSections {
+                static_text: text.clone(),
+                text: text.clone(),
+                source_sections: vec![crate::prompt::PromptSection {
+                    id: "main_thread_agent".to_owned(),
+                    text,
+                    scope: crate::prompt::PromptSectionScope::Session,
+                    id_utf16_code_units: None,
+                    text_utf16_code_units: None,
+                }],
+                snapshot_system_prompt: None,
+                dynamic_system_context: None,
+            },
+            None => self.build_static_system_prompt_parts().await,
         };
         if let Ok(profile) = self.prompt_runtime.app_agent_prompt_profile.read() {
             if let Some(profile) = profile.as_ref() {
                 if !profile.instructions.trim().is_empty() {
-                    prompt.push_str("\n\n# App Agent Profile\n");
-                    prompt.push_str(&format!("Revision: {}\n", profile.revision));
-                    prompt.push_str(&profile.instructions);
+                    let profile_section = format!(
+                        "# App Agent Profile\nRevision: {}\n{}",
+                        profile.revision, profile.instructions
+                    );
+                    prompt.text.push_str("\n\n");
+                    prompt.text.push_str(&profile_section);
+                    prompt.static_text.push_str("\n\n");
+                    prompt.static_text.push_str(&profile_section);
+                    prompt.source_sections.push(crate::prompt::PromptSection {
+                        id: "app_agent_profile".to_owned(),
+                        text: profile_section,
+                        scope: crate::prompt::PromptSectionScope::Session,
+                        id_utf16_code_units: None,
+                        text_utf16_code_units: None,
+                    });
                 }
             }
+        }
+        if is_default_prompt {
+            prompt.dynamic_system_context =
+                self.append_dynamic_system_context(&mut prompt.text).await;
         }
         prompt
     }
@@ -327,7 +880,7 @@ impl ConversationOrchestrator {
     /// carries them here because one predicate feeds both record and reuse.
     pub(crate) fn prompt_snapshot_eligible(&self) -> bool {
         let simple = lingxi_core::host::env::is_env_truthy(
-            std::env::var("CLAUDE_CODE_SIMPLE").ok().as_deref(),
+            std::env::var(branding::SIMPLE_ENV).ok().as_deref(),
         );
         // `CLAUDE_CODE_SESSION_KIND` in claude-code; the port already spells it
         // `LINGXI_SESSION_KIND` at its other reader (`tool_api::defer`).
@@ -355,27 +908,41 @@ impl ConversationOrchestrator {
     /// host still gets stable semantics when persistence is unavailable.
     pub(crate) async fn record_prompt_snapshot_if_needed(
         &self,
-        system: Option<&str>,
+        system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         wire_tools: &[serde_json::Value],
     ) {
         if !self.prompt_snapshot_eligible()
             || self.prompt_snapshot_resume()
-            || system.is_none_or(str::is_empty)
+            || system.is_none_or(|prompt| prompt.display_text().is_empty())
         {
             return;
         }
-        let system = system.unwrap_or_default();
-        let static_prompt = self
-            .current_system_context_block()
+        let Some(system_prompt) = self
+            .prompt_runtime
+            .pending_prompt_source_vector
+            .lock()
             .await
-            .and_then(|dynamic| {
-                let suffix = format!("\n\n{dynamic}");
-                system.strip_suffix(&suffix).map(str::to_owned)
+            .take()
+            .filter(|vector| !vector.is_empty())
+        else {
+            return;
+        };
+        let system_prompt_utf16 = system_prompt
+            .iter()
+            .map(|text| {
+                let units = text.utf16_code_units().to_vec();
+                String::from_utf16(&units).is_err().then_some(units)
             })
-            .unwrap_or_else(|| system.to_owned());
+            .collect::<Vec<_>>();
+        let system_prompt = system_prompt
+            .iter()
+            .map(|text| text.display_text().to_owned())
+            .collect::<Vec<_>>();
         let snapshot = lingxi_core::host::PromptSnapshot {
-            system_prompt: vec![static_prompt],
+            system_prompt,
+            system_prompt_utf16,
             tools: prompt_tool_descriptions(wire_tools),
+            context_rendering: Some(self.current_context_rendering().await),
         };
         let mut slot = self.prompt_runtime.prompt_snapshot.lock().await;
         if slot.is_some() {
@@ -440,7 +1007,16 @@ impl ConversationOrchestrator {
         if !snapshot.tools.is_empty() {
             payload.insert("tools".to_string(), serde_json::json!(snapshot.tools));
         }
-        self.persist_hook_attachment_to_jsonl(serde_json::Value::Object(payload))
+        if let Some(rendering) = snapshot.context_rendering {
+            payload.insert("contextRendering".to_string(), serde_json::json!(rendering));
+        }
+        let mut utf16_overrides = session::jsonl::exact_json::Utf16Overrides::new();
+        for (index, units) in snapshot.system_prompt_utf16.iter().enumerate() {
+            if let Some(units) = units {
+                utf16_overrides.insert(format!("/attachment/systemPrompt/{index}"), units.clone());
+            }
+        }
+        self.persist_hook_attachment_to_jsonl(serde_json::Value::Object(payload), utf16_overrides)
             .await;
     }
 
@@ -485,7 +1061,7 @@ impl ConversationOrchestrator {
     }
 
     /// Read-only introspection seam for the ordinary per-turn additional
-    /// context (`claudeMd` / `userEmail` / `currentDate`). Companion to
+    /// context (`instructions` / `userEmail` / `currentDate`). Companion to
     /// [`Self::assemble_system_prompt_preview`] — lets a host/composition-root
     /// test prove an injected memory provider reaches the additional-context
     /// message without a live model round-trip.
@@ -495,7 +1071,8 @@ impl ConversationOrchestrator {
             .and_then(|m| match m {
                 ConversationMessage::User { content, .. } => {
                     content.into_iter().find_map(|b| match b {
-                        lingxi_core::types::ContentBlock::Text { text } => Some(text),
+                        lingxi_core::types::ContentBlock::Text { text, .. }
+                        | lingxi_core::types::ContentBlock::TextJsUtf16 { text, .. } => Some(text),
                         _ => None,
                     })
                 }
@@ -503,12 +1080,16 @@ impl ConversationOrchestrator {
             })
     }
 
-    /// Prepend the fixed runtime context followed by the ordinary per-turn
-    /// additional context. Keeping this in one helper prevents retry paths from
-    /// drifting in ordering or accidentally dropping the mobile snapshot.
-    pub(crate) async fn prepend_leading_context(&self, messages: &mut Vec<ConversationMessage>) {
-        if let Some(ctx_msg) = self.additional_context_message().await {
-            messages.insert(0, ctx_msg);
+    /// Prepend the fixed runtime context and, for inline routing, userContext.
+    /// Normal routing's typed announcements are durable history messages.
+    pub(crate) async fn prepend_leading_context(
+        &self,
+        messages: &mut Vec<ConversationMessage>,
+        context: &PreparedContextAnnouncements,
+    ) {
+        if let Some(message) = &context.inline_context {
+            messages.retain(|existing| existing.id() != message.id());
+            messages.insert(0, message.clone());
         }
         if let Some(workspace) = self.mobile_workspace_environment_message() {
             messages.insert(0, workspace);
@@ -563,7 +1144,7 @@ impl ConversationOrchestrator {
         if self.mobile_runtime_environment.is_some()
             && messages.get(index).is_some_and(|message| {
                 matches!(message, ConversationMessage::User { content, .. } if content.iter().any(
-                    |block| matches!(block, lingxi_core::types::ContentBlock::Text { text } if text.starts_with("<system-reminder>\nMobile workspace context"))
+                    |block| matches!(block, lingxi_core::types::ContentBlock::Text { text, .. } if text.starts_with("<system-reminder>\nMobile workspace context"))
                 ))
             })
         {
@@ -579,9 +1160,40 @@ impl ConversationOrchestrator {
         messages: &mut Vec<ConversationMessage>,
         deferred_tools_reminder: Option<&ConversationMessage>,
         date_change_reminder: Option<&ConversationMessage>,
-        turn_reminders: &[ConversationMessage],
+        turn_reminders: &mut Vec<ConversationMessage>,
+        guarded_async_hook_reminders: &mut Vec<(
+            lingxi_core::types::MessageId,
+            std::sync::Arc<dyn hooks::attachment::HookPublicationGuard>,
+        )>,
+        context_announcements: &PreparedContextAnnouncements,
+        after_compaction: bool,
     ) {
-        self.prepend_leading_context(messages).await;
+        crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+            messages,
+            turn_reminders,
+            guarded_async_hook_reminders,
+        );
+        // Preparation persisted MCP/total-token attachments into history while
+        // placing them among transient reminders in the initial request. Remove
+        // this step's copies before restoring the same ordered suffix on retry.
+        // Older attachments and durable task completions retain their positions.
+        let reminder_ids = turn_reminders
+            .iter()
+            .map(ConversationMessage::id)
+            .collect::<std::collections::HashSet<_>>();
+        messages.retain(|message| !reminder_ids.contains(&message.id()));
+        if after_compaction {
+            messages.extend(
+                self.context_announcements_from_frozen_with_reason(
+                    context_announcements.refresh_reason,
+                )
+                .await,
+            );
+        } else {
+            context_announcements.reattach(messages);
+        }
+        self.prepend_leading_context(messages, context_announcements)
+            .await;
         if let Some(reminder) = deferred_tools_reminder {
             self.prepend_transient_leading_context(messages, reminder.clone());
         }
@@ -589,6 +1201,7 @@ impl ConversationOrchestrator {
             self.prepend_transient_leading_context(messages, reminder.clone());
         }
         messages.extend(turn_reminders.iter().cloned());
+        self.screen_mod_persisted_attachments(messages).await;
     }
 
     /// Read-only test/host preview of the fixed runtime reminder.
@@ -608,11 +1221,11 @@ impl ConversationOrchestrator {
     /// byte-identical (INERT INVARIANT).
     ///
     /// Both prompt-side memory readers go through here: the system prompt
-    /// ([`Self::build_prompt_context`]) and the per-turn `claudeMd` context
+    /// ([`Self::build_prompt_context`]) and the per-turn `instructions` context
     /// message ([`Self::additional_context_message`]). Keeping ONE derivation
     /// is the point — the second reader having its own (raw, unresolved) copy
     /// is what kept every mobile workspace `LINGXI.md` out of the model.
-    fn prompt_probe_cwd(&self, cwd: &std::path::Path) -> std::path::PathBuf {
+    pub(crate) fn prompt_probe_cwd(&self, cwd: &std::path::Path) -> std::path::PathBuf {
         match &self.prompt_probe_cwd_resolver {
             Some(resolver) => resolver(cwd),
             None => cwd.to_path_buf(),
@@ -629,6 +1242,18 @@ impl ConversationOrchestrator {
     /// in the first user message when `--exclude-dynamic-system-prompt-sections`
     /// is set, so the construction (and its env-field probes) lives in ONE place.
     async fn build_prompt_context(&self) -> crate::prompt::SystemPromptContext {
+        let memory_files = self.main_instruction_files().await.unwrap_or_else(|error| {
+            tracing::warn!(%error, "instruction context load failed while building prompt context");
+            Arc::new(Vec::new())
+        });
+        self.build_prompt_context_from_files(memory_files.as_ref().clone())
+            .await
+    }
+
+    async fn build_prompt_context_from_files(
+        &self,
+        memory_files: Vec<crate::prompt::MemoryFile>,
+    ) -> crate::prompt::SystemPromptContext {
         use crate::prompt::{FileTree, SystemPromptContext};
 
         // Task 5 (worktree 206 session-cwd plumbing): read the LIVE
@@ -661,7 +1286,6 @@ impl ConversationOrchestrator {
         // `build_system_prompt` caller builds the prompt BEFORE taking the
         // session lock, so there is no reentrancy.
         let model = self.session.lock().await.model.clone();
-        let memory_files = self.memory.load(&probe_cwd).await;
 
         let (git, _) = self.cached_git_status(&probe_cwd).await;
 
@@ -781,16 +1405,23 @@ impl ConversationOrchestrator {
     /// plus the current dynamic `systemContext` block.
     /// Bypassed when `OrchestratorConfig::system_prompt_override` is `Some(_)`.
     pub(super) async fn build_system_prompt(&self) -> String {
-        let mut prompt = self.build_static_system_prompt().await;
-        self.append_dynamic_system_context(&mut prompt).await;
+        self.build_system_prompt_parts().await.text
+    }
+
+    async fn build_system_prompt_parts(&self) -> crate::prompt::RenderedPromptSections {
+        let mut prompt = self.build_static_system_prompt_parts().await;
+        prompt.dynamic_system_context = self.append_dynamic_system_context(&mut prompt.text).await;
         prompt
     }
 
     /// Build only the cacheable `getSystemPrompt` members. The git-status
     /// suffix is kept out so a carved-slate snapshot can reuse this prefix
     /// while still receiving live dynamic system context on every request.
-    pub(super) async fn build_static_system_prompt(&self) -> String {
-        use crate::prompt::{assemble_system_prompt_with_style, ActiveOutputStyle};
+    async fn build_static_system_prompt_parts(&self) -> crate::prompt::RenderedPromptSections {
+        use crate::prompt::{
+            named_prompt_sections_with_style, prompt_section_slots, render_prompt_sections_scoped,
+            ActiveOutputStyle, PromptSectionScope,
+        };
         let ctx = self.build_prompt_context().await;
         // OUTSTYLE.2/.3: when a non-default output style is active — a builtin
         // OR a custom disk style discovered under `output_style_dirs` — inject
@@ -804,14 +1435,509 @@ impl ConversationOrchestrator {
             prompt: r.prompt.as_str(),
             keep_coding_instructions: r.keep_coding_instructions,
         });
-        assemble_system_prompt_with_style(&ctx, style)
+        let host = if let Some(registry) = &self.lifecycle_runtime.hook_registry {
+            registry.read().await.mod_host()
+        } else {
+            None
+        };
+        {
+            let mut cache = self.prompt_runtime.mod_prompt_sections.lock().await;
+            let context = (
+                ctx.model.clone(),
+                ctx.cwd.clone(),
+                host.as_ref().map(|host| host.registration_identity()),
+            );
+            if cache.context.as_ref() != Some(&context) {
+                cache.generation = cache.generation.wrapping_add(1);
+                cache.context = Some(context);
+                cache.answers.clear();
+            }
+        }
+        let sections = named_prompt_sections_with_style(&ctx, style);
+        let resolved_sections = if let Some(host) = host.as_ref() {
+            futures::future::join_all(prompt_section_slots(sections, &ctx).into_iter().map(
+                |slot| async move {
+                    let id = slot.id_prompt();
+                    let slot_text = slot.text_prompt();
+                    let text =
+                        if slot.scope == PromptSectionScope::Session && slot.id != "output_style" {
+                            self.dispatch_mod_prompt_section(
+                                Some(host),
+                                &id,
+                                slot_text.as_ref(),
+                                true,
+                                None,
+                                None,
+                            )
+                            .await
+                        } else {
+                            slot_text
+                        };
+                    text.map(|text| {
+                        let text_utf16_code_units = prompt_text_sidecar("/text".into(), &text)
+                            .map(|sidecar| sidecar.code_units);
+                        crate::prompt::PromptSection {
+                            id: slot.id,
+                            text: text.display_text().to_owned(),
+                            scope: slot.scope,
+                            id_utf16_code_units: slot.id_utf16_code_units,
+                            text_utf16_code_units,
+                        }
+                    })
+                },
+            ))
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
+        } else {
+            sections
+        };
+        let composed = if let Some(host) = host.as_ref() {
+            self.dispatch_mod_prompt_compose(host, &ctx, style, resolved_sections)
+                .await
+        } else {
+            resolved_sections
+        };
+        render_prompt_sections_scoped(&composed)
+    }
+
+    async fn dispatch_mod_prompt_section(
+        &self,
+        host: Option<&std::sync::Arc<hooks::mods::ModHost>>,
+        name: &lingxi_llm_client::providers::anthropic::system_prompt::PromptText,
+        text: Option<&lingxi_llm_client::providers::anthropic::system_prompt::PromptText>,
+        stored: bool,
+        origin: Option<serde_json::Value>,
+        skip_hook_id: Option<u64>,
+    ) -> Option<lingxi_llm_client::providers::anthropic::system_prompt::PromptText> {
+        let Some(host) = host else {
+            return text.cloned();
+        };
+        let name_units = name.utf16_code_units().to_vec();
+        let source_units = text.map(|text| text.utf16_code_units().to_vec());
+        let generation = if stored {
+            let cache = self.prompt_runtime.mod_prompt_sections.lock().await;
+            if let Some((source, answer)) = cache.answers.get(&name_units) {
+                if source.as_ref() == source_units.as_ref() {
+                    return answer.clone();
+                }
+            }
+            Some(cache.generation)
+        } else {
+            None
+        };
+        let public_name = public_prompt_name(name);
+        let mut input_strings = Vec::new();
+        if let Some(sidecar) = prompt_text_sidecar("/name".into(), &public_name) {
+            input_strings.push(sidecar);
+        }
+        if let Some(text) = text {
+            if let Some(sidecar) = prompt_text_sidecar("/text".into(), text) {
+                input_strings.push(sidecar);
+            }
+        }
+        let input = hooks::mods::ModUtf16ValueProjection {
+            value: serde_json::json!({
+                "name":public_name.display_text(),
+                "text":text.map(|text| serde_json::Value::String(text.display_text().to_owned()))
+                    .unwrap_or(serde_json::Value::Null),
+            }),
+            strings: input_strings,
+            keys: Vec::new(),
+        };
+        let pinned_name = public_name.utf16_code_units().to_vec();
+        let log_output = self.output.clone();
+        let toast_output = self.output.clone();
+        let status_output = self.output.clone();
+        let cwd = self.session_cwd.cwd();
+        let api_origin = origin.as_ref().map_or(
+            lingxi_core::host::task_registry::FieldPresence::Missing,
+            |origin| lingxi_core::host::task_registry::FieldPresence::Value(origin.clone()),
+        );
+        let result = host
+            .dispatch_with_utf16_at_context(
+                "prompt.section",
+                input,
+                &cwd,
+                Some(self),
+                None,
+                origin,
+                skip_hook_id,
+                api_origin,
+                move |event| {
+                    let pinned_name = pinned_name.clone();
+                    async move {
+                        let display_name = event
+                            .value
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default();
+                        if projection_string_units(&event, "/name", display_name) != pinned_name {
+                            return Err(hooks::mods::ModError::Hook(
+                                "prompt.section name is pinned".into(),
+                            ));
+                        }
+                        let text = event
+                            .value
+                            .get("text")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null);
+                        let strings = event
+                            .strings
+                            .into_iter()
+                            .filter(|sidecar| sidecar.pointer == "/text")
+                            .collect();
+                        Ok(hooks::mods::ModUtf16ValueProjection {
+                            value: serde_json::json!({"text":text}),
+                            strings,
+                            keys: Vec::new(),
+                        })
+                    }
+                },
+                move |plugin, text| {
+                    let output = log_output.clone();
+                    async move { output.emit_mod_log(&plugin, &text).await }
+                },
+                move |plugin, text, timeout_ms| {
+                    let output = toast_output.clone();
+                    async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+                },
+                move |plugin, text| {
+                    let output = status_output.clone();
+                    async move { output.emit_mod_status(&plugin, text.as_deref()).await }
+                },
+            )
+            .await;
+        match result {
+            Ok(outcome) => {
+                let result = hooks::mods::ModUtf16ValueProjection {
+                    value: outcome.result,
+                    strings: outcome.result_utf16_strings,
+                    keys: outcome.result_utf16_keys,
+                };
+                let answer = result
+                    .value
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|display| projection_prompt_text(&result, "/text", display));
+                if let Some(generation) = generation {
+                    let mut cache = self.prompt_runtime.mod_prompt_sections.lock().await;
+                    if cache.generation == generation {
+                        cache
+                            .answers
+                            .insert(name_units, (source_units, answer.clone()));
+                    }
+                }
+                answer
+            }
+            Err(error) => {
+                tracing::warn!(section = %name.display_text(), %error, "prompt.section Mod failed");
+                text.cloned()
+            }
+        }
+    }
+
+    async fn dispatch_mod_prompt_compose(
+        &self,
+        host: &std::sync::Arc<hooks::mods::ModHost>,
+        ctx: &crate::prompt::SystemPromptContext,
+        style: Option<crate::prompt::ActiveOutputStyle<'_>>,
+        sections: Vec<crate::prompt::PromptSection>,
+    ) -> Vec<crate::prompt::PromptSection> {
+        use crate::prompt::PromptSectionScope;
+        let input_value =
+            mod_prompt_compose_facts(ctx, style, &self.mod_prompt_surfaces(ctx.is_interactive));
+        let input = hooks::mods::ModUtf16ValueProjection::plain(input_value);
+        let core_result = mod_prompt_compose_result(&sections);
+        let expected = input.clone();
+        let log_output = self.output.clone();
+        let toast_output = self.output.clone();
+        let status_output = self.output.clone();
+        let cwd = self.session_cwd.cwd();
+        let result = host
+            .dispatch_with_utf16_at_context(
+                "prompt.compose",
+                input,
+                &cwd,
+                Some(self),
+                None,
+                None,
+                None,
+                lingxi_core::host::task_registry::FieldPresence::Missing,
+                move |forwarded| {
+                    let expected = expected.clone();
+                    let core_result = core_result.clone();
+                    async move {
+                        let expected_model = expected.value["model"].as_str().unwrap_or_default();
+                        let forwarded_model = forwarded.value["model"].as_str().unwrap_or_default();
+                        if projection_string_units(&forwarded, "/model", forwarded_model)
+                            != expected_model.encode_utf16().collect::<Vec<_>>()
+                        {
+                            return Err(hooks::mods::ModError::Hook(
+                                "prompt.compose model is pinned".into(),
+                            ));
+                        }
+                        if forwarded == expected {
+                            Ok(core_result)
+                        } else {
+                            self.mod_prompt_compose_core(forwarded, None, None).await
+                        }
+                    }
+                },
+                move |plugin, text| {
+                    let output = log_output.clone();
+                    async move { output.emit_mod_log(&plugin, &text).await }
+                },
+                move |plugin, text, timeout_ms| {
+                    let output = toast_output.clone();
+                    async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+                },
+                move |plugin, text| {
+                    let output = status_output.clone();
+                    async move { output.emit_mod_status(&plugin, text.as_deref()).await }
+                },
+            )
+            .await;
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                tracing::warn!(%error, "prompt.compose Mod failed");
+                return sections;
+            }
+        };
+        let result = hooks::mods::ModUtf16ValueProjection {
+            value: outcome.result,
+            strings: outcome.result_utf16_strings,
+            keys: outcome.result_utf16_keys,
+        };
+        let Some(raw_sections) = result.value.get("sections").and_then(serde_json::Value::as_array)
+        else {
+            return sections;
+        };
+        if raw_sections.len() > 512 {
+            return sections;
+        }
+        let mut seen = std::collections::HashSet::<Vec<u16>>::new();
+        let mut in_session = false;
+        let mut total_bytes = 0usize;
+        let mut composed = Vec::with_capacity(raw_sections.len());
+        for raw in raw_sections {
+            let (Some(id), Some(text), Some(scope)) = (
+                raw.get("id").and_then(serde_json::Value::as_str),
+                raw.get("text").and_then(serde_json::Value::as_str),
+                raw.get("scope").and_then(serde_json::Value::as_str),
+            ) else {
+                return sections;
+            };
+            let index = composed.len();
+            let id = projection_prompt_text(&result, &format!("/sections/{index}/id"), id);
+            let text = projection_prompt_text(&result, &format!("/sections/{index}/text"), text);
+            let id_units = id.utf16_code_units().to_vec();
+            if id_units.is_empty() || !seen.insert(id_units.clone()) {
+                return sections;
+            }
+            let scope = match scope {
+                "shared" if !in_session => PromptSectionScope::Shared,
+                "session" => {
+                    in_session = true;
+                    PromptSectionScope::Session
+                }
+                _ => return sections,
+            };
+            total_bytes = total_bytes
+                .saturating_add(id_units.len().saturating_mul(2))
+                .saturating_add(text.utf16_code_units().len().saturating_mul(2));
+            if total_bytes > 4 * 1024 * 1024 {
+                return sections;
+            }
+            composed.push(crate::prompt::PromptSection {
+                id: id.display_text().to_owned(),
+                text: text.display_text().to_owned(),
+                scope,
+                id_utf16_code_units: String::from_utf16(&id_units)
+                    .is_err()
+                    .then_some(id_units),
+                text_utf16_code_units: String::from_utf16(text.utf16_code_units())
+                    .is_err()
+                    .then(|| text.utf16_code_units().to_vec()),
+            });
+        }
+        composed
+    }
+
+    pub(crate) async fn mod_prompt_compose_facts(
+        &self,
+        overrides: hooks::mods::ModUtf16ValueProjection,
+    ) -> Result<hooks::mods::ModUtf16ValueProjection, hooks::mods::ModError> {
+        let override_object = overrides.value.as_object().ok_or_else(|| {
+            hooks::mods::ModError::Hook("prompt.compose takes the facts to compose for".into())
+        })?;
+        let ctx = self.build_prompt_context().await;
+        let resolved = self.resolve_active_output_style().await;
+        let style = resolved
+            .as_ref()
+            .map(|style| crate::prompt::ActiveOutputStyle {
+                name: &style.name,
+                prompt: &style.prompt,
+                keep_coding_instructions: style.keep_coding_instructions,
+            });
+        let mut facts =
+            mod_prompt_compose_facts(&ctx, style, &self.mod_prompt_surfaces(ctx.is_interactive));
+        let mut strings = Vec::new();
+        let mut keys = Vec::new();
+        for (key, value) in override_object {
+            if !matches!(
+                key.as_str(),
+                "model" | "promptModel" | "surfaces" | "tools" | "outputStyle" | "traits"
+            ) {
+                return Err(hooks::mods::ModError::Hook(format!(
+                    "prompt.compose has unknown fact {key}"
+                )));
+            }
+            facts[key] = value.clone();
+            strings.extend(overrides.strings.iter().filter_map(|sidecar| {
+                projection_pointer_is_member(&sidecar.pointer, key).then(|| {
+                let pointer = prefix_projection_pointer(key, &sidecar.pointer);
+                hooks::mods::ModUtf16StringSidecar {
+                    pointer,
+                    code_units: sidecar.code_units.clone(),
+                }
+                })
+            }));
+            keys.extend(overrides.keys.iter().filter_map(|sidecar| {
+                projection_pointer_is_member(&sidecar.pointer, key).then(|| {
+                let pointer = prefix_projection_pointer(key, &sidecar.pointer);
+                hooks::mods::ModUtf16KeySidecar {
+                    pointer,
+                    placeholder: sidecar.placeholder.clone(),
+                    code_units: sidecar.code_units.clone(),
+                }
+                })
+            }));
+        }
+        validate_mod_prompt_compose_facts(&facts)?;
+        Ok(hooks::mods::ModUtf16ValueProjection {
+            value: facts,
+            strings,
+            keys,
+        })
+    }
+
+    pub(crate) async fn mod_prompt_compose_core(
+        &self,
+        facts: hooks::mods::ModUtf16ValueProjection,
+        origin: Option<serde_json::Value>,
+        skip_hook_id: Option<u64>,
+    ) -> Result<hooks::mods::ModUtf16ValueProjection, hooks::mods::ModError> {
+        validate_mod_prompt_compose_facts(&facts.value)?;
+        let model = facts.value["model"].as_str().unwrap();
+        let requested_tools = facts.value["tools"].as_array().unwrap();
+        let traits = facts.value["traits"].as_array().unwrap();
+        let mut ctx = self.build_prompt_context().await;
+        if ctx.model != model {
+            ctx.model = model.to_string();
+            ctx.model_marketing_name = crate::prompt::env_meta::marketing_name_for_model(model)
+                .map(String::from)
+                .or_else(|| {
+                    (!model.to_ascii_lowercase().contains("claude"))
+                        .then(|| crate::provider_adapter::display_name_for_model(model))
+                        .flatten()
+                });
+            ctx.knowledge_cutoff =
+                crate::prompt::env_meta::knowledge_cutoff_for_model(model).map(String::from);
+        }
+        let available = ctx
+            .tool_names
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        let mut seen = std::collections::HashSet::<Vec<u16>>::new();
+        ctx.tool_names = requested_tools
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| {
+                let display = value.as_str()?;
+                let units = projection_string_units(&facts, &format!("/tools/{index}"), display);
+                let name = String::from_utf16(&units).ok()?;
+                (available.contains(&name) && seen.insert(units)).then_some(name)
+            })
+            .collect();
+        ctx.exclude_dynamic_sections = traits.iter().enumerate().any(|(index, trait_name)| {
+            trait_name.as_str().is_some_and(|display| {
+                projection_string_units(&facts, &format!("/traits/{index}"), display)
+                    .into_iter()
+                    .eq("sdk-preset".encode_utf16())
+            })
+        });
+        let resolved = self.resolve_active_output_style().await;
+        let style = resolved
+            .as_ref()
+            .map(|style| crate::prompt::ActiveOutputStyle {
+                name: &style.name,
+                prompt: &style.prompt,
+                keep_coding_instructions: style.keep_coding_instructions,
+            });
+        let sections = crate::prompt::named_prompt_sections_with_style(&ctx, style);
+        let host = if let Some(registry) = &self.lifecycle_runtime.hook_registry {
+            registry.read().await.mod_host()
+        } else {
+            None
+        };
+        let composed = if let Some(host) = host.as_ref() {
+            futures::future::join_all(
+                crate::prompt::prompt_section_slots(sections, &ctx)
+                    .into_iter()
+                    .map(|slot| {
+                        let origin = origin.clone();
+                        async move {
+                            let id = slot.id_prompt();
+                            let slot_text = slot.text_prompt();
+                            let text = if slot.scope == crate::prompt::PromptSectionScope::Session
+                                && !id.equals_ascii("output_style")
+                            {
+                                self.dispatch_mod_prompt_section(
+                                    Some(host),
+                                    &id,
+                                    slot_text.as_ref(),
+                                    false,
+                                    origin,
+                                    skip_hook_id,
+                                )
+                                .await
+                            } else {
+                                slot_text
+                            };
+                            text.map(|text| {
+                                let text_utf16_code_units = prompt_text_sidecar("/text".into(), &text)
+                                    .map(|sidecar| sidecar.code_units);
+                                crate::prompt::PromptSection {
+                                    id: slot.id,
+                                    text: text.display_text().to_owned(),
+                                    scope: slot.scope,
+                                    id_utf16_code_units: slot.id_utf16_code_units,
+                                    text_utf16_code_units,
+                                }
+                            })
+                        }
+                    }),
+            )
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
+        } else {
+            sections
+        };
+        Ok(mod_prompt_compose_result(&composed))
     }
 
     /// Return the current dynamic `systemContext` contribution. Today the
     /// port models Claude's `gitStatus` member; the exclusion flag omits the
     /// whole context just as the upstream custom/static path does.
     async fn current_system_context_block(&self) -> Option<String> {
-        if self.config.exclude_dynamic_system_prompt_sections {
+        if self.config.exclude_dynamic_system_prompt_sections || self.uses_announced_context().await
+        {
             return None;
         }
         let cwd = self.session_cwd.cwd();
@@ -819,15 +1945,18 @@ impl ConversationOrchestrator {
         self.cached_git_status(&probe_cwd).await.1
     }
 
-    async fn append_dynamic_system_context(&self, prompt: &mut String) {
-        if let Some(block) = self.current_system_context_block().await {
+    async fn append_dynamic_system_context(&self, prompt: &mut String) -> Option<String> {
+        let block = self.current_system_context_block().await;
+        if let Some(block) = &block {
             prompt.push_str("\n\n");
-            prompt.push_str(&block);
+            prompt.push_str(block);
         }
+        block
     }
 
-    /// R-P1c/R-P1d: the leading `additionalContext` (`# claudeMd` / `# userEmail`
-    /// / `# currentDate`) meta user message, or `None` when nothing is sourceable.
+    /// Load the host context and render its outgoing-only inline projection.
+    /// Normal Or routing consumes the captured typed files and context fields
+    /// through `context_announcement_messages` instead of sending this prefix.
     ///
     /// 1:1 with claude-code `A6n(messages, userContext)` (binary offset
     /// ~205838418): when the `userContext` object is non-empty it PREPENDS one
@@ -845,7 +1974,7 @@ impl ConversationOrchestrator {
     /// (the IMPORTANT line is indented by exactly six spaces).
     ///
     /// The `userContext` keys, in claude-code insertion order (`pS`,
-    /// binary offset ~197202100): `claudeMd` (the assembled LINGXI.md memory
+    /// binary offset ~197202100): `instructions` (the assembled LINGXI.md memory
     /// block — [`memory_block::format`]), `userEmail`
     /// (`The user's email address is {email}.`, only when configured), and
     /// `currentDate` (`Today's date is {YYYY-MM-DD}.`, always present). The
@@ -855,27 +1984,223 @@ impl ConversationOrchestrator {
     /// that claude-code folds into the SYSTEM PROMPT (see `build_system_prompt`),
     /// not this `userContext` message.
     ///
-    /// Like the per-turn reminders, this is recomputed and prepended to the
-    /// OUTGOING snapshot each turn (claude-code calls `A6n` on every `callModel`);
-    /// it is never persisted to `session.history` / JSONL.
+    /// Inline projection of the memoized Gv blocks plus the dynamic Environment.
+    /// The scalar projection is outgoing-only; announced routing persists typed
+    /// instruction/context attachments through the ordinary producer.
+    async fn dispatch_mod_prompt_context(
+        &self,
+        initial: hooks::mods::ModUtf16ValueProjection,
+    ) -> hooks::mods::ModUtf16ValueProjection {
+        let Some(registry) = &self.lifecycle_runtime.hook_registry else {
+            return initial;
+        };
+        let Some(host) = registry.read().await.mod_host() else {
+            return initial;
+        };
+        let log_output = self.output.clone();
+        let toast_output = self.output.clone();
+        let status_output = self.output.clone();
+        let cwd = self.session_cwd.cwd();
+        let result = host
+            .dispatch_with_utf16_at_context(
+            "prompt.context",
+            initial.clone(),
+            &cwd,
+            Some(self),
+            None,
+            None,
+            None,
+            lingxi_core::host::task_registry::FieldPresence::Missing,
+            |event| async move { Ok(event) },
+            move |plugin, text| {
+                let output = log_output.clone();
+                async move { output.emit_mod_log(&plugin, &text).await }
+            },
+            move |plugin, text, timeout_ms| {
+                let output = toast_output.clone();
+                async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+            },
+                move |plugin, text| {
+                    let output = status_output.clone();
+                    async move { output.emit_mod_status(&plugin, text.as_deref()).await }
+                },
+            )
+            .await;
+        match result {
+            Ok(outcome) => hooks::mods::ModUtf16ValueProjection {
+                value: outcome.result,
+                strings: outcome.result_utf16_strings,
+                keys: outcome.result_utf16_keys,
+            },
+            Err(error) => {
+                tracing::warn!(%error, "prompt.context Mod failed");
+                initial
+            }
+        }
+    }
+
+    async fn resolved_mod_instruction_context(
+        &self,
+        key: lingxi_core::host::instructions::InstructionContextKey,
+        load: &lingxi_core::host::instruction_context_cache::InstructionContextLoad<
+            crate::prompt::MemoryFile,
+        >,
+        cached: &lingxi_core::host::instructions::InstructionContext,
+    ) -> hooks::mods::ModUtf16ValueProjection {
+        let mod_identity = if let Some(registry) = &self.lifecycle_runtime.hook_registry {
+            registry
+                .read()
+                .await
+                .mod_host()
+                .map(|host| host.registration_identity())
+        } else {
+            None
+        };
+        // The hook resolves the frozen Gv blocks. A cwd-only eager-file reset
+        // does not acquire a new context or freeze the query's Environment.
+        let context = (
+            key.session_id.to_string(),
+            cached
+                .instructions_root
+                .clone()
+                .unwrap_or_else(|| self.cwd.clone()),
+            mod_identity,
+        );
+        let generation = {
+            let mut cache = self.prompt_runtime.mod_prompt_context.lock().await;
+            if cache.context.as_ref() != Some(&context)
+                || !cache
+                    .instruction_load
+                    .as_ref()
+                    .is_some_and(|prior| prior.same_build(load))
+            {
+                cache.generation = cache.generation.wrapping_add(1);
+                cache.context = Some(context.clone());
+                cache.instruction_load = Some(load.clone());
+                cache.resolved = None;
+            }
+            if let Some(resolved) = &cache.resolved {
+                return resolved.clone();
+            }
+            cache.generation
+        };
+        let memory_files = load.memory_files().await;
+        let blocks = cached
+            .user_context_order
+            .iter()
+            .filter_map(|name| {
+                cached
+                    .user_context
+                    .get(name)
+                    .map(|text| serde_json::json!({"name":name,"text":text}))
+            })
+            .collect::<Vec<_>>();
+        let initial = hooks::mods::ModUtf16ValueProjection::plain(serde_json::json!({
+            "blocks":blocks,
+            "instructionFiles":mod_instruction_files(&memory_files),
+        }));
+        let mut resolved = self.dispatch_mod_prompt_context(initial).await;
+        // Native W1n freezes Object.fromEntries: repeated names replace their
+        // value while retaining the first insertion position.
+        if let Some(blocks) = resolved.value.get("blocks").and_then(serde_json::Value::as_array) {
+            let source = resolved.clone();
+            let mut positions = std::collections::HashMap::<Vec<u16>, usize>::new();
+            let mut normalized = Vec::new();
+            let mut strings = Vec::new();
+            for (source_index, block) in blocks.iter().enumerate() {
+                if let (Some(name), Some(text)) = (block["name"].as_str(), block["text"].as_str()) {
+                    let name_text = projection_prompt_text(
+                        &source,
+                        &format!("/blocks/{source_index}/name"),
+                        name,
+                    );
+                    let text_text = projection_prompt_text(
+                        &source,
+                        &format!("/blocks/{source_index}/text"),
+                        text,
+                    );
+                    let name_units = name_text.utf16_code_units().to_vec();
+                    let block = serde_json::json!({"name":name_text.display_text(),"text":text_text.display_text()});
+                    let output_index = if let Some(index) = positions.get(&name_units).copied() {
+                        normalized[index] = block;
+                        index
+                    } else {
+                        let index = normalized.len();
+                        positions.insert(name_units.clone(), index);
+                        normalized.push(block);
+                        index
+                    };
+                    let name_pointer = format!("/blocks/{output_index}/name");
+                    let text_pointer = format!("/blocks/{output_index}/text");
+                    strings.retain(|sidecar: &hooks::mods::ModUtf16StringSidecar| {
+                        sidecar.pointer != name_pointer && sidecar.pointer != text_pointer
+                    });
+                    if let Some(sidecar) = prompt_text_sidecar(name_pointer, &name_text) {
+                        strings.push(sidecar);
+                    }
+                    if let Some(sidecar) = prompt_text_sidecar(text_pointer, &text_text) {
+                        strings.push(sidecar);
+                    }
+                }
+            }
+            resolved.value["blocks"] = serde_json::Value::Array(normalized);
+            resolved
+                .strings
+                .retain(|sidecar| !sidecar.pointer.starts_with("/blocks/"));
+            resolved.strings.extend(strings);
+            resolved
+                .keys
+                .retain(|sidecar| !sidecar.pointer.starts_with("/blocks/"));
+        }
+        let mut cache = self.prompt_runtime.mod_prompt_context.lock().await;
+        if cache.generation == generation
+            && cache.context.as_ref() == Some(&context)
+            && cache
+                .instruction_load
+                .as_ref()
+                .is_some_and(|prior| prior.same_build(load))
+        {
+            cache.resolved = Some(resolved.clone());
+        }
+        resolved
+    }
+
     pub(crate) async fn additional_context_message(&self) -> Option<ConversationMessage> {
-        // `claudeMd` value = the assembled memory block (preamble + `Contents
+        let (key, load) = self.main_instruction_load().await;
+        match self.additional_context_message_from_load(key, &load).await {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::warn!(%error, "instruction user context load failed");
+                None
+            }
+        }
+    }
+
+    /// Query preparation retains its original Gv handle across host refreshes.
+    /// Acquisition failure propagates before any model request is dispatched.
+    pub(crate) async fn additional_context_message_from_load(
+        &self,
+        key: lingxi_core::host::instructions::InstructionContextKey,
+        load: &lingxi_core::host::instruction_context_cache::InstructionContextLoad<
+            crate::prompt::MemoryFile,
+        >,
+    ) -> Result<Option<ConversationMessage>, String> {
+        // `instructions` value = the assembled memory block (preamble + `Contents
         // of …:` blocks). Empty when no LINGXI.md files are loaded.
         //
         // Task 5 (worktree 206 session-cwd plumbing): read the LIVE
         // `self.session_cwd.cwd()`, not the frozen `self.cwd` — this reminder
-        // is already recomputed fresh every turn (no cache), but reading the
-        // frozen field would still show the pre-swap directory's LINGXI.md
-        // files after `EnterWorktree`.
+        // uses the current root cache. Worktree changes invalidate qb explicitly;
+        // Gv retains its snapshot until its distinct native refresh event.
         //
         // PathAtlas S3: probe the HOST directory backing the (possibly guest)
         // session cwd — same hop `build_prompt_context` makes. This message is
         // the ONLY render path for the memory block (`prompt/mod.rs` no longer
         // splices it into the system prompt), so reading the raw guest path
         // here meant a mobile workspace `LINGXI.md` reached the model NOWHERE.
-        let probe_cwd = self.prompt_probe_cwd(&self.session_cwd.cwd());
         // Build the entries in claude-code insertion order; each is `# key\nvalue`.
-        let mut entries: Vec<String> = Vec::with_capacity(4);
+        let mut blocks = Vec::with_capacity(4);
+        let mut block_strings = Vec::new();
         // `--exclude-dynamic-system-prompt-sections`: the per-machine env block
         // (cwd / env / git / OS / shell) is OMITTED from the static system prompt
         // (see `assemble_system_prompt_with_style`) and re-emitted HERE in the
@@ -890,71 +2215,146 @@ impl ConversationOrchestrator {
         // per-machine env into the first user message that the oracle never sends.
         // Gate the env-block re-emission on the absence of a system-prompt override
         // so the exclude-dynamic flag is a complete no-op when a custom prompt is
-        // active. (The claudeMd / userEmail / currentDate entries below stay
+        // active. (The instructions / userEmail / currentDate entries below stay
         // unconditional — they are unrelated to this flag.)
         //
-        // When the env block is re-emitted we already load memory inside
-        // `build_prompt_context`; reuse that snapshot instead of loading twice.
+        // Gv and every projection retain one original asynchronous build.
+        // Dynamic Environment remains the ordinary query-level producer.
+        let cached = load.get().await?;
+        self.capture_cached_instruction_context(key, &cached).await;
+        let resolved = self
+            .resolved_mod_instruction_context(key, load, &cached)
+            .await;
         let exclude_env = self.config.exclude_dynamic_system_prompt_sections
             && self.config.system_prompt_override.is_none();
-        let lingxi_md = if exclude_env {
-            let ctx = self.build_prompt_context().await;
+        if exclude_env {
+            let files = load.memory_files().await;
+            let ctx = self
+                .build_prompt_context_from_files(files.as_ref().clone())
+                .await;
             let env = crate::prompt::env_block::format(&ctx);
-            // `env_block::format` already begins with its own `# Environment\n`
-            // heading, so key the entry as `Environment` and strip that leading
-            // heading — the userContext renderer prepends `# {key}\n`, and a raw
-            // `# env\n{env}` would DOUBLE the heading (`# env\n# Environment\n…`).
             let body = env.strip_prefix("# Environment\n").unwrap_or(&env).trim();
             if !body.is_empty() {
-                entries.push(format!("# Environment\n{body}"));
+                blocks.push(serde_json::json!({"name":"Environment","text":body}));
             }
-            crate::prompt::memory_block::format(&ctx.memory_files)
-        } else {
-            let memory_files = self.memory.load(&probe_cwd).await;
-            crate::prompt::memory_block::format(&memory_files)
-        };
-        if !lingxi_md.is_empty() {
-            entries.push(format!("# claudeMd\n{lingxi_md}"));
         }
-        if let Some(email) = self
-            .config
-            .user_email
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
+        for (source_index, block) in resolved
+            .value
+            .get("blocks")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
         {
-            entries.push(format!("# userEmail\nThe user's email address is {email}."));
+            if let (Some(name), Some(text)) = (block["name"].as_str(), block["text"].as_str()) {
+                let name_text = projection_prompt_text(
+                    &resolved,
+                    &format!("/blocks/{source_index}/name"),
+                    name,
+                );
+                let text_text = projection_prompt_text(
+                    &resolved,
+                    &format!("/blocks/{source_index}/text"),
+                    text,
+                );
+                if !text_text.is_empty() {
+                    let output_index = blocks.len();
+                    blocks.push(serde_json::json!({
+                        "name":name_text.display_text(),
+                        "text":text_text.display_text(),
+                    }));
+                    if let Some(sidecar) =
+                        prompt_text_sidecar(format!("/blocks/{output_index}/name"), &name_text)
+                    {
+                        block_strings.push(sidecar);
+                    }
+                    if let Some(sidecar) =
+                        prompt_text_sidecar(format!("/blocks/{output_index}/text"), &text_text)
+                    {
+                        block_strings.push(sidecar);
+                    }
+                }
+            }
         }
-        // `currentDate` is unconditional, but its date is session-memoized.
-        // Midnight rollover is communicated exclusively by `date_change`; the
-        // leading cacheable context entry must stay byte-stable.
-        let session_id = self.session.lock().await.session_id;
-        let session_date = self.session_start_date(session_id);
-        entries.push(format!("# currentDate\nToday's date is {}.", session_date));
+        // Forks inherit the exact parent user-context envelope, including its
+        // non-instruction keys. omitInstructions replaces only instructions later.
+        let session = self.session.lock().await;
+        let mut stored = self.prompt_runtime.instruction_context.lock().await;
+        let accepted = session.session_id == key.session_id
+            && self
+                .prompt_runtime
+                .instruction_cache
+                .is_current_context(key, &cached)
+            && self
+                .prompt_runtime
+                .instruction_context_origin
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(|origin| Arc::ptr_eq(origin, &cached));
+        if let Some(context) = stored.as_mut().filter(|_| accepted) {
+            context.user_context.clear();
+            context.user_context_order.clear();
+            for block in resolved
+                .value
+                .get("blocks")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let (Some(name), Some(text)) = (block["name"].as_str(), block["text"].as_str()) {
+                    if !context.user_context.contains_key(name) {
+                        context.user_context_order.push(name.to_owned());
+                    }
+                    context
+                        .user_context
+                        .insert(name.to_owned(), text.to_owned());
+                }
+            }
+            context.eager_instructions = resolved.value
+                .get("instructionFiles")
+                .and_then(serde_json::Value::as_array)
+                .map(|files| {
+                    use lingxi_core::host::instructions::{InstructionFile, InstructionFileType};
+                    files
+                        .iter()
+                        .filter_map(|file| {
+                            Some(InstructionFile {
+                                path: file["path"].as_str()?.to_owned(),
+                                kind: match file["kind"].as_str()? {
+                                    "managed" => InstructionFileType::Managed,
+                                    "user" => InstructionFileType::User,
+                                    "project" => InstructionFileType::Project,
+                                    "local" => InstructionFileType::Local,
+                                    "memory" => InstructionFileType::AutoMem,
+                                    _ => return None,
+                                },
+                                content: lingxi_core::host::instruction_announcements::js_trim(
+                                    file["content"].as_str()?,
+                                )
+                                .to_owned(),
+                            })
+                        })
+                        .collect()
+                });
+        }
+
+        drop(stored);
+        drop(session);
 
         // `A6n` returns the messages unchanged when the context object is empty.
         // `currentDate` is always present, so `entries` is never empty — but keep
         // the guard for faithfulness to the `Object.entries(t).length===0` check.
-        if entries.is_empty() {
-            return None;
+        if blocks.is_empty() {
+            return Ok(None);
         }
-
-        let body = entries.join("\n");
-        // NOTE: the IMPORTANT line is indented by EXACTLY six spaces (claude-code
-        // `A6n`). Those spaces must NOT sit at the start of a continued (`\`)
-        // string line — Rust's line-continuation strips leading whitespace — so
-        // the `\n\n      IMPORTANT` segment is written without a preceding `\`.
-        let important = "      IMPORTANT: this context may or may not be relevant to your tasks. \
-You should not respond to this context unless it is highly relevant to your task.";
-        let content = format!(
-            "<system-reminder>\n\
-As you answer the user's questions, you can use the following context:\n\
-{body}\n\n{important}\n</system-reminder>\n"
-        );
-        // claude-code `A6n` sets `isMeta:!0` on this message. It is sent to the
-        // wire (the wire conversion does not drop meta user messages) but never
-        // persisted to JSONL (it is only prepended to the OUTGOING snapshot).
-        Some(ConversationMessage::user_meta(MessageId::new(), content))
+        Ok(render_mod_prompt_context(
+            &hooks::mods::ModUtf16ValueProjection {
+                value: serde_json::json!({"blocks":blocks}),
+                strings: block_strings,
+                keys: Vec::new(),
+            },
+        ))
     }
 
     /// Resolve this session's plan file path (206 `ON(agentId)` →

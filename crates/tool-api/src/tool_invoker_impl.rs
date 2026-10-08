@@ -9,7 +9,10 @@
 use crate::registry::ToolRegistry;
 use async_trait::async_trait;
 use lingxi_core::host::permission_gate::PermissionGate;
-use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+use lingxi_core::host::tool_invoker::{
+    SubagentInvocationContext, ToolInvocationContextModifier, ToolInvocationContextState,
+    ToolInvoker, ToolInvokerError,
+};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -124,6 +127,10 @@ fn tool_permission_ask_is_protected(
         )
 }
 
+/// Private child-tool carrier accepted only by the enforcing registry adapter.
+/// The child runtime mints it; serialized model data cannot select its body.
+pub struct SuppliedTool(pub Arc<dyn crate::Tool>);
+
 /// Wraps an `Arc<ToolRegistry>` as a `dyn ToolInvoker`.
 ///
 /// Cheap to construct; clones share the same registry `Arc`.
@@ -181,10 +188,102 @@ impl RegistryToolInvoker {
     pub fn registry_arc(&self) -> &Arc<ToolRegistry> {
         &self.registry
     }
+
+    /// Current enforcing mode, for host-owned spawn decisions only.
+    pub fn permission_mode(&self) -> Option<String> {
+        self.gate.as_ref().and_then(|gate| gate.permission_mode())
+    }
 }
 
 #[async_trait]
 impl ToolInvoker for RegistryToolInvoker {
+    async fn cleanup_computer_inputs(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        origin_session_id: Option<lingxi_core::types::SessionId>,
+    ) -> Result<(), ToolInvokerError> {
+        let Some(tool) = self
+            .registry
+            .find_registered("computer")
+            .filter(|tool| !tool.is_mcp())
+        else {
+            return Ok(());
+        };
+        let ctx = crate::context::ToolUseContext {
+            input_projection: None,
+            options: crate::context::ToolUseOptions {
+                debug: false,
+                verbose: false,
+                main_loop_model: "subagent".into(),
+                model_profile: None,
+                max_budget_nano_usd: None,
+                mcp_clients: vec![],
+                is_non_interactive_session: true,
+                custom_system_prompt: None,
+                append_system_prompt: None,
+            },
+            messages: vec![],
+            tool_use_id: None,
+            assistant_message_id: None,
+            assistant_message: None,
+            same_turn_tool_uses: vec![],
+            agent_id: Some(agent_id),
+            origin_session_id,
+            agent_spawn_provenance: Default::default(),
+            nested_memory_triggers: Arc::default(),
+            agent_name: None,
+            team_name: None,
+            instruction_context: None,
+            tool_execution_policy: Default::default(),
+            trusted_effective_permission_mode: None,
+            classifier_only_review: None,
+            content_replacement_state: None,
+            session: None,
+            subagent_registry: None,
+            cancel: None,
+            fork_parent_system_prompt: None,
+            cwd: None,
+            depth: 0,
+            observer: None,
+            observer_pairings: None,
+            file_history: None,
+        };
+        tool.cleanup_computer_inputs(&ctx)
+            .await
+            .map_err(|error| ToolInvokerError::Internal(error.to_string()))
+    }
+
+    fn permission_mode(&self) -> Option<String> {
+        RegistryToolInvoker::permission_mode(self)
+    }
+
+    fn map_result_text(&self, name: &str, result: &Value) -> Option<String> {
+        self.registry
+            .find_by_name(name)
+            .and_then(|tool| tool.map_result_text(result))
+    }
+
+    fn map_result_is_error(&self, name: &str, result: &Value) -> Option<bool> {
+        self.registry
+            .find_by_name(name)
+            .and_then(|tool| tool.map_result_is_error(result))
+    }
+
+    fn validate_output(&self, name: &str, output: &Value) -> Result<(), String> {
+        self.registry
+            .find_by_name(name)
+            .and_then(|tool| tool.output_schema().cloned())
+            .map_or(Ok(()), |schema| {
+                crate::output_schema::validate(&schema, output)
+            })
+    }
+
+    fn tool_is_concurrency_safe(&self, name: &str, input: &Value) -> Option<bool> {
+        self.registry
+            .find_by_name(name)
+            .map(|tool| tool.is_concurrency_safe(input))
+    }
+
     async fn invoke(
         &self,
         name: &str,
@@ -210,14 +309,68 @@ impl ToolInvoker for RegistryToolInvoker {
     async fn invoke_detailed(
         &self,
         name: &str,
-        mut input: Value,
+        input: Value,
         ctx: SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
     ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
-        let tool = self
-            .registry
-            .find_by_name(name)
+        self.invoke_registered_or_supplied(name, input, ctx, workspace_lease_token, None)
+            .await
+    }
+
+    async fn invoke_supplied_detailed(
+        &self,
+        name: &str,
+        input: Value,
+        ctx: SubagentInvocationContext,
+        workspace_lease_token: Option<u64>,
+        supplied: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+        if self.gate.is_none() {
+            return Err(ToolInvokerError::Internal(
+                "Host-supplied tools require a bound permission gate".into(),
+            ));
+        }
+        let tool = supplied
+            .downcast_ref::<SuppliedTool>()
+            .ok_or_else(|| ToolInvokerError::Internal("Unknown host-supplied tool carrier".into()))?
+            .0
+            .clone();
+        if tool.name() != name && !tool.aliases().contains(&name) {
+            return Err(ToolInvokerError::NotFound(name.into()));
+        }
+        self.invoke_registered_or_supplied(name, input, ctx, workspace_lease_token, Some(tool))
+            .await
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl RegistryToolInvoker {
+    async fn invoke_registered_or_supplied(
+        &self,
+        name: &str,
+        mut input: Value,
+        ctx: SubagentInvocationContext,
+        workspace_lease_token: Option<u64>,
+        supplied: Option<Arc<dyn crate::Tool>>,
+    ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+        let tool = supplied
+            .or_else(|| self.registry.find_by_name(name))
             .ok_or_else(|| ToolInvokerError::NotFound(name.to_string()))?;
+
+        let mut input_projection = ctx.input_projection.clone().unwrap_or_else(|| {
+            lingxi_core::types::utf16_json::Utf16JsonProjection::plain(input.clone())
+        });
+        if input_projection.value != input {
+            return Err(ToolInvokerError::InvalidInput(
+                "tool input projection belongs to different input".into(),
+            ));
+        }
+        input_projection
+            .validate()
+            .map_err(|error| ToolInvokerError::InvalidInput(error.to_string()))?;
 
         // BASH-18 `coerceInput` (claude-code 2.1.238 BIN off **294282716**): the
         // tool's own pre-validation normalization of the model's raw arguments.
@@ -232,18 +385,24 @@ impl ToolInvoker for RegistryToolInvoker {
         // gates below; other tools retain their existing dispatch contract.
         if let Some(coerced) = tool.coerce_input(&input) {
             input = coerced.input;
+            input_projection
+                .rebase_display_value(input.clone())
+                .map_err(|error| ToolInvokerError::InvalidInput(error.to_string()))?;
         }
 
         if tool.native_input_validation() {
             match tool.parse_native_input(&input) {
                 Some(Ok(parsed)) => {
                     input = parsed;
+                    input_projection
+                        .rebase_display_value(input.clone())
+                        .map_err(|error| ToolInvokerError::InvalidInput(error.to_string()))?;
                 }
                 Some(Err(error)) => {
                     return Err(ToolInvokerError::Validation(format!(
                         "InputValidationError: {}",
                         error.display
-                    )))
+                    )));
                 }
                 // `None` means "schema vocabulary outside the flat collector",
                 // not "invalid input". The main turn treats it that way —
@@ -259,43 +418,101 @@ impl ToolInvoker for RegistryToolInvoker {
 
         // Tool-owned checks (MCP clamps and Workflow's nested Read gate) run
         // before either policy outcome can reach the tool body.
-        let tool_use_ctx = crate::context::ToolUseContext {
-            options: crate::context::ToolUseOptions {
-                debug: false,
-                verbose: false,
-                main_loop_model: ctx
-                    .parent_model
-                    .clone()
-                    .unwrap_or_else(|| "subagent".into()),
-                model_profile: ctx.parent_model_profile.clone(),
-                max_budget_nano_usd: None,
-                mcp_clients: vec![],
-                is_non_interactive_session: ctx.is_non_interactive_session,
-                custom_system_prompt: None,
-                append_system_prompt: None,
+        let mut tool_use_ctx = match ctx.tool_context_state.as_ref() {
+            Some(state) => state
+                .downcast_arc::<crate::context::ToolUseContext>()
+                .map_err(|error| {
+                    ToolInvokerError::Internal(format!(
+                        "Nested tool context state is invalid: {error}"
+                    ))
+                })?
+                .as_ref()
+                .clone(),
+            None => crate::context::ToolUseContext {
+                input_projection: None,
+                options: crate::context::ToolUseOptions {
+                    debug: false,
+                    verbose: false,
+                    main_loop_model: ctx
+                        .parent_model
+                        .clone()
+                        .unwrap_or_else(|| "subagent".into()),
+                    model_profile: ctx.parent_model_profile.clone(),
+                    max_budget_nano_usd: None,
+                    mcp_clients: vec![],
+                    is_non_interactive_session: ctx.is_non_interactive_session,
+                    custom_system_prompt: None,
+                    append_system_prompt: None,
+                },
+                messages: ctx.current_history.clone(),
+                tool_use_id: None,
+                assistant_message_id: None,
+                assistant_message: ctx.assistant_message.clone(),
+                same_turn_tool_uses: ctx.same_turn_tool_uses.clone(),
+                agent_id: None,
+                agent_spawn_provenance: ctx.agent_spawn_provenance.clone(),
+                nested_memory_triggers: Arc::default(),
+                agent_name: None,
+                team_name: None,
+                origin_session_id: None,
+                instruction_context: None,
+                tool_execution_policy: ctx.tool_execution_policy,
+                trusted_effective_permission_mode: None,
+                classifier_only_review: None,
+                content_replacement_state: None,
+                session: None,
+                subagent_registry: None,
+                cancel: Some(ctx.cancellation_token.clone()),
+                fork_parent_system_prompt: None,
+                cwd: None,
+                depth: 0,
+                observer: None,
+                observer_pairings: None,
+                file_history: None,
             },
-            messages: vec![],
-            tool_use_id: ctx
-                .tool_use_id
-                .clone()
-                .map(lingxi_core::types::ToolUseId::from),
-            assistant_message_id: ctx.assistant_message_id,
-            agent_id: ctx.parent_agent_id,
-            agent_name: ctx.agent_name.clone(),
-            team_name: ctx.team_name.clone(),
-            origin_session_id: ctx.origin_session_id,
-            tool_execution_policy: ctx.tool_execution_policy,
-            content_replacement_state: None,
-            session: None,
-            subagent_registry: Some(self.registry.clone()),
-            cancel: None,
-            fork_parent_system_prompt: None,
-            cwd: ctx.cwd.clone(),
-            depth: ctx.depth,
-            observer: ctx.observer.clone(),
-            observer_pairings: None,
-            file_history: None,
         };
+
+        // Dynamic and trusted host facts always win over a previous call's
+        // ToolUseContext snapshot. Other fields retain prior, tool-owned
+        // context mutations so a nested agent sees the full modifier result.
+        tool_use_ctx.options.main_loop_model = ctx
+            .parent_model
+            .clone()
+            .unwrap_or_else(|| "subagent".into());
+        tool_use_ctx.options.model_profile = ctx.parent_model_profile.clone();
+        tool_use_ctx.options.is_non_interactive_session = ctx.is_non_interactive_session;
+        tool_use_ctx.messages = ctx.current_history.clone();
+        tool_use_ctx.assistant_message = ctx.assistant_message.clone();
+        tool_use_ctx.same_turn_tool_uses = ctx.same_turn_tool_uses.clone();
+        tool_use_ctx.tool_use_id = ctx
+            .tool_use_id
+            .clone()
+            .map(lingxi_core::types::ToolUseId::from);
+        tool_use_ctx.assistant_message_id = ctx.assistant_message_id;
+        tool_use_ctx.agent_id = ctx.parent_agent_id;
+        tool_use_ctx.agent_spawn_provenance = ctx.agent_spawn_provenance.clone();
+        tool_use_ctx.agent_name = ctx.agent_name.clone();
+        tool_use_ctx.team_name = ctx.team_name.clone();
+        tool_use_ctx.origin_session_id = ctx.origin_session_id;
+        tool_use_ctx.instruction_context = ctx.instruction_context.clone();
+        tool_use_ctx.tool_execution_policy = ctx.tool_execution_policy;
+        tool_use_ctx.trusted_effective_permission_mode =
+            ctx.mode_override.clone().or_else(|| self.permission_mode());
+        tool_use_ctx.subagent_registry = Some(self.registry.clone());
+        // The current physical tool use owns this token. Do not carry a stale
+        // token forward from the previous invocation's context snapshot.
+        tool_use_ctx.cancel = Some(ctx.cancellation_token.clone());
+        tool_use_ctx.fork_parent_system_prompt = ctx
+            .fork_context
+            .as_ref()
+            .and_then(|fork| fork.system_prompt.clone());
+        tool_use_ctx.cwd = ctx.cwd.clone();
+        // Every invocation replaces a retained context snapshot's old carrier.
+        tool_use_ctx.input_projection = Some(input_projection);
+        tool_use_ctx.depth = ctx.depth;
+        tool_use_ctx.observer = ctx.observer.clone();
+        tool_use_ctx.observer_pairings = None;
+        tool_use_ctx.file_history = None;
         if tool.native_input_validation() {
             if let Err(crate::ValidationError(message)) =
                 tool.validate_input(&input, &tool_use_ctx).await
@@ -377,6 +594,11 @@ impl ToolInvoker for RegistryToolInvoker {
             // a gate that only overrides `check_with_worker` (or `check`) is
             // unchanged. Behavior is identical when `updated_input` is `None`.
             let check_ctx = lingxi_core::host::permission_gate::PermissionCheckContext {
+                input_projection: Some(
+                    tool_use_ctx
+                        .projected_input(&input)
+                        .map_err(|error| ToolInvokerError::InvalidInput(error.to_string()))?,
+                ),
                 pause_observer: ctx.permission_pause_observer.clone(),
                 worker,
                 tool_use_id: ctx.tool_use_id.clone(),
@@ -422,7 +644,23 @@ impl ToolInvoker for RegistryToolInvoker {
             // first, then send the single ASK through that same worker-aware
             // transport; re-running the policy would swallow MCP ceilings or
             // Workflow's nested Read requirement on an outer Allow.
-            let outcome = if tool_ask_is_protected {
+            let outcome = if let Some(policy) = tool.classifier_only() {
+                let reviewed = gate
+                    .check_classifier_only_with_context_or_abort(
+                        name,
+                        &input,
+                        &check_ctx,
+                        policy,
+                        &lingxi_core::host::permission_gate::ClassifierOnlyReviewRequest {
+                            transcript: tool_use_ctx.messages.clone(),
+                            action: tool.classifier_only_action(&input),
+                        },
+                    )
+                    .await
+                    .map_err(|abort| ToolInvokerError::Abort(abort.message))?;
+                tool_use_ctx.classifier_only_review = reviewed.review;
+                reviewed.permission
+            } else if tool_ask_is_protected {
                 let resolution = gate
                     .resolve_detailed_or_abort(name, &input, &check_ctx)
                     .await
@@ -451,7 +689,9 @@ impl ToolInvoker for RegistryToolInvoker {
                     ..
                 } => {
                     if let Some(u) = updated_input {
-                        input = u;
+                        input = tool_use_ctx
+                            .replace_input(u)
+                            .map_err(|error| ToolInvokerError::InvalidInput(error.to_string()))?;
                     }
                 }
                 lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto {
@@ -462,13 +702,21 @@ impl ToolInvoker for RegistryToolInvoker {
                     // so `AllowAuto` degrades to a one-shot allow for THIS call
                     // while still honoring any host/policy input rewrite.
                     if let Some(u) = updated_input {
-                        input = u;
+                        input = tool_use_ctx
+                            .replace_input(u)
+                            .map_err(|error| ToolInvokerError::InvalidInput(error.to_string()))?;
                     }
                 }
                 lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason } => {
                     return Err(ToolInvokerError::Internal(reason));
                 }
             }
+        }
+
+        if tool.classifier_only().is_some() && self.gate.is_none() {
+            return Err(ToolInvokerError::Internal(
+                "Classifier-only tools require a bound permission gate".into(),
+            ));
         }
 
         // A transport may rewrite input, but the one-file allowance must not
@@ -495,6 +743,11 @@ impl ToolInvoker for RegistryToolInvoker {
         let (progress_tx, _progress_rx) =
             tokio::sync::mpsc::channel::<crate::progress::ToolProgress>(8);
 
+        // Preserve the concrete per-agent context that the tool actually
+        // received. The Agent runner applies selected one-shot context
+        // modifiers to this snapshot only after the tool-result batch settles.
+        let context_state = ToolInvocationContextState::new(Arc::new(tool_use_ctx.clone()));
+
         let result = tool
             .call(input, tool_use_ctx, progress_tx)
             .await
@@ -503,69 +756,26 @@ impl ToolInvoker for RegistryToolInvoker {
                 other => ToolInvokerError::Internal(format!("{other}")),
             })?;
 
+        let turn_end = crate::tool_trait::tool_result_turn_end(
+            tool.result_ends_turn(&result),
+            result.is_error,
+            result.mcp_meta.as_ref(),
+        );
         Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
             is_error: result.is_error,
             data: result.data,
             model_content: result.model_content,
+            new_messages: result.new_messages,
+            context_modifier: result.context_modifier.map(|modifier| {
+                ToolInvocationContextModifier::new::<crate::context::ToolUseContext, _>(modifier)
+            }),
+            mcp_meta: result.mcp_meta,
+            turn_end,
+            context: lingxi_core::types::utf16_json::Utf16JsonProjection::plain(Value::Array(
+                Vec::new(),
+            )),
+            context_state: Some(context_state),
         })
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-    async fn cleanup_computer_inputs(
-        &self,
-        agent_id: lingxi_core::types::AgentId,
-        origin_session_id: Option<lingxi_core::types::SessionId>,
-    ) -> Result<(), ToolInvokerError> {
-        let Some(tool) = self
-            .registry
-            .find_registered("computer")
-            .filter(|tool| !tool.is_mcp())
-        else {
-            return Ok(());
-        };
-        let ctx = crate::context::ToolUseContext {
-            options: crate::context::ToolUseOptions {
-                debug: false,
-                verbose: false,
-                main_loop_model: "subagent".into(),
-                model_profile: None,
-                max_budget_nano_usd: None,
-                mcp_clients: vec![],
-                is_non_interactive_session: true,
-                custom_system_prompt: None,
-                append_system_prompt: None,
-            },
-            messages: vec![],
-            tool_use_id: None,
-            assistant_message_id: None,
-            assistant_message: None,
-            same_turn_tool_uses: vec![],
-            agent_id: Some(agent_id),
-            origin_session_id,
-            agent_spawn_provenance: Default::default(),
-            nested_memory_triggers: Arc::default(),
-            agent_name: None,
-            team_name: None,
-            instruction_context: None,
-            tool_execution_policy: Default::default(),
-            trusted_effective_permission_mode: None,
-            classifier_only_review: None,
-            content_replacement_state: None,
-            session: None,
-            subagent_registry: None,
-            cancel: None,
-            fork_parent_system_prompt: None,
-            cwd: None,
-            depth: 0,
-            observer: None,
-            observer_pairings: None,
-            file_history: None,
-        };
-        tool.cleanup_computer_inputs(&ctx)
-            .await
-            .map_err(|error| ToolInvokerError::Internal(error.to_string()))
     }
 }
 
@@ -584,8 +794,8 @@ mod tests {
     use permission::result::PermissionMetadata;
     use permission::{PermissionDecisionReason, PermissionResult};
     use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn allow_for_tests() -> PermissionResult {
         PermissionResult::Allow {
@@ -600,6 +810,9 @@ mod tests {
 
     static ECHO_INPUT_SCHEMA: Lazy<serde_json::Value> =
         Lazy::new(|| json!({ "type": "object", "additionalProperties": true }));
+    static ECHO_OUTPUT_SCHEMA: Lazy<serde_json::Value> = Lazy::new(
+        || json!({"type":"object","required":["echo"],"properties":{"echo":{"type":"object"}}}),
+    );
 
     /// Minimal Tool impl returning input under {"echo": <input>}.
     /// Lives entirely under `#[cfg(test)]`.
@@ -615,6 +828,17 @@ mod tests {
         fn input_schema(&self) -> &serde_json::Value {
             &ECHO_INPUT_SCHEMA
         }
+        fn output_schema(&self) -> Option<&serde_json::Value> {
+            Some(&ECHO_OUTPUT_SCHEMA)
+        }
+        fn map_result_text(&self, result: &Value) -> Option<String> {
+            result
+                .get("echo")
+                .and_then(Value::as_object)
+                .and_then(|echo| echo.get("message"))
+                .and_then(Value::as_str)
+                .map(|message| format!("echo:{message}"))
+        }
         fn is_enabled(&self, _: &ToolStaticContext) -> bool {
             true
         }
@@ -624,8 +848,11 @@ mod tests {
         fn max_result_size_chars(&self) -> usize {
             1024
         }
-        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
-            true
+        fn is_concurrency_safe(&self, input: &serde_json::Value) -> bool {
+            !input
+                .get("force_serial")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
         }
         fn is_read_only(&self, _: &serde_json::Value) -> bool {
             true
@@ -653,9 +880,11 @@ mod tests {
         async fn call(
             &self,
             input: serde_json::Value,
-            _ctx: ToolUseContext,
+            ctx: ToolUseContext,
             _progress_tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
+            ctx.projected_input(&input)
+                .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
             Ok(ToolCallResult {
                 is_error: input.get("fail").and_then(Value::as_bool).unwrap_or(false),
                 data: json!({ "echo": input }),
@@ -746,7 +975,14 @@ mod tests {
     /// Tool fixture that records the ToolUseContext.subagent_registry it
     /// receives so tests can introspect Arc identity.
     struct RecordingTool {
-        captured: Arc<StdMutex<Option<Option<Arc<ToolRegistry>>>>>,
+        captured: Arc<
+            StdMutex<
+                Option<(
+                    Option<Arc<ToolRegistry>>,
+                    Option<tokio_util::sync::CancellationToken>,
+                )>,
+            >,
+        >,
     }
 
     #[async_trait]
@@ -795,7 +1031,8 @@ mod tests {
             ctx: ToolUseContext,
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            *self.captured.lock().unwrap() = Some(ctx.subagent_registry.clone());
+            *self.captured.lock().unwrap() =
+                Some((ctx.subagent_registry.clone(), ctx.cancel.clone()));
             Ok(ToolCallResult {
                 data: json!({}),
                 model_content: None,
@@ -816,6 +1053,25 @@ mod tests {
             requires_user_interaction: false,
         }));
         Arc::new(r)
+    }
+
+    #[test]
+    fn registry_invoker_validates_mod_replacement_without_running_the_tool() {
+        let invoker = RegistryToolInvoker::new(registry_with_echo());
+        assert!(
+            invoker
+                .validate_output("TestEcho", &json!({"echo":{}}))
+                .is_ok()
+        );
+        assert!(
+            invoker
+                .validate_output("TestEcho", &json!({"echo":42}))
+                .is_err()
+        );
+        assert_eq!(
+            invoker.map_result_text("TestEcho", &json!({"echo":{"message":"hello"}})),
+            Some("echo:hello".into())
+        );
     }
 
     fn registry_with_interactive_echo() -> Arc<ToolRegistry> {
@@ -868,6 +1124,171 @@ mod tests {
         }
     }
 
+    /// Trusted outcome markers are configured by the host-side fixture; model
+    /// input is only echoed into ordinary result data and model-facing text.
+    struct TurnEndProbe {
+        tool_marker: bool,
+        is_error: bool,
+        mcp_meta: Option<Value>,
+    }
+
+    #[async_trait]
+    impl Tool for TurnEndProbe {
+        fn name(&self) -> &str {
+            "TurnEndProbe"
+        }
+        fn input_schema(&self) -> &Value {
+            &ECHO_INPUT_SCHEMA
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _: &Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _: &Value) -> bool {
+            true
+        }
+        fn result_ends_turn(&self, result: &ToolCallResult) -> bool {
+            assert_eq!(result.is_error, self.is_error);
+            assert_eq!(result.mcp_meta, self.mcp_meta);
+            assert_eq!(result.model_content, Some(result.data.to_string()));
+            self.tool_marker
+        }
+        async fn validate_input(
+            &self,
+            _: &Value,
+            _: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+            allow_for_tests()
+        }
+        async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+            "trusted result marker probe".into()
+        }
+        async fn prompt(&self, _: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            input: Value,
+            _: ToolUseContext,
+            _: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult {
+                model_content: Some(input.to_string()),
+                data: input,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: self.is_error,
+                mcp_meta: self.mcp_meta.clone(),
+            })
+        }
+    }
+
+    async fn invoke_turn_end_probe(
+        tool_marker: bool,
+        is_error: bool,
+        mcp_meta: Option<Value>,
+        input: Value,
+    ) -> lingxi_core::host::tool_invoker::ToolInvocationResult {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(TurnEndProbe {
+            tool_marker,
+            is_error,
+            mcp_meta,
+        }));
+        let invoker = RegistryToolInvoker::new(Arc::new(registry));
+        let result = invoker
+            .invoke_detailed("TurnEndProbe", input.clone(), no_ctx(), None)
+            .await
+            .expect("probe invocation completes");
+        assert_eq!(result.data, input);
+        assert_eq!(result.model_content, Some(input.to_string()));
+        assert_eq!(result.is_error, is_error);
+        result
+    }
+
+    #[tokio::test]
+    async fn detailed_invocation_carries_trusted_turn_end_with_native_precedence() {
+        use crate::tool_trait::ToolResultTurnEndSource;
+        for (tool_marker, mcp_meta, expected) in [
+            (true, None, Some(ToolResultTurnEndSource::Tool)),
+            (
+                true,
+                Some(json!({"_meta":{"claude/endTurn":true}})),
+                Some(ToolResultTurnEndSource::Tool),
+            ),
+            (
+                false,
+                Some(json!({"_meta":{"claude/endTurn":true}})),
+                Some(ToolResultTurnEndSource::McpMeta),
+            ),
+            (false, None, None),
+        ] {
+            let result =
+                invoke_turn_end_probe(tool_marker, false, mcp_meta, json!({"payload":"visible"}))
+                    .await;
+            assert_eq!(result.turn_end.map(|marker| marker.source), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn detailed_error_result_never_ends_turn() {
+        for tool_marker in [false, true] {
+            for mcp_meta in [None, Some(json!({"_meta":{"claude/endTurn":true}}))] {
+                let result =
+                    invoke_turn_end_probe(tool_marker, true, mcp_meta, json!({"endsTurn":true}))
+                        .await;
+                assert!(result.turn_end.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn detailed_mcp_turn_end_requires_nested_strict_boolean() {
+        for mcp_meta in [
+            Value::Null,
+            json!(true),
+            json!({"claude/endTurn":true}),
+            json!({"_meta":true}),
+            json!({"_meta":{"claude/endTurn":false}}),
+            json!({"_meta":{"claude/endTurn":"true"}}),
+            json!({"_meta":{"claude/endTurn":1}}),
+            json!({"_meta":{"claude/endTurn":null}}),
+            json!({"_meta":{"claude/endTurn":[true]}}),
+        ] {
+            let result =
+                invoke_turn_end_probe(false, false, Some(mcp_meta.clone()), json!({})).await;
+            assert!(
+                result.turn_end.is_none(),
+                "invalid MCP marker accepted: {mcp_meta}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn detailed_invocation_does_not_promote_model_input_or_result_data_to_turn_end() {
+        for input in [
+            json!({"endsTurn":true}),
+            json!({"_meta":{"claude/endTurn":true}}),
+            json!({"mcp_meta":{"_meta":{"claude/endTurn":true}}}),
+            json!({"turn_end":{"source":"Tool"}}),
+            json!({"data":{"endsTurn":true}}),
+        ] {
+            let result = invoke_turn_end_probe(false, false, None, input.clone()).await;
+            assert!(
+                result.turn_end.is_none(),
+                "untrusted echoed input ended turn: {input}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn registry_invoker_unknown_tool_surfaces_not_found() {
         let registry = registry_with_echo();
@@ -877,6 +1298,27 @@ mod tests {
             Err(ToolInvokerError::NotFound(name)) => assert_eq!(name, "NotARealTool"),
             other => panic!("expected NotFound, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn concurrency_safety_comes_from_the_resolved_registry_tool() {
+        let invoker = RegistryToolInvoker::new(registry_with_echo());
+        assert_eq!(
+            ToolInvoker::tool_is_concurrency_safe(&invoker, "TestEcho", &json!({})),
+            Some(true)
+        );
+        assert_eq!(
+            ToolInvoker::tool_is_concurrency_safe(
+                &invoker,
+                "TestEcho",
+                &json!({"force_serial": true})
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            ToolInvoker::tool_is_concurrency_safe(&invoker, "NotARealTool", &json!({})),
+            None
+        );
     }
 
     #[tokio::test]
@@ -898,8 +1340,14 @@ mod tests {
     // ──── Task 10: dispatch preserves subagent_registry Arc identity ──────────────
     #[tokio::test]
     async fn registry_invoker_preserves_subagent_registry_arc_into_tool_use_ctx() {
-        let captured: Arc<StdMutex<Option<Option<Arc<ToolRegistry>>>>> =
-            Arc::new(StdMutex::new(None));
+        let captured: Arc<
+            StdMutex<
+                Option<(
+                    Option<Arc<ToolRegistry>>,
+                    Option<tokio_util::sync::CancellationToken>,
+                )>,
+            >,
+        > = Arc::new(StdMutex::new(None));
 
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(RecordingTool {
@@ -914,12 +1362,77 @@ mod tests {
             .expect("dispatch ok");
 
         let captured = captured.lock().unwrap();
-        let inner = captured.as_ref().expect("RecordingTool::call ran");
+        let (inner, _) = captured.as_ref().expect("RecordingTool::call ran");
         let registry_in_ctx = inner.as_ref().expect("subagent_registry was Some");
         assert!(
             Arc::ptr_eq(&parent_registry, registry_in_ctx),
             "RegistryToolInvoker must thread the parent Arc<ToolRegistry> into ToolUseContext.subagent_registry verbatim — this preserves the M4-05 recursion-lock contract across the dispatch boundary"
         );
+    }
+
+    #[tokio::test]
+    async fn per_call_cancellation_reaches_normal_and_workspace_lease_tool_contexts() {
+        let captured: Arc<
+            StdMutex<
+                Option<(
+                    Option<Arc<ToolRegistry>>,
+                    Option<tokio_util::sync::CancellationToken>,
+                )>,
+            >,
+        > = Arc::new(StdMutex::new(None));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(RecordingTool {
+            captured: captured.clone(),
+        }));
+        let invoker = RegistryToolInvoker::new(Arc::new(registry));
+
+        for workspace_lease_token in [None, Some(41)] {
+            *captured.lock().unwrap() = None;
+            let cancellation_token = tokio_util::sync::CancellationToken::new();
+            let mut context = no_ctx();
+            context.cancellation_token = cancellation_token.clone();
+            let stale_token = if workspace_lease_token.is_some() {
+                let stale_token = tokio_util::sync::CancellationToken::new();
+                let mut stale_context = ToolUseContext::model_seed("prior-call".into(), None);
+                stale_context.cancel = Some(stale_token.clone());
+                context.tool_context_state =
+                    Some(ToolInvocationContextState::new(Arc::new(stale_context)));
+                Some(stale_token)
+            } else {
+                None
+            };
+
+            if let Some(token) = workspace_lease_token {
+                invoker
+                    .invoke_with_workspace_lease("RecordingTool", json!({}), context, Some(token))
+                    .await
+                    .expect("workspace-leased tool call succeeds");
+            } else {
+                invoker
+                    .invoke("RecordingTool", json!({}), context)
+                    .await
+                    .expect("normal tool call succeeds");
+            }
+
+            let observed_token = captured
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|(_, token)| token.clone())
+                .expect("tool receives the per-call cancellation token");
+            assert!(!observed_token.is_cancelled());
+            cancellation_token.cancel();
+            assert!(
+                observed_token.is_cancelled(),
+                "the tool context token must share the caller's cancellation scope"
+            );
+            if let Some(stale_token) = stale_token {
+                assert!(
+                    !stale_token.is_cancelled(),
+                    "a prior ToolUseContext snapshot must not leak its old cancellation scope"
+                );
+            }
+        }
     }
 
     // ──── swarm identity: SubagentInvocationContext name/team → ToolUseContext ────
@@ -936,6 +1449,11 @@ mod tests {
                     Option<lingxi_core::types::MessageId>,
                     Option<lingxi_core::types::SessionId>,
                     lingxi_core::host::tool_invoker::ToolExecutionPolicy,
+                    Vec<lingxi_core::types::ConversationMessage>,
+                    Option<String>,
+                    Option<lingxi_core::host::instructions::InstructionContext>,
+                    Option<lingxi_core::types::ConversationMessage>,
+                    Vec<lingxi_core::types::ContentBlock>,
                 )>,
             >,
         >,
@@ -992,6 +1510,11 @@ mod tests {
                 ctx.assistant_message_id,
                 ctx.origin_session_id,
                 ctx.tool_execution_policy,
+                ctx.messages,
+                ctx.fork_parent_system_prompt,
+                ctx.instruction_context,
+                ctx.assistant_message,
+                ctx.same_turn_tool_uses,
             ));
             Ok(ToolCallResult {
                 data: json!({}),
@@ -1021,45 +1544,100 @@ mod tests {
         let invoker = RegistryToolInvoker::new(Arc::new(registry));
         let assistant_message_id = lingxi_core::types::MessageId::new();
         let origin_session_id = lingxi_core::types::SessionId::new();
+        let policy = lingxi_core::types::ConversationMessage::user_meta(
+            lingxi_core::types::MessageId::new(),
+            "nested instruction body".into(),
+        );
+        let current_tool_use = lingxi_core::types::ContentBlock::ToolUse {
+            id: lingxi_core::types::ToolUseId::new(),
+            name: "Agent".into(),
+            input: json!({"description":"current row"}),
+            provider_id: Some("provider-current".into()),
+        };
+        let current_assistant_row = lingxi_core::types::ConversationMessage::Assistant {
+            id: lingxi_core::types::MessageId::new(),
+            content: vec![current_tool_use],
+            stop_reason: Some("tool_use".into()),
+        };
+        let prior_sibling_tool_use = lingxi_core::types::ContentBlock::ToolUse {
+            id: lingxi_core::types::ToolUseId::new(),
+            name: "Read".into(),
+            input: json!({"file_path":"prior.txt"}),
+            provider_id: Some("provider-prior".into()),
+        };
+        let mut stale_context = crate::context::ToolUseContext::model_seed("stale".into(), None);
+        stale_context.assistant_message =
+            Some(lingxi_core::types::ConversationMessage::Assistant {
+                id: lingxi_core::types::MessageId::new(),
+                content: vec![lingxi_core::types::ContentBlock::Text {
+                    text: "stale assistant row".into(),
+                    citations: None,
+                }],
+                stop_reason: None,
+            });
+        stale_context.same_turn_tool_uses = vec![lingxi_core::types::ContentBlock::Text {
+            text: "stale sibling".into(),
+            citations: None,
+        }];
+        let mut instruction_context =
+            lingxi_core::host::instructions::InstructionContext::default();
+        instruction_context
+            .sent_paths
+            .insert("/project/pkg/AGENTS.md".into());
 
+        let mut invocation = SubagentInvocationContext {
+            input_projection: None,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            permission_pause_observer: None,
+            parent_agent_id: None,
+            origin_session_id: Some(origin_session_id),
+            instruction_context: Some(instruction_context.clone()),
+            fork_context: Some(lingxi_core::host::tool_invoker::SubagentForkContext {
+                messages: vec![policy.clone()],
+                system_prompt: Some("exact parent system".into()),
+            }),
+            tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
+            agent_name: Some("researcher".to_string()),
+            team_name: Some("alpha".to_string()),
+            is_async: false,
+            is_non_interactive_session: false,
+            can_show_permission_prompts: true,
+            cwd: None,
+            tool_use_id: None,
+            assistant_message_id: Some(assistant_message_id),
+            depth: 0,
+            observer: None,
+            parent_model: None,
+            parent_model_profile: None,
+            agent_spawn_provenance: Default::default(),
+            tool_context_state: Some(ToolInvocationContextState::new(Arc::new(stale_context))),
+            assistant_message: Some(current_assistant_row.clone()),
+            same_turn_tool_uses: vec![prior_sibling_tool_use.clone()],
+            current_history: vec![policy.clone()],
+            mode_override: None,
+            request_source: None,
+            frozen_command_denies: Vec::new(),
+        };
         invoker
-            .invoke(
-                "NameRecordingTool",
-                json!({}),
-                SubagentInvocationContext {
-                    permission_pause_observer: None,
-                    parent_agent_id: None,
-                    origin_session_id: Some(origin_session_id),
-                    tool_execution_policy:
-                        lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
-                    agent_name: Some("researcher".to_string()),
-                    team_name: Some("alpha".to_string()),
-                    is_async: false,
-                    is_non_interactive_session: false,
-                    can_show_permission_prompts: true,
-                    cwd: None,
-                    tool_use_id: None,
-                    assistant_message_id: Some(assistant_message_id),
-                    depth: 0,
-                    observer: None,
-                    parent_model: None,
-                    parent_model_profile: None,
-                    mode_override: None,
-                    request_source: None,
-                    frozen_command_denies: Vec::new(),
-                },
-            )
+            .invoke("NameRecordingTool", json!({}), invocation.clone())
             .await
             .expect("dispatch ok");
 
-        let captured = captured.lock().unwrap();
+        let captured_guard = captured.lock().unwrap();
         let (
             agent_name,
             team_name,
             captured_message_id,
             captured_origin_session_id,
             captured_policy,
-        ) = captured.as_ref().expect("NameRecordingTool::call ran");
+            captured_messages,
+            captured_system_prompt,
+            captured_instructions,
+            captured_assistant_message,
+            captured_same_turn_tool_uses,
+        ) = captured_guard
+            .as_ref()
+            .expect("NameRecordingTool::call ran");
         assert_eq!(
             agent_name.as_deref(),
             Some("researcher"),
@@ -1085,6 +1663,57 @@ mod tests {
             lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             "the trusted execution policy reaches ToolUseContext unchanged"
         );
+        assert_eq!(captured_messages, &vec![policy]);
+        assert_eq!(
+            captured_assistant_message,
+            &Some(current_assistant_row),
+            "the current raw assistant row stays separate from the base history"
+        );
+        assert_eq!(
+            captured_same_turn_tool_uses,
+            &vec![prior_sibling_tool_use],
+            "only earlier siblings are refreshed, excluding stale snapshot and current row"
+        );
+        assert_eq!(
+            captured_system_prompt.as_deref(),
+            Some("exact parent system")
+        );
+        assert_eq!(captured_instructions.as_ref(), Some(&instruction_context));
+        drop(captured_guard);
+
+        let next_policy = lingxi_core::types::ConversationMessage::user_meta(
+            lingxi_core::types::MessageId::new(),
+            "next query history".into(),
+        );
+        let next_assistant_row = lingxi_core::types::ConversationMessage::Assistant {
+            id: lingxi_core::types::MessageId::new(),
+            content: vec![lingxi_core::types::ContentBlock::ToolUse {
+                id: lingxi_core::types::ToolUseId::new(),
+                name: "Agent".into(),
+                input: json!({"description":"next current row"}),
+                provider_id: None,
+            }],
+            stop_reason: Some("tool_use".into()),
+        };
+        let next_sibling_tool_use = lingxi_core::types::ContentBlock::ToolUse {
+            id: lingxi_core::types::ToolUseId::new(),
+            name: "Read".into(),
+            input: json!({"file_path":"next-prior.txt"}),
+            provider_id: None,
+        };
+        invocation.current_history = vec![next_policy.clone()];
+        invocation.assistant_message = Some(next_assistant_row.clone());
+        invocation.same_turn_tool_uses = vec![next_sibling_tool_use.clone()];
+        invoker
+            .invoke("NameRecordingTool", json!({}), invocation)
+            .await
+            .expect("second dispatch ok");
+
+        let captured = captured.lock().unwrap();
+        let captured = captured.as_ref().expect("second tool call ran");
+        assert_eq!(captured.5, vec![next_policy]);
+        assert_eq!(captured.8, Some(next_assistant_row));
+        assert_eq!(captured.9, vec![next_sibling_tool_use]);
     }
 
     #[tokio::test]
@@ -1100,9 +1729,13 @@ mod tests {
                 "NameRecordingTool",
                 json!({}),
                 SubagentInvocationContext {
+                    input_projection: None,
+                    cancellation_token: tokio_util::sync::CancellationToken::new(),
                     permission_pause_observer: None,
                     parent_agent_id: None,
                     origin_session_id: None,
+                    instruction_context: None,
+                    fork_context: None,
                     tool_execution_policy:
                         lingxi_core::host::tool_invoker::ToolExecutionPolicy::FusionPanel,
                     agent_name: None,
@@ -1117,6 +1750,11 @@ mod tests {
                     observer: None,
                     parent_model: None,
                     parent_model_profile: None,
+                    agent_spawn_provenance: Default::default(),
+                    tool_context_state: None,
+                    assistant_message: None,
+                    same_turn_tool_uses: Vec::new(),
+                    current_history: Vec::new(),
                     mode_override: None,
                     request_source: None,
                     frozen_command_denies: Vec::new(),
@@ -1266,9 +1904,13 @@ mod tests {
 
     fn no_ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            input_projection: None,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
+            instruction_context: None,
+            fork_context: None,
             tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             agent_name: None,
             team_name: None,
@@ -1283,6 +1925,11 @@ mod tests {
             observer: None,
             parent_model: None,
             parent_model_profile: None,
+            agent_spawn_provenance: Default::default(),
+            tool_context_state: None,
+            assistant_message: None,
+            same_turn_tool_uses: Vec::new(),
+            current_history: Vec::new(),
             mode_override: None,
             request_source: None,
             frozen_command_denies: Vec::new(),
@@ -1454,9 +2101,13 @@ mod tests {
 
     fn named_ctx(can_show: bool) -> SubagentInvocationContext {
         SubagentInvocationContext {
+            input_projection: None,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
+            instruction_context: None,
+            fork_context: None,
             tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             agent_name: Some("researcher".to_string()),
             team_name: Some("alpha".to_string()),
@@ -1470,6 +2121,11 @@ mod tests {
             observer: None,
             parent_model: None,
             parent_model_profile: None,
+            agent_spawn_provenance: Default::default(),
+            tool_context_state: None,
+            assistant_message: None,
+            same_turn_tool_uses: Vec::new(),
+            current_history: Vec::new(),
             mode_override: None,
             request_source: None,
             frozen_command_denies: Vec::new(),
@@ -1586,7 +2242,9 @@ mod tests {
             _ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
         ) -> lingxi_core::host::permission_gate::PermissionOutcome {
             lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto {
-                updated_input: Some(json!({ "rewritten": "auto" })),
+                updated_input: Some(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                    json!({ "rewritten": "auto" }),
+                )),
             }
         }
 
@@ -1597,9 +2255,13 @@ mod tests {
 
     fn ctx_with_tool_use_id(id: &str) -> SubagentInvocationContext {
         SubagentInvocationContext {
+            input_projection: None,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
+            instruction_context: None,
+            fork_context: None,
             tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             agent_name: Some("researcher".to_string()),
             team_name: Some("alpha".to_string()),
@@ -1613,6 +2275,11 @@ mod tests {
             observer: None,
             parent_model: None,
             parent_model_profile: None,
+            agent_spawn_provenance: Default::default(),
+            tool_context_state: None,
+            assistant_message: None,
+            same_turn_tool_uses: Vec::new(),
+            current_history: Vec::new(),
             mode_override: None,
             request_source: None,
             frozen_command_denies: Vec::new(),
@@ -1908,7 +2575,9 @@ mod tests {
         let gate = Arc::new(ContextRecordingGate {
             seen: Arc::new(StdMutex::new(None)),
             outcome: lingxi_core::host::permission_gate::PermissionOutcome::Allow {
-                updated_input: Some(json!({ "rewritten": true })),
+                updated_input: Some(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                    json!({ "rewritten": true }),
+                )),
                 permission_updates: Vec::new(),
                 decision_classification: None,
             },
@@ -1927,6 +2596,120 @@ mod tests {
             json!({ "echo": { "rewritten": true } }),
             "the gate-rewritten updatedInput, not the original, is what the tool runs with"
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_preserves_original_and_approved_utf16_input_carriers() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+        let original =
+            Utf16JsonProjection::parse(r#"{"text":"\ud800","\ud801":"original"}"#).unwrap();
+        let updated =
+            Utf16JsonProjection::parse(r#"{"text":"\udfff","\ud901":"approved"}"#).unwrap();
+        let seen = Arc::new(StdMutex::new(None));
+        let gate = Arc::new(ContextRecordingGate {
+            seen: seen.clone(),
+            outcome: lingxi_core::host::permission_gate::PermissionOutcome::Allow {
+                updated_input: Some(updated.clone()),
+                permission_updates: Vec::new(),
+                decision_classification: None,
+            },
+        });
+        let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        let mut invocation = ctx_with_tool_use_id("toolu_exact");
+        invocation.input_projection = Some(original.clone());
+        let result = invoker
+            .invoke_detailed("TestEcho", original.value.clone(), invocation, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            seen.lock().unwrap().as_ref().unwrap().input_projection,
+            Some(original)
+        );
+        let retained = result
+            .context_state
+            .unwrap()
+            .downcast_arc::<ToolUseContext>()
+            .unwrap();
+        assert_eq!(retained.projected_input(&updated.value).unwrap(), updated);
+    }
+
+    #[tokio::test]
+    async fn dispatch_allow_auto_preserves_utf16_rewrite() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+        let updated =
+            Utf16JsonProjection::parse(r#"{"text":"\udfff","\ud901":"approved"}"#).unwrap();
+        let gate = Arc::new(ContextRecordingGate {
+            seen: Arc::new(StdMutex::new(None)),
+            outcome: lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto {
+                updated_input: Some(updated.clone()),
+            },
+        });
+        let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        let result = invoker
+            .invoke_detailed("TestEcho", json!({}), no_ctx(), None)
+            .await
+            .unwrap();
+        let retained = result
+            .context_state
+            .unwrap()
+            .downcast_arc::<ToolUseContext>()
+            .unwrap();
+        assert_eq!(retained.projected_input(&updated.value).unwrap(), updated);
+    }
+
+    #[tokio::test]
+    async fn dispatch_does_not_reuse_a_previous_calls_utf16_projection() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+        let exact = Utf16JsonProjection::parse(r#"{"text":"\ud800"}"#).unwrap();
+        let invoker = RegistryToolInvoker::new(registry_with_echo());
+        let mut first = no_ctx();
+        first.input_projection = Some(exact.clone());
+        let result = invoker
+            .invoke_detailed("TestEcho", exact.value.clone(), first, None)
+            .await
+            .unwrap();
+        let mut next = no_ctx();
+        next.tool_context_state = result.context_state;
+        // Equal display strings do not establish physical-call ownership.
+        let result = invoker
+            .invoke_detailed("TestEcho", exact.value.clone(), next, None)
+            .await
+            .unwrap();
+        let retained = result
+            .context_state
+            .unwrap()
+            .downcast_arc::<ToolUseContext>()
+            .unwrap();
+        assert!(
+            retained
+                .projected_input(&exact.value)
+                .unwrap()
+                .strings
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_rejects_an_input_projection_for_different_arguments() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+        let seen = Arc::new(StdMutex::new(None));
+        let gate = Arc::new(ContextRecordingGate {
+            seen: seen.clone(),
+            outcome: lingxi_core::host::permission_gate::PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+                decision_classification: None,
+            },
+        });
+        let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        let mut invocation = no_ctx();
+        invocation.input_projection =
+            Some(Utf16JsonProjection::parse(r#"{"text":"\ud800"}"#).unwrap());
+        let result = invoker
+            .invoke_detailed("TestEcho", json!({"text":"different"}), invocation, None)
+            .await;
+        assert!(matches!(result, Err(ToolInvokerError::InvalidInput(_))));
+        assert!(seen.lock().unwrap().is_none());
     }
 
     #[tokio::test]
@@ -2209,28 +2992,34 @@ mod tests {
         for rule in [Some(Deny), Some(Ask)] {
             let invoker =
                 RegistryToolInvoker::new(plan_probe_registry()).with_gate(plan_policy_gate(rule));
-            assert!(invoker
-                .invoke("Write", input.clone(), plan_probe_context(id))
-                .await
-                .is_err());
+            assert!(
+                invoker
+                    .invoke("Write", input.clone(), plan_probe_context(id))
+                    .await
+                    .is_err()
+            );
             assert!(!path.exists());
         }
         let invoker =
             RegistryToolInvoker::new(plan_probe_registry()).with_gate(plan_policy_gate(None));
-        assert!(invoker
-            .invoke(
-                "Write",
-                json!({"file_path":sibling,"content":"no"}),
-                plan_probe_context(id)
-            )
-            .await
-            .is_err());
+        assert!(
+            invoker
+                .invoke(
+                    "Write",
+                    json!({"file_path":sibling,"content":"no"}),
+                    plan_probe_context(id)
+                )
+                .await
+                .is_err()
+        );
         let mut frozen = plan_probe_context(id);
         frozen.frozen_command_denies.push("Write".into());
-        assert!(invoker
-            .invoke("Write", input.clone(), frozen)
-            .await
-            .is_err());
+        assert!(
+            invoker
+                .invoke("Write", input.clone(), frozen)
+                .await
+                .is_err()
+        );
         let result = invoker
             .invoke_detailed("Write", input.clone(), plan_probe_context(id), None)
             .await
@@ -2255,20 +3044,24 @@ mod tests {
         let gate = Arc::new(ContextRecordingGate {
             seen: Arc::new(StdMutex::new(None)),
             outcome: lingxi_core::host::permission_gate::PermissionOutcome::Allow {
-                updated_input: Some(json!({"file_path":other,"content":"no"})),
+                updated_input: Some(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                    json!({"file_path":other,"content":"no"}),
+                )),
                 permission_updates: vec![],
                 decision_classification: None,
             },
         });
         let invoker = RegistryToolInvoker::new(plan_probe_registry()).with_gate(gate);
-        assert!(invoker
-            .invoke(
-                "Write",
-                json!({"file_path":path,"content":"plan"}),
-                plan_probe_context(id)
-            )
-            .await
-            .is_err());
+        assert!(
+            invoker
+                .invoke(
+                    "Write",
+                    json!({"file_path":path,"content":"plan"}),
+                    plan_probe_context(id)
+                )
+                .await
+                .is_err()
+        );
         assert!(!other.exists());
         assert!(!path.exists());
     }

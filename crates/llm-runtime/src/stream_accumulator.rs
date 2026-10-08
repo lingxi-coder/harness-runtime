@@ -24,6 +24,10 @@ use futures::stream::{BoxStream, StreamExt};
 use serde_json::Value;
 use std::collections::HashMap;
 
+fn projected_response_model(metadata: &Value) -> Option<&str> {
+    metadata.get("llm_client")?.get("response_model")?.as_str()
+}
+
 // The SDK owns text/signature/JSON assembly. This map only remembers the host
 // presentation kind and lifecycle so invalid UI event sequences fail locally.
 #[derive(Debug, Clone)]
@@ -35,6 +39,7 @@ enum BlockKind {
         server: Option<Value>,
     },
     Reasoning,
+    PreservedText(ContentBlock),
     Preserved(ContentBlock),
     Other,
 }
@@ -43,6 +48,7 @@ enum BlockKind {
 struct BlockAccumulator {
     sdk: lingxi_llm_client::stream_assembly::StreamAccumulator,
     kinds: HashMap<u32, BlockKind>,
+    text_citations: HashMap<u32, Option<Option<Value>>>,
     tool_calls_started: usize,
     tool_deltas: std::collections::HashSet<u32>,
 }
@@ -91,6 +97,26 @@ impl BlockAccumulator {
                 block: index as usize,
                 text: text.into(),
             }),
+            Some(BlockKind::PreservedText(_)) => {}
+            Some(_) => return Err(type_mismatch(index, "text", "text_delta")),
+            None => return Err(block_not_found(index)),
+        }
+        Ok(())
+    }
+    fn append_text_utf16(
+        &mut self,
+        index: u32,
+        text: &str,
+        utf16_code_units: Vec<u16>,
+    ) -> Result<(), LlmError> {
+        use lingxi_llm_client::protocol::StreamEvent;
+        match self.kinds.get(&index) {
+            Some(BlockKind::Text) => self.observe(StreamEvent::TextDeltaJsUtf16 {
+                block: index as usize,
+                text: text.into(),
+                utf16_code_units,
+            }),
+            Some(BlockKind::PreservedText(_)) => {}
             Some(_) => return Err(type_mismatch(index, "text", "text_delta")),
             None => return Err(block_not_found(index)),
         }
@@ -113,7 +139,7 @@ impl BlockAccumulator {
                     arguments_fragment: partial.into(),
                 })
             }
-            Some(BlockKind::Preserved(_)) => {}
+            Some(BlockKind::PreservedText(_)) | Some(BlockKind::Preserved(_)) => {}
             Some(_) => return Err(type_mismatch(index, "tool_call", "input_json_delta")),
             None => return Err(block_not_found(index)),
         }
@@ -127,6 +153,40 @@ impl BlockAccumulator {
             });
         }
     }
+    fn set_text_citations(
+        &mut self,
+        index: u32,
+        citations: Option<Option<Value>>,
+    ) -> Result<(), LlmError> {
+        match self.kinds.get(&index) {
+            Some(BlockKind::Text) => {
+                self.text_citations.insert(index, citations);
+                Ok(())
+            }
+            Some(_) => Err(type_mismatch(index, "text", "text_citations")),
+            None => Err(block_not_found(index)),
+        }
+    }
+    fn set_provider_content_snapshot(&mut self, index: u32, value: Value) -> Result<(), LlmError> {
+        let Some(kind) = self.kinds.get_mut(&index) else {
+            return Err(block_not_found(index));
+        };
+        match kind {
+            BlockKind::PreservedText(ContentBlock::ProviderContent {
+                protocol,
+                value: current,
+            }) if protocol == "anthropic_messages" => {
+                *current = value;
+                Ok(())
+            }
+            _ => Err(type_mismatch(
+                index,
+                "opaque_text",
+                "provider_content_snapshot",
+            )),
+        }
+    }
+
     fn set_signature(&mut self, index: u32, signature: &str) -> Result<(), LlmError> {
         match self.kinds.get(&index) {
             Some(BlockKind::Reasoning) => {
@@ -152,12 +212,24 @@ impl BlockAccumulator {
         let content = self.sdk.content_at(index as usize);
         let content = content.as_ref();
         Ok(match kind {
+            BlockKind::PreservedText(block) => Some(block),
             BlockKind::Preserved(block) => Some(block),
             BlockKind::Other => None,
             BlockKind::Text => match content {
                 Some(SdkBlock::Text { text, .. }) => Some(ContentBlock::Text {
                     text: text.clone(),
                     cache_control: None,
+                    citations: self.text_citations.remove(&index).unwrap_or(None),
+                }),
+                Some(SdkBlock::TextJsUtf16 {
+                    text,
+                    utf16_code_units,
+                    ..
+                }) => Some(ContentBlock::TextJsUtf16 {
+                    text: text.clone(),
+                    utf16_code_units: utf16_code_units.clone(),
+                    cache_control: None,
+                    citations: self.text_citations.remove(&index).unwrap_or(None),
                 }),
                 _ => None,
             },
@@ -243,6 +315,11 @@ fn block_kind_of(block: &ContentBlock) -> BlockKind {
             server: Some(input.clone()),
         },
         ContentBlock::Reasoning { .. } => BlockKind::Reasoning,
+        ContentBlock::ProviderContent { protocol, value }
+            if protocol == "anthropic_messages" && value["type"] == "text" =>
+        {
+            BlockKind::PreservedText(block.clone())
+        }
         ContentBlock::RedactedThinking { .. }
         | ContentBlock::ConnectorText { .. }
         | ContentBlock::ProviderContent { .. }
@@ -333,38 +410,74 @@ pub async fn accumulate_stream(
 /// seen are salvaged — an in-flight (unstopped) block is dropped exactly as CC's
 /// `blocks_yielded` counts only completed blocks.
 pub async fn accumulate_stream_salvaging(
-    mut stream: BoxStream<'static, Result<HistoryEvent, LlmError>>,
+    stream: BoxStream<'static, Result<HistoryEvent, LlmError>>,
 ) -> Result<HistoryResponse, (Vec<ContentBlock>, LlmError)> {
-    let mut acc = BlockAccumulator::new();
-    let mut malformed_input: Option<LlmError> = None;
-    let mut content: Vec<ContentBlock> = Vec::new();
-    let mut content_indices: Vec<(u32, bool)> = Vec::new();
-    let mut id = String::new();
-    let mut model = String::new();
-    let mut usage = ExecutionUsage::default();
-    let mut stop_reason: Option<String> = None;
-    let mut stop_details = None;
-    let mut cost = None;
-    let mut provider_metadata = Value::Null;
+    accumulate_stream_salvaging_remaining(stream)
+        .await
+        .map(|(response, _remaining)| response)
+}
 
-    // Surface `$result`'s error paired with the blocks completed so far; the
-    // `content` move only happens on the diverging error branch.
-    macro_rules! salvage {
-        ($result:expr) => {
-            match $result {
-                Ok(v) => v,
-                Err(err) => return Err((content, err)),
-            }
-        };
+/// Accumulate one assistant response and return the unread event stream. Mod
+/// `turn.step` can emit multiple assistant responses from one request; its
+/// caller must process each response without opening another provider call.
+#[derive(Debug)]
+pub enum ResponseAccumulatorUpdate {
+    /// One content block has been fully assembled. This is emitted at the
+    /// `content_block_stop` boundary, so live consumers can act on a complete
+    /// tool call while the provider stream is still open.
+    Continue {
+        completed_block: Option<(u32, ContentBlock)>,
+    },
+    /// The current response reached `message_stop` or a complete snapshot.
+    Completed(HistoryResponse),
+}
+
+/// Incremental form of the response accumulator used by consumers that need
+/// completed block boundaries before the provider stream ends. It is the same
+/// assembler used by [`accumulate_stream_salvaging_remaining`]; callers should
+/// not decode provider deltas themselves.
+#[derive(Debug)]
+pub struct ResponseAccumulator {
+    acc: BlockAccumulator,
+    malformed_input: Option<LlmError>,
+    content: Vec<ContentBlock>,
+    content_indices: Vec<(u32, bool)>,
+    id: String,
+    model: String,
+    usage: ExecutionUsage,
+    stop_reason: Option<String>,
+    stop_details: Option<crate::HistoryStopDetails>,
+    cost: Option<crate::CostEstimate>,
+    provider_metadata: Value,
+}
+
+impl Default for ResponseAccumulator {
+    fn default() -> Self {
+        Self {
+            acc: BlockAccumulator::new(),
+            malformed_input: None,
+            content: Vec::new(),
+            content_indices: Vec::new(),
+            id: String::new(),
+            model: String::new(),
+            usage: ExecutionUsage::default(),
+            stop_reason: None,
+            stop_details: None,
+            cost: None,
+            provider_metadata: Value::Null,
+        }
     }
+}
 
-    while let Some(item) = stream.next().await {
-        // Transport-level error: salvage the completed blocks + surface it.
-        let event = match item {
-            Ok(event) => event,
-            Err(err) => return Err((content, malformed_input.unwrap_or(err))),
-        };
-        if let Some(error) = malformed_input.as_mut() {
+impl ResponseAccumulator {
+    /// Apply one provider-neutral HistoryEvent. A fallback observation filters
+    /// the same accumulated block indexes as the one-shot path; the raw event
+    /// remains available to the caller for host-owned admission/cancellation.
+    pub fn observe(
+        &mut self,
+        event: HistoryEvent,
+    ) -> Result<ResponseAccumulatorUpdate, (Vec<ContentBlock>, LlmError)> {
+        if self.malformed_input.is_some() {
             match event {
                 HistoryEvent::ContentBlockStart { content_block, .. }
                     if matches!(
@@ -372,78 +485,185 @@ pub async fn accumulate_stream_salvaging(
                         ContentBlock::ToolCall { .. } | ContentBlock::ServerToolUse { .. }
                     ) =>
                 {
-                    acc.tool_calls_started += 1;
+                    self.acc.tool_calls_started += 1;
                 }
                 HistoryEvent::Completed { .. } => {
-                    // A terminal snapshot may include calls without corresponding
-                    // start events. Do not recover without complete event evidence.
-                    return Err((content, malformed_input.expect("pending malformed input")));
+                    return Err((
+                        std::mem::take(&mut self.content),
+                        self.malformed_input
+                            .take()
+                            .expect("pending malformed input"),
+                    ));
                 }
                 HistoryEvent::MessageStop => {
-                    if let LlmError::MalformedToolInput {
+                    if let Some(LlmError::MalformedToolInput {
                         has_other_tool_calls,
                         ..
-                    } = error
+                    }) = self.malformed_input.as_mut()
                     {
-                        *has_other_tool_calls = acc.tool_calls_started > 1;
+                        *has_other_tool_calls = self.acc.tool_calls_started > 1;
                     }
-                    return Err((content, malformed_input.expect("pending malformed input")));
+                    return Err((
+                        std::mem::take(&mut self.content),
+                        self.malformed_input
+                            .take()
+                            .expect("pending malformed input"),
+                    ));
                 }
                 _ => {}
             }
-            continue;
+            return Ok(ResponseAccumulatorUpdate::Continue {
+                completed_block: None,
+            });
         }
+
         match event {
             HistoryEvent::WebSearch { .. } => {} // Metadata is retained by the terminal snapshot.
+            HistoryEvent::ResponseObserved {
+                model: observed,
+                response_id,
+            } => {
+                self.model = observed;
+                if let Some(observed_id) = response_id {
+                    self.id = observed_id;
+                }
+            }
+            HistoryEvent::CostQuoteObserved { estimate, .. } => {
+                // A quote is a settlement fact, not a usage report. Keep it
+                // even when the provider omitted aggregate token counters.
+                // `None` is authoritative too: it suppresses stale aggregate
+                // estimates for a native multi-iteration quote that could not
+                // be fully priced from the frozen catalog.
+                self.cost = estimate;
+            }
+            HistoryEvent::ServerFallback {
+                event,
+                profile,
+                lane,
+            } => {
+                self.acc.sdk.apply_server_fallback(&event);
+                self.acc.kinds.retain(|index, _| {
+                    !event
+                        .discarded_blocks
+                        .contains(&((*index & 0x7fff_ffff) as usize))
+                });
+                self.acc.tool_deltas.retain(|index| {
+                    !event
+                        .discarded_blocks
+                        .contains(&((*index & 0x7fff_ffff) as usize))
+                });
+                self.model.clone_from(&event.to_model);
+                let mut retained_content = Vec::new();
+                let mut retained_indices = Vec::new();
+                for (block, index) in std::mem::take(&mut self.content)
+                    .into_iter()
+                    .zip(std::mem::take(&mut self.content_indices))
+                {
+                    if !event.discarded_blocks.contains(&(index.0 as usize)) {
+                        retained_content.push(block);
+                        retained_indices.push(index);
+                    }
+                }
+                self.content = retained_content;
+                self.content_indices = retained_indices;
+                crate::history_projection::append_observation(
+                    &mut self.provider_metadata,
+                    "server_fallback_events",
+                    serde_json::to_value(crate::history::HistoryServerFallback {
+                        event: *event,
+                        profile,
+                        lane,
+                    })
+                    .expect("normalized fallback event"),
+                );
+            }
             HistoryEvent::MessageStart { response } => {
                 // Capture id/model + the usage seed from the start snapshot.
-                id = response.id;
-                model = response.model;
-                usage = response.usage;
-                cost = response.cost;
-                provider_metadata = response.provider_metadata;
-                stop_details = response.stop_details;
+                self.id = response.id;
+                self.model = response.model;
+                self.usage = response.usage;
+                self.cost = response.cost;
+                self.provider_metadata = response.provider_metadata;
+                self.stop_details = response.stop_details;
             }
             HistoryEvent::ContentBlockStart {
                 index,
                 content_block,
             } => {
-                acc.start_block(index, block_kind_of(&content_block));
+                self.acc.start_block(index, block_kind_of(&content_block));
+                let citations = match &content_block {
+                    ContentBlock::Text { citations, .. }
+                    | ContentBlock::TextJsUtf16 { citations, .. } => Some(citations.clone()),
+                    _ => None,
+                };
+                if let Some(citations) = citations {
+                    self.acc.text_citations.insert(index, citations);
+                }
             }
-            HistoryEvent::ContentBlockDelta { index, delta } => match delta {
-                HistoryContentDelta::TextDelta { text } => salvage!(acc.append_text(index, &text)),
-                HistoryContentDelta::InputJsonDelta { partial_json } => {
-                    salvage!(acc.append_json(index, &partial_json));
+            HistoryEvent::ContentBlockDelta { index, delta } => {
+                let result = match delta {
+                    HistoryContentDelta::TextDelta { text } => self.acc.append_text(index, &text),
+                    HistoryContentDelta::TextJsUtf16Delta {
+                        text,
+                        utf16_code_units,
+                    } => self.acc.append_text_utf16(index, &text, utf16_code_units),
+                    HistoryContentDelta::InputJsonDelta { partial_json } => {
+                        self.acc.append_json(index, &partial_json)
+                    }
+                    HistoryContentDelta::ThinkingDelta { thinking } => {
+                        // No-op on a non-thinking block (e.g. `redacted_thinking`),
+                        // never a stream error — see [`append_thinking`].
+                        self.acc.append_thinking(index, &thinking);
+                        Ok(())
+                    }
+                    HistoryContentDelta::SignatureDelta { signature } => {
+                        self.acc.set_signature(index, &signature)
+                    }
+                    HistoryContentDelta::TextCitations { citations } => {
+                        self.acc.set_text_citations(index, citations)
+                    }
+                    HistoryContentDelta::ProviderContentSnapshot { value } => {
+                        self.acc.set_provider_content_snapshot(index, value)
+                    }
+                    // Dropped at the `translate_response_blocks` boundary.
+                    HistoryContentDelta::CitationsDelta { .. }
+                    | HistoryContentDelta::ConnectorTextDelta { .. } => Ok(()),
+                };
+                if let Err(error) = result {
+                    return Err((std::mem::take(&mut self.content), error));
                 }
-                HistoryContentDelta::ThinkingDelta { thinking } => {
-                    // No-op on a non-thinking block (e.g. `redacted_thinking`),
-                    // never a stream error — see [`append_thinking`].
-                    acc.append_thinking(index, &thinking);
-                }
-                HistoryContentDelta::SignatureDelta { signature } => {
-                    salvage!(acc.set_signature(index, &signature));
-                }
-                // Dropped at the `translate_response_blocks` boundary.
-                HistoryContentDelta::CitationsDelta { .. }
-                | HistoryContentDelta::ConnectorTextDelta { .. } => {}
-            },
+            }
             HistoryEvent::ContentBlockStop { index } => {
-                match acc.stop_block(index) {
+                match self.acc.stop_block(index) {
                     Ok(block) => {
                         if let Some(block) = block {
                             if let ContentBlock::ProviderContent { value, .. } = &block {
-                                if value["type"] == "lingxi_observation" {
+                                if index >= 0x8000_0000
+                                    && value["type"] == "lingxi_observation"
+                                    && value["metadata"]["llm_client"].is_object()
+                                {
                                     if let Some(metadata) = value.get("metadata") {
-                                        provider_metadata = metadata.clone();
+                                        if let Some(response_model) =
+                                            projected_response_model(metadata)
+                                        {
+                                            self.model = response_model.to_owned();
+                                        }
+                                        self.provider_metadata = metadata.clone();
                                     }
-                                    continue;
+                                    return Ok(ResponseAccumulatorUpdate::Continue {
+                                        completed_block: None,
+                                    });
                                 }
                             }
                             let key = crate::stream_content_order(index);
-                            let position =
-                                content_indices.partition_point(|existing| existing <= &key);
-                            content_indices.insert(position, key);
-                            content.insert(position, block);
+                            let position = self
+                                .content_indices
+                                .partition_point(|existing| existing <= &key);
+                            self.content_indices.insert(position, key);
+                            self.content.insert(position, block.clone());
+                            return Ok(ResponseAccumulatorUpdate::Continue {
+                                completed_block: Some((index, block)),
+                            });
                         }
                     }
                     Err(mut error @ LlmError::MalformedToolInput { .. }) => {
@@ -456,9 +676,9 @@ pub async fn accumulate_stream_salvaging(
                         {
                             *has_other_tool_calls = true;
                         }
-                        malformed_input = Some(error);
+                        self.malformed_input = Some(error);
                     }
-                    Err(error) => return Err((content, error)),
+                    Err(error) => return Err((std::mem::take(&mut self.content), error)),
                 }
             }
             HistoryEvent::MessageDelta {
@@ -466,60 +686,127 @@ pub async fn accumulate_stream_salvaging(
                 usage: delta_usage,
             } => {
                 if let Some(sr) = delta.stop_reason {
-                    stop_reason = Some(sr);
+                    self.stop_reason = Some(sr);
                 }
                 if delta.stop_details.is_some() {
-                    stop_details = delta.stop_details;
+                    self.stop_details = delta.stop_details;
                 }
-                if let Some(mut u) = delta_usage {
-                    if let Some(metadata) = u.provider_metadata.get("stream") {
-                        provider_metadata = metadata.clone();
+                if let Some(mut usage) = delta_usage {
+                    if let Some(metadata) = usage.provider_metadata.get("stream") {
+                        if let Some(response_model) = projected_response_model(metadata) {
+                            self.model = response_model.to_owned();
+                        }
+                        self.provider_metadata = metadata.clone();
                     }
-                    if let Some(estimate) = u.cost_estimate.take() {
-                        cost = Some(estimate);
+                    if let Some(estimate) = usage.cost_estimate.take() {
+                        self.cost = Some(estimate);
                     }
-                    usage = merge_usage(&usage, &u);
+                    self.usage = merge_usage(&self.usage, &usage);
                 }
             }
             HistoryEvent::MessageStop => {
-                return Ok(HistoryResponse {
-                    id,
-                    model,
-                    content,
-                    stop_reason,
-                    stop_details,
-                    usage,
-                    cost,
-                    provider_metadata,
-                });
+                return Ok(ResponseAccumulatorUpdate::Completed(HistoryResponse {
+                    id: std::mem::take(&mut self.id),
+                    model: std::mem::take(&mut self.model),
+                    content: std::mem::take(&mut self.content),
+                    stop_reason: self.stop_reason.take(),
+                    stop_details: self.stop_details.take(),
+                    usage: std::mem::take(&mut self.usage),
+                    cost: self.cost.take(),
+                    provider_metadata: std::mem::replace(&mut self.provider_metadata, Value::Null),
+                }));
             }
             // Short-circuit: the stream provider emits a fully-assembled
             // response in the `Completed` event — return it directly.
             // This is the canonical terminal for llm-runtime streams
             // (llm-runtime protocol.rs:302; drops Ping/Error from api-client).
             HistoryEvent::Completed { response } => {
-                return Ok(*response);
+                return Ok(ResponseAccumulatorUpdate::Completed(*response));
             }
         }
+        Ok(ResponseAccumulatorUpdate::Continue {
+            completed_block: None,
+        })
     }
-    // Stream ended without a `message_stop` or `completed` event.
-    if let Some(error) = malformed_input {
-        return Err((content, error));
+
+    /// Salvage only blocks whose stop event has already been observed.
+    pub fn partial_content(&self) -> &[ContentBlock] {
+        &self.content
     }
-    Err((
-        content,
-        LlmError::StreamInterrupted {
-            message: "stream ended without message_stop or completed event".to_string(),
-        },
-    ))
+
+    /// Snapshot the response facts observed so far without manufacturing a
+    /// terminal event. Host controllers use this when a routing decision ends
+    /// a stream before the provider sends its message delta/stop pair.
+    #[must_use]
+    pub fn partial_snapshot(&self) -> HistoryResponse {
+        HistoryResponse {
+            id: self.id.clone(),
+            model: self.model.clone(),
+            content: self.content.clone(),
+            stop_reason: self.stop_reason.clone(),
+            stop_details: self.stop_details.clone(),
+            usage: self.usage.clone(),
+            cost: self.cost.clone(),
+            provider_metadata: self.provider_metadata.clone(),
+        }
+    }
+
+    /// If malformed tool input was observed before a transport error, it is
+    /// the authoritative failure to surface, matching the one-shot adapter.
+    pub fn take_malformed_error(&mut self) -> Option<LlmError> {
+        self.malformed_input.take()
+    }
+
+    /// Report the canonical incomplete-stream error at end of input.
+    pub fn finish(self) -> (Vec<ContentBlock>, LlmError) {
+        if let Some(error) = self.malformed_input {
+            return (self.content, error);
+        }
+        (
+            self.content,
+            LlmError::StreamInterrupted {
+                message: "stream ended without message_stop or completed event".to_string(),
+            },
+        )
+    }
+}
+
+pub async fn accumulate_stream_salvaging_remaining(
+    mut stream: BoxStream<'static, Result<HistoryEvent, LlmError>>,
+) -> Result<
+    (
+        HistoryResponse,
+        BoxStream<'static, Result<HistoryEvent, LlmError>>,
+    ),
+    (Vec<ContentBlock>, LlmError),
+> {
+    let mut accumulator = ResponseAccumulator::default();
+    while let Some(item) = stream.next().await {
+        // Transport-level error: salvage the completed blocks + surface it.
+        let event = match item {
+            Ok(event) => event,
+            Err(error) => {
+                let partial = accumulator.partial_content().to_vec();
+                let malformed = accumulator.take_malformed_error();
+                return Err((partial, malformed.unwrap_or(error)));
+            }
+        };
+        match accumulator.observe(event) {
+            Ok(ResponseAccumulatorUpdate::Continue { .. }) => {}
+            Ok(ResponseAccumulatorUpdate::Completed(response)) => {
+                return Ok((response, stream));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(accumulator.finish())
 }
 
 /// Synthesize a [`HistoryEvent`] sequence that reconstructs `resp` exactly when
 /// fed back through [`accumulate_stream`].
 ///
-/// Used by the default [`crate::api::SubagentApiClient::messages_create_stream`]
-/// impl so a client that only implements the non-streaming `messages_create`
-/// still presents a streaming seam. The round-trip is lossless: `text` /
+/// Scripted clients can explicitly adapt complete responses to event streams.
+/// The round-trip is lossless: `text` /
 /// `reasoning` bodies ride a single delta (the `content_block_start` payload is
 /// empty, exactly as on the wire), `tool_call` input rides one `input_json_delta`
 /// (re-parsed on stop), and the full usage is seeded on `message_start` so the
@@ -554,11 +841,34 @@ pub fn response_to_stream_events(resp: HistoryResponse) -> Vec<HistoryEvent> {
                     content_block: ContentBlock::Text {
                         text: String::new(),
                         cache_control: None,
+                        citations: None,
                     },
                 });
                 events.push(HistoryEvent::ContentBlockDelta {
                     index,
                     delta: HistoryContentDelta::TextDelta { text },
+                });
+            }
+            ContentBlock::TextJsUtf16 {
+                text,
+                utf16_code_units,
+                citations,
+                cache_control,
+            } => {
+                events.push(HistoryEvent::ContentBlockStart {
+                    index,
+                    content_block: ContentBlock::Text {
+                        text: String::new(),
+                        cache_control,
+                        citations,
+                    },
+                });
+                events.push(HistoryEvent::ContentBlockDelta {
+                    index,
+                    delta: HistoryContentDelta::TextJsUtf16Delta {
+                        text,
+                        utf16_code_units,
+                    },
                 });
             }
             ContentBlock::Reasoning { text, signature } => {
@@ -715,6 +1025,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_cost_quote_survives_without_manufacturing_a_usage_report() {
+        let estimate = crate::CostEstimate {
+            pricing_model: crate::PricingModelRef {
+                pricing_provider_id: crate::ProviderId::AnthropicFirstParty,
+                billing_model: "claude-opus-4-7".into(),
+                request_model: "claude-opus-4-7".into(),
+                display_model: "claude-opus-4-7".into(),
+            },
+            total_cost_usd: Some(0.0),
+            input_cost_usd: Some(0.0),
+            output_cost_usd: Some(0.0),
+            cache_read_cost_usd: Some(0.0),
+            cache_write_cost_usd: Some(0.0),
+            reasoning_cost_usd: Some(0.0),
+            estimated: true,
+            pricing_source: Some("captured-sdk-profile".into()),
+        };
+        let metadata = serde_json::json!({
+            "llm_client": {
+                "server_fallback_cost_quote": {
+                    "kind":"anthropic_server_fallback_per_iteration",
+                    "completeness":"complete"
+                }
+            }
+        });
+        let response = accumulate_stream(boxed(vec![
+            message_start("m", "claude-opus-4-7"),
+            HistoryEvent::CostQuoteObserved {
+                estimate: Some(estimate.clone()),
+                native_server_fallback: true,
+                summary_model: Some("claude-opus-4-7".into()),
+            },
+            HistoryEvent::ContentBlockStart {
+                index: u32::MAX,
+                content_block: ContentBlock::ProviderContent {
+                    protocol: "anthropic_messages".into(),
+                    value: serde_json::json!({
+                        "type":"lingxi_observation",
+                        "metadata":metadata
+                    }),
+                },
+            },
+            HistoryEvent::ContentBlockStop { index: u32::MAX },
+            HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
+                    stop_reason: Some("end_turn".into()),
+                    stop_details: None,
+                },
+                usage: None,
+            },
+            HistoryEvent::MessageStop,
+        ]))
+        .await
+        .unwrap();
+        assert_eq!(response.usage, ExecutionUsage::default());
+        assert_eq!(response.cost, Some(estimate));
+        assert_eq!(
+            response.server_fallback_cost_quote().unwrap()["completeness"],
+            "complete"
+        );
+        assert!(response.content.is_empty());
+    }
+
+    #[tokio::test]
     async fn terminal_stream_usage_promotes_frozen_quote_to_response_cost() {
         let mut quote = crate::CostEstimate::unestimated(crate::PricingModelRef {
             pricing_provider_id: crate::ProviderId::OpenAICompatible {
@@ -754,6 +1128,7 @@ mod tests {
                 content_block: ContentBlock::Text {
                     text: String::new(),
                     cache_control: None,
+                    citations: None,
                 },
             },
             HistoryEvent::ContentBlockDelta {
@@ -783,6 +1158,54 @@ mod tests {
             ContentBlock::Text { text, .. } => assert_eq!(text, "hello"),
             other => panic!("expected Text, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn utf16_text_stream_pairs_surrogate_halves_and_keeps_units_off_event_json() {
+        let high = HistoryContentDelta::TextJsUtf16Delta {
+            text: "�".into(),
+            utf16_code_units: vec![0xd83d],
+        };
+        let serialized = serde_json::to_value(&high).unwrap();
+        assert!(serialized.get("utf16_code_units").is_none());
+        let response = accumulate_stream(boxed(vec![
+            message_start("m-utf16", "claude-mock"),
+            HistoryEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlock::Text {
+                    text: String::new(),
+                    cache_control: None,
+                    citations: None,
+                },
+            },
+            HistoryEvent::ContentBlockDelta {
+                index: 0,
+                delta: high,
+            },
+            HistoryEvent::ContentBlockDelta {
+                index: 0,
+                delta: HistoryContentDelta::TextJsUtf16Delta {
+                    text: "�".into(),
+                    utf16_code_units: vec![0xde00],
+                },
+            },
+            HistoryEvent::ContentBlockStop { index: 0 },
+            HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
+                    stop_reason: Some("end_turn".into()),
+                    stop_details: None,
+                },
+                usage: None,
+            },
+            HistoryEvent::MessageStop,
+        ]))
+        .await
+        .expect("utf16 stream accumulation");
+        assert!(matches!(
+            response.content.as_slice(),
+            [ContentBlock::TextJsUtf16 { text, utf16_code_units, .. }]
+                if text == "😀" && utf16_code_units == &[0xd83d, 0xde00]
+        ));
     }
 
     #[tokio::test]
@@ -830,6 +1253,73 @@ mod tests {
             }
             other => panic!("expected ToolCall, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn incremental_accumulator_exposes_a_complete_tool_call_before_terminal_event() {
+        let mut accumulator = ResponseAccumulator::default();
+        accumulator
+            .observe(message_start("m-live", "claude-mock"))
+            .unwrap();
+        accumulator
+            .observe(HistoryEvent::ContentBlockStart {
+                index: 4,
+                content_block: ContentBlock::ToolCall {
+                    id: "tool-live".into(),
+                    name: "Agent".into(),
+                    input: Value::Null,
+                },
+            })
+            .unwrap();
+        accumulator
+            .observe(HistoryEvent::ContentBlockDelta {
+                index: 4,
+                delta: HistoryContentDelta::InputJsonDelta {
+                    partial_json: r#"{"prompt":"run child"}"#.into(),
+                },
+            })
+            .unwrap();
+
+        let update = accumulator
+            .observe(HistoryEvent::ContentBlockStop { index: 4 })
+            .unwrap();
+        let ResponseAccumulatorUpdate::Continue {
+            completed_block: Some((index, block)),
+        } = update
+        else {
+            panic!("content_block_stop must publish the assembled block");
+        };
+        assert_eq!(index, 4);
+        assert!(matches!(
+            block,
+            ContentBlock::ToolCall { id, name, input }
+                if id == "tool-live" && name == "Agent" && input["prompt"] == "run child"
+        ));
+        assert_eq!(accumulator.partial_content().len(), 1);
+
+        let ResponseAccumulatorUpdate::Continue { .. } = accumulator
+            .observe(HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
+                    stop_reason: Some("tool_use".into()),
+                    stop_details: None,
+                },
+                usage: None,
+            })
+            .unwrap()
+        else {
+            panic!("message_delta is not terminal");
+        };
+        let ResponseAccumulatorUpdate::Completed(response) =
+            accumulator.observe(HistoryEvent::MessageStop).unwrap()
+        else {
+            panic!("message_stop must complete the response");
+        };
+        assert_eq!(response.id, "m-live");
+        assert_eq!(response.stop_reason.as_deref(), Some("tool_use"));
+        assert!(matches!(
+            response.content.as_slice(),
+            [ContentBlock::ToolCall { id, .. }] if id == "tool-live"
+        ));
     }
 
     #[tokio::test]
@@ -944,6 +1434,7 @@ mod tests {
                 content_block: ContentBlock::Text {
                     text: String::new(),
                     cache_control: None,
+                    citations: None,
                 },
             },
             HistoryEvent::ContentBlockStop { index: 0 },
@@ -984,6 +1475,7 @@ mod tests {
                 content_block: ContentBlock::Text {
                     text: String::new(),
                     cache_control: None,
+                    citations: None,
                 },
             },
             HistoryEvent::ContentBlockDelta {
@@ -1219,6 +1711,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accumulator_remainder_preserves_later_assistant_responses() {
+        let response = |id: &str, text: &str| HistoryResponse {
+            id: id.into(),
+            model: "mock-model".into(),
+            content: vec![ContentBlock::Text {
+                text: text.into(),
+                cache_control: None,
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+            stop_details: None,
+            usage: ExecutionUsage::default(),
+            cost: None,
+            provider_metadata: Value::Null,
+        };
+        let mut events = response_to_stream_events(response("first-id", "first"));
+        events.extend(response_to_stream_events(response("second-id", "second")));
+        let (first, rest) = accumulate_stream_salvaging_remaining(boxed(events))
+            .await
+            .expect("first response");
+        assert_eq!(first.id, "first-id");
+        let (second, mut rest) = accumulate_stream_salvaging_remaining(rest)
+            .await
+            .expect("second response");
+        assert_eq!(second.id, "second-id");
+        assert!(rest.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn physical_quote_is_not_reapplied_to_a_later_mod_response() {
+        let estimate = crate::CostEstimate {
+            pricing_model: crate::PricingModelRef {
+                pricing_provider_id: crate::ProviderId::AnthropicFirstParty,
+                billing_model: "claude-opus-4-7".into(),
+                request_model: "claude-opus-4-7".into(),
+                display_model: "claude-opus-4-7".into(),
+            },
+            total_cost_usd: Some(0.002),
+            input_cost_usd: Some(0.001),
+            output_cost_usd: Some(0.001),
+            cache_read_cost_usd: Some(0.0),
+            cache_write_cost_usd: Some(0.0),
+            reasoning_cost_usd: Some(0.0),
+            estimated: false,
+            pricing_source: Some("captured-sdk-profile".into()),
+        };
+        let mut usage = ExecutionUsage::default();
+        usage.cost_estimate = Some(estimate.clone());
+        let events = vec![
+            message_start("first", "claude-opus-4-7"),
+            HistoryEvent::CostQuoteObserved {
+                estimate: Some(estimate.clone()),
+                native_server_fallback: true,
+                summary_model: Some("claude-opus-4-7".into()),
+            },
+            HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
+                    stop_reason: Some("end_turn".into()),
+                    stop_details: None,
+                },
+                usage: Some(usage),
+            },
+            HistoryEvent::MessageStop,
+            message_start("second", "claude-opus-4-7"),
+            HistoryEvent::MessageDelta {
+                delta: HistoryMessageDelta {
+                    stop_reason: Some("end_turn".into()),
+                    stop_details: None,
+                },
+                usage: None,
+            },
+            HistoryEvent::MessageStop,
+        ];
+
+        let (first, rest) = accumulate_stream_salvaging_remaining(boxed(events))
+            .await
+            .expect("the first response consumes its physical quote once");
+        assert_eq!(first.cost, Some(estimate));
+        let (second, mut rest) = accumulate_stream_salvaging_remaining(rest)
+            .await
+            .expect("the later Mod response has its own settlement scope");
+        assert_eq!(second.id, "second");
+        assert!(second.cost.is_none());
+        assert!(rest.next().await.is_none());
+    }
+
+    #[tokio::test]
     async fn completed_event_short_circuits_response() {
         // A `Completed{response}` event immediately returns the contained
         // response without waiting for `MessageStop`.
@@ -1228,6 +1807,7 @@ mod tests {
             content: vec![ContentBlock::Text {
                 text: "direct answer".into(),
                 cache_control: None,
+                citations: None,
             }],
             stop_reason: Some("end_turn".into()),
             stop_details: None,
@@ -1266,6 +1846,7 @@ mod tests {
                 ContentBlock::Text {
                     text: "kept".into(),
                     cache_control: None,
+                    citations: None,
                 },
             ],
             stop_reason: Some("end_turn".into()),
@@ -1326,6 +1907,7 @@ mod tests {
                 ContentBlock::Text {
                     text: "answer".into(),
                     cache_control: None,
+                    citations: None,
                 },
                 ContentBlock::Reasoning {
                     text: "reason".into(),
@@ -1379,6 +1961,7 @@ mod tests {
         response.content.push(ContentBlock::Text {
             text: "refused".into(),
             cache_control: None,
+            citations: None,
         });
         let result = accumulate_stream(boxed(response_to_stream_events(response)))
             .await

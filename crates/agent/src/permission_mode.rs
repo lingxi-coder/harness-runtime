@@ -32,17 +32,12 @@ fn mode_rank(mode: PermissionMode) -> u8 {
     }
 }
 
-/// Parse a spawn-mode WIRE string — the Agent tool `mode` enum
-/// (`acceptEdits`/`auto`/`bypassPermissions`/`default`/`dontAsk`/`plan`) — into a
-/// [`PermissionMode`]. Returns `None` for an unrecognized string (the schema enum
-/// forbids one, so this is defensive). `bubble` is engine-internal and never
-/// appears on the wire.
-///
-/// Retained (and unit-tested) for back-compat even though its production call
-/// site was removed in 2.1.212: the Agent/Task `mode` call param is now
-/// DEPRECATED and ignored, so the spawner no longer parses it into an override.
+/// Parse the trusted host's canonical permission-mode carrier into a
+/// [`PermissionMode`]. Spawn admission uses this for the immediate parent's
+/// enforcing mode and the bound invoker's current gate. Model-authored spawn
+/// `mode` values are ignored. Unknown strings return `None`; `bubble` remains
+/// an engine-internal inheritance sentinel.
 #[must_use]
-#[allow(dead_code)]
 pub(crate) fn parse_wire_mode(s: &str) -> Option<PermissionMode> {
     match s {
         "default" => Some(PermissionMode::Default),
@@ -201,9 +196,9 @@ pub(crate) fn effective_child_mode(
 ) -> Option<PermissionMode> {
     let clamped = clamp_spawn_mode(requested, parent); // `ye`
     let effective = clamped.or_else(|| definition_mode_fallback(def_mode))?; // `ve`
-                                                                             // Context-override guard: apply `ve` UNLESS it came only from the definition
-                                                                             // fallback (no explicit clamped spawn mode) while the parent is already a
-                                                                             // permissive mode the fallback must not silently downgrade.
+    // Context-override guard: apply `ve` UNLESS it came only from the definition
+    // fallback (no explicit clamped spawn mode) while the parent is already a
+    // permissive mode the fallback must not silently downgrade.
     if clamped.is_none()
         && matches!(
             parent,

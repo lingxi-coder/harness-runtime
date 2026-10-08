@@ -1,6 +1,34 @@
 //! Conversation lifecycle hooks, goal checks, and session events.
 
+use super::mod_session_measure_sampler::{
+    ModSessionMeasureReason, ModSessionMeasureRequest, ModSessionMeasureSampler,
+};
 use super::*;
+
+use hooks::ExactHookText;
+
+async fn commit_peer_queue(
+    commit: lingxi_core::host::uds_inbox::PeerQueueCommit,
+    text: String,
+) -> bool {
+    tokio::task::spawn_blocking(move || commit(text))
+        .await
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+#[path = "hooks/idle_measure_tests.rs"]
+mod idle_measure_tests;
+
+/// The Mod's prompt admission decision before the user row is committed.
+pub(super) enum ModPromptScreen {
+    Admit {
+        text: String,
+        text_projection: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        context: Vec<String>,
+    },
+    Drop(String),
+}
 
 /// `tengu_goal_evaluated`'s `outcome`, and the `iterations` rule that rides
 /// on it.
@@ -39,7 +67,870 @@ impl GoalEvalOutcome {
     }
 }
 
+fn accumulate_mod_turn_usage(
+    facts: &mut ModTurnFacts,
+    usage: &llm_runtime::ExecutionUsage,
+    model: &str,
+) {
+    let counts = usage.counts();
+    let total = facts.usage.get_or_insert_with(|| ModTurnUsage {
+        tokens: lingxi_core::token::Usage::default(),
+        model: model.to_owned(),
+    });
+    total.tokens.input_tokens = total
+        .tokens
+        .input_tokens
+        .saturating_add(counts.input_tokens);
+    total.tokens.output_tokens = total
+        .tokens
+        .output_tokens
+        .saturating_add(counts.output_tokens);
+    total.tokens.cache_read_input_tokens = total
+        .tokens
+        .cache_read_input_tokens
+        .saturating_add(counts.cache_read_tokens);
+    total.tokens.cache_creation_input_tokens = total
+        .tokens
+        .cache_creation_input_tokens
+        .saturating_add(counts.cache_write_tokens);
+    total.model = model.to_owned();
+}
+
+async fn dispatch_queued_mod_session_event(work: ModSessionEventWork) {
+    match work {
+        ModSessionEventWork::TurnComplete {
+            context,
+            input,
+            original_answer,
+        } => {
+            dispatch_mod_turn_complete(
+                context.host,
+                context.session.as_ref(),
+                context.output,
+                input,
+                original_answer,
+            )
+            .await;
+        }
+        ModSessionEventWork::Measure {
+            context,
+            sampler,
+            request,
+        } => {
+            dispatch_mod_session_measure(context, sampler, request).await;
+        }
+        ModSessionEventWork::MeasureRequest {
+            context,
+            sampler,
+            reason,
+            snapshot,
+        } => {
+            if let Some(request) = sampler.enqueue(reason, snapshot) {
+                dispatch_mod_session_measure(context, sampler, request).await;
+            }
+        }
+    }
+}
+
+async fn dispatch_mod_turn_complete(
+    host: Arc<hooks::mods::ModHost>,
+    session: &dyn hooks::mods::ModSessionContext,
+    output: Arc<dyn OutputStream>,
+    input: serde_json::Value,
+    original_answer: String,
+) {
+    let turn_id = input
+        .get("turnId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let log_output = output.clone();
+    let toast_output = output.clone();
+    let status_output = output.clone();
+    match host
+        .dispatch_with_ui_meta_at_session(
+            "turn.complete",
+            input,
+            session,
+            |event| async move {
+                let mut result = serde_json::json!({"text":event["answer"]});
+                if let Some(usage) = event.get("usage") {
+                    result["usage"] = usage.clone();
+                }
+                Ok(result)
+            },
+            move |plugin, text| {
+                let output = log_output.clone();
+                async move { output.emit_mod_log(&plugin, &text).await }
+            },
+            move |plugin, text, timeout_ms| {
+                let output = toast_output.clone();
+                async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+            },
+            move |plugin, text| {
+                let output = status_output.clone();
+                async move { output.emit_mod_status(&plugin, text.as_deref()).await }
+            },
+        )
+        .await
+    {
+        Ok(outcome) => {
+            if let Some(text) = outcome
+                .result
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+            {
+                if text != original_answer && !text.trim().is_empty() {
+                    let notice = if outcome.hooked.is_empty() {
+                        text.to_owned()
+                    } else {
+                        format!("{}: {text}", outcome.hooked.join("+"))
+                    };
+                    output.emit_system_notice(&notice, false).await;
+                }
+            }
+        }
+        Err(error) => tracing::warn!(turn_id, %error, "turn.complete Mod dispatch failed"),
+    }
+}
+
+async fn dispatch_mod_session_measure(
+    context: ModSessionEventContext,
+    sampler: Arc<ModSessionMeasureSampler>,
+    mut request: ModSessionMeasureRequest,
+) {
+    loop {
+        if let Some(input) = sampler.prepare(&request) {
+            dispatch_mod_session_measure_once(
+                context.host.clone(),
+                context.session.as_ref(),
+                context.output.clone(),
+                input,
+            )
+            .await;
+        }
+        let Some(next) = sampler.finish_one() else {
+            return;
+        };
+        request = next;
+    }
+}
+
+async fn dispatch_mod_session_measure_inline(
+    host: Arc<hooks::mods::ModHost>,
+    session: &dyn hooks::mods::ModSessionContext,
+    output: Arc<dyn OutputStream>,
+    sampler: Arc<ModSessionMeasureSampler>,
+    mut request: ModSessionMeasureRequest,
+) {
+    loop {
+        if let Some(input) = sampler.prepare(&request) {
+            dispatch_mod_session_measure_once(host.clone(), session, output.clone(), input).await;
+        }
+        let Some(next) = sampler.finish_one() else {
+            return;
+        };
+        request = next;
+    }
+}
+
+async fn dispatch_mod_session_measure_once(
+    host: Arc<hooks::mods::ModHost>,
+    session: &dyn hooks::mods::ModSessionContext,
+    output: Arc<dyn OutputStream>,
+    input: serde_json::Value,
+) {
+    let session_id = session.id().await;
+    let log_output = output.clone();
+    let toast_output = output.clone();
+    let status_output = output.clone();
+    if let Err(error) = host
+        .dispatch_with_ui_meta_at_session(
+            "session.measure",
+            input,
+            session,
+            |event| async move {
+                let changed = event.get("changed").cloned().ok_or_else(|| {
+                    hooks::mods::ModError::Hook("session.measure needs changed units".into())
+                })?;
+                Ok(serde_json::json!({"changed":changed}))
+            },
+            move |plugin, text| {
+                let output = log_output.clone();
+                async move { output.emit_mod_log(&plugin, &text).await }
+            },
+            move |plugin, text, timeout_ms| {
+                let output = toast_output.clone();
+                async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+            },
+            move |plugin, text| {
+                let output = status_output.clone();
+                async move { output.emit_mod_status(&plugin, text.as_deref()).await }
+            },
+        )
+        .await
+    {
+        tracing::warn!(%session_id, %error, "session.measure Mod dispatch failed");
+    }
+}
+
+fn start_mod_session_event_worker() -> tokio::sync::mpsc::UnboundedSender<ModSessionEventWork> {
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(work) = receiver.recv().await {
+            dispatch_queued_mod_session_event(work).await;
+        }
+    });
+    sender
+}
+
 impl ConversationOrchestrator {
+    fn enqueue_mod_session_events(&self, work: Vec<ModSessionEventWork>) {
+        if work.is_empty() {
+            return;
+        }
+        let mut slot = self
+            .mod_session_event_sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sender = slot
+            .as_ref()
+            .filter(|sender| !sender.is_closed())
+            .cloned()
+            .unwrap_or_else(start_mod_session_event_worker);
+        let mut pending = std::collections::VecDeque::from(work);
+        while let Some(item) = pending.pop_front() {
+            if let Err(error) = sender.send(item) {
+                tracing::warn!("Mod session-event queue stopped; restarting FIFO worker");
+                sender = start_mod_session_event_worker();
+                if let Err(restarted) = sender.send(error.0) {
+                    tracing::error!(
+                        "replacement Mod session-event worker stopped before accepting work"
+                    );
+                    pending.push_front(restarted.0);
+                }
+            }
+        }
+        *slot = Some(sender);
+    }
+
+    /// Observe a main-loop turn immediately before its first model request.
+    /// Mods may inspect this event, but their answer cannot change the turn.
+    pub(super) async fn fire_mod_turn_start(&self, text: &str, turn_id: &str) {
+        *self
+            .mod_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ModTurnFacts {
+            id: turn_id.to_owned(),
+            started_at: std::time::Instant::now(),
+            answer: String::new(),
+            usage: None,
+            refusal: None,
+            error: false,
+        });
+        let Some(registry) = &self.lifecycle_runtime.hook_registry else {
+            return;
+        };
+        let Some(host) = registry.read().await.mod_host() else {
+            return;
+        };
+        let input = serde_json::json!({"text":text,"turnId":turn_id});
+        let log_output = self.output.clone();
+        let toast_output = self.output.clone();
+        let status_output = self.output.clone();
+        let turn_id = turn_id.to_owned();
+        if let Err(error) = host
+            .dispatch_with_ui_at_session(
+                "turn.start",
+                input,
+                self,
+                move |_| {
+                    let turn_id = turn_id.clone();
+                    async move { Ok(serde_json::json!({"turnId":turn_id})) }
+                },
+                move |plugin, text| {
+                    let output = log_output.clone();
+                    async move { output.emit_mod_log(&plugin, &text).await }
+                },
+                move |plugin, text, timeout_ms| {
+                    let output = toast_output.clone();
+                    async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+                },
+                move |plugin, text| {
+                    let output = status_output.clone();
+                    async move { output.emit_mod_status(&plugin, text.as_deref()).await }
+                },
+            )
+            .await
+        {
+            tracing::warn!(%error, "turn.start Mod dispatch failed");
+        }
+    }
+
+    /// Accumulate one provider response for the eventual `turn.complete`.
+    pub(crate) fn record_mod_turn_response(
+        &self,
+        message: &ConversationMessage,
+        usage: Option<&llm_runtime::ExecutionUsage>,
+        model: &str,
+        stop_reason: Option<&str>,
+        stop_details: Option<&llm_runtime::HistoryStopDetails>,
+    ) {
+        let ConversationMessage::Assistant { content, .. } = message else {
+            return;
+        };
+        let answer = content
+            .iter()
+            .filter_map(lingxi_core::types::ContentBlock::visible_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_owned();
+        let mut held = self
+            .mod_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(facts) = held.as_mut() else { return };
+        facts.answer = answer;
+        facts.error = false;
+        facts.refusal = (stop_reason == Some("refusal")).then(|| {
+            serde_json::json!({
+                "category":stop_details.and_then(|details| details.category.as_deref()),
+                "explanation":stop_details.and_then(|details| details.explanation.as_deref()),
+            })
+        });
+        if let Some(usage) = usage {
+            accumulate_mod_turn_usage(facts, usage, model);
+        }
+    }
+
+    /// Count a completed physical Mod request immediately, even if the outer
+    /// stream later fails before producing an assistant message.
+    pub(crate) fn record_mod_turn_provider_usage(
+        &self,
+        usage: &llm_runtime::ExecutionUsage,
+        model: &str,
+    ) {
+        if let Some(facts) = self
+            .mod_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            accumulate_mod_turn_usage(facts, usage, model);
+        }
+    }
+
+    pub(crate) fn mark_mod_turn_error(&self) {
+        if let Some(facts) = self
+            .mod_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            facts.error = true;
+        }
+    }
+
+    /// Sample `session.measure` after this process observes a rate-limit state
+    /// or raw utilization snapshot change. There is no polling fallback: API
+    /// adapters without an update simply leave the turn-settled path intact.
+    pub(crate) async fn notify_mod_session_measure_rate_limits_changed(&self) {
+        let Some(registry) = &self.lifecycle_runtime.hook_registry else {
+            return;
+        };
+        let Some(host) = registry.read().await.mod_host() else {
+            return;
+        };
+        if !host.has_event("session.measure") {
+            return;
+        }
+
+        let snapshot = self.mod_session_measure_snapshot().await;
+        let sampler = self.mod_session_measure_sampler.clone();
+        let Some(request) = sampler.enqueue(ModSessionMeasureReason::Limits, snapshot) else {
+            return;
+        };
+        if let Some(session) = host.bound_session() {
+            self.enqueue_mod_session_events(vec![ModSessionEventWork::Measure {
+                context: ModSessionEventContext {
+                    host,
+                    session,
+                    output: self.output.clone(),
+                },
+                sampler,
+                request,
+            }]);
+        } else {
+            dispatch_mod_session_measure_inline(host, self, self.output.clone(), sampler, request)
+                .await;
+        }
+    }
+
+    /// Deliver the settled main-loop turn to Mods. A changed nonblank result
+    /// becomes a UI notice while the recorded assistant answer stays intact.
+    pub(super) async fn fire_mod_turn_complete(&self, is_aborted: bool, has_error: bool) {
+        // Resolve the host before consuming the lifecycle record so canceling
+        // this future while it waits for the registry cannot lose a settled
+        // turn.
+        let host = if let Some(registry) = &self.lifecycle_runtime.hook_registry {
+            registry.read().await.mod_host()
+        } else {
+            None
+        };
+        let session = host.as_ref().and_then(|host| host.bound_session());
+        let facts = self
+            .mod_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(facts) = facts else { return };
+        let Some(host) = host else { return };
+        let reason = if is_aborted {
+            "aborted"
+        } else if facts.refusal.is_some() {
+            "refusal"
+        } else if has_error || facts.error {
+            "error"
+        } else {
+            "answer"
+        };
+        let mut input = serde_json::json!({
+            "answer":facts.answer,
+            "durationMs":u64::try_from(facts.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "isAborted":is_aborted,
+            "turnId":facts.id,
+            "reason":reason,
+        });
+        if let Some(refusal) = facts.refusal {
+            input["refusal"] = refusal;
+        }
+        if let Some(usage) = facts.usage {
+            input["usage"] = serde_json::json!({
+                "input_tokens":usage.tokens.input_tokens,
+                "output_tokens":usage.tokens.output_tokens,
+                "cache_read_input_tokens":usage.tokens.cache_read_input_tokens,
+                "cache_creation_input_tokens":usage.tokens.cache_creation_input_tokens,
+                "model":usage.model,
+            });
+        }
+        let original = input["answer"].as_str().unwrap_or_default().to_owned();
+        let measure_snapshot = if host.has_event("session.measure") {
+            Some(self.mod_session_measure_snapshot().await)
+        } else {
+            None
+        };
+        let sampler = self.mod_session_measure_sampler.clone();
+        if let Some(session) = session {
+            let context = ModSessionEventContext {
+                host,
+                session,
+                output: self.output.clone(),
+            };
+            let mut work = vec![ModSessionEventWork::TurnComplete {
+                context: context.clone(),
+                input,
+                original_answer: original,
+            }];
+            if let Some(snapshot) = measure_snapshot {
+                work.push(ModSessionEventWork::MeasureRequest {
+                    context,
+                    sampler,
+                    reason: ModSessionMeasureReason::Turn,
+                    snapshot,
+                });
+            }
+            self.enqueue_mod_session_events(work);
+        } else {
+            // Embedded callers may not have an owning session Arc. Preserve
+            // their request-scoped dispatch behavior in that case.
+            let measure_host = host.clone();
+            dispatch_mod_turn_complete(host, self, self.output.clone(), input, original).await;
+            if let Some(snapshot) = measure_snapshot {
+                if let Some(request) = sampler.enqueue(ModSessionMeasureReason::Turn, snapshot) {
+                    dispatch_mod_session_measure_inline(
+                        measure_host,
+                        self,
+                        self.output.clone(),
+                        sampler,
+                        request,
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
+    pub(super) async fn screen_mod_prompt_submit(
+        &self,
+        text: &str,
+        images: &[lingxi_core::types::ImageSource],
+        origin_override: Option<serde_json::Value>,
+    ) -> ModPromptScreen {
+        self.screen_mod_prompt_submit_projected(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!(text)),
+            images,
+            origin_override,
+        )
+        .await
+    }
+
+    pub(super) async fn screen_mod_prompt_submit_projected(
+        &self,
+        text_projection: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        images: &[lingxi_core::types::ImageSource],
+        origin_override: Option<serde_json::Value>,
+    ) -> ModPromptScreen {
+        let text = text_projection
+            .value
+            .as_str()
+            .expect("prompt text projection is a string");
+        let origin = origin_override.unwrap_or_else(crate::mod_prompt_origin::current);
+        let attachments: Vec<_> = images
+            .iter()
+            .map(|image| match image {
+                lingxi_core::types::ImageSource::Base64 { media_type, .. } => {
+                    serde_json::json!({"type":"image","mediaType":media_type})
+                }
+                lingxi_core::types::ImageSource::Url { .. } => {
+                    serde_json::json!({"type":"image"})
+                }
+            })
+            .collect();
+        let mut input = serde_json::json!({"text":text,"wait":false,"origin":origin});
+        if !attachments.is_empty() {
+            input["attachments"] = serde_json::Value::Array(attachments);
+        }
+        let mut projected_input = lingxi_core::types::utf16_json::Utf16JsonProjection::plain(input);
+        projected_input
+            .set_field("text", text_projection.clone())
+            .expect("valid prompt projection");
+        let mut fallback = lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+            serde_json::json!({"origin":origin}),
+        );
+        fallback
+            .set_field("text", text_projection.clone())
+            .expect("valid prompt projection");
+        let result = if let Some(registry) = &self.lifecycle_runtime.hook_registry {
+            if let Some(host) = registry.read().await.mod_host() {
+                let log_output = self.output.clone();
+                let toast_output = self.output.clone();
+                let status_output = self.output.clone();
+                host.dispatch_with_utf16_at_context(
+                    "prompt.submit",
+                    hooks::mods::ModUtf16ValueProjection::from_core_projection(projected_input)
+                        .expect("valid prompt projection"),
+                    &self.current_cwd(),
+                    Some(self),
+                    None,
+                    None,
+                    None,
+                    lingxi_core::host::task_registry::FieldPresence::Missing,
+                    |event| async move {
+                        let event = event.into_core_projection()?;
+                        let answer = event
+                            .pick_object_fields(&["text", "origin", "context"])
+                            .map_err(|error| hooks::mods::ModError::Hook(error.to_string()))?;
+                        hooks::mods::ModUtf16ValueProjection::from_core_projection(answer)
+                    },
+                    move |plugin, text| {
+                        let output = log_output.clone();
+                        async move { output.emit_mod_log(&plugin, &text).await }
+                    },
+                    move |plugin, text, timeout_ms| {
+                        let output = toast_output.clone();
+                        async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+                    },
+                    move |plugin, text| {
+                        let output = status_output.clone();
+                        async move { output.emit_mod_status(&plugin, text.as_deref()).await }
+                    },
+                )
+                .await
+                .and_then(|outcome| {
+                    hooks::mods::ModUtf16ValueProjection {
+                        value: outcome.result,
+                        strings: outcome.result_utf16_strings,
+                        keys: outcome.result_utf16_keys,
+                    }
+                    .into_core_projection()
+                })
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "prompt.submit Mod dispatch failed");
+                    fallback.clone()
+                })
+            } else {
+                fallback.clone()
+            }
+        } else {
+            fallback.clone()
+        };
+        if let Some(reason) = result.value.get("drop").and_then(serde_json::Value::as_str) {
+            return ModPromptScreen::Drop(reason.to_owned());
+        }
+        let text_projection = result
+            .subprojection("/text")
+            .ok()
+            .filter(|projection| projection.value.is_string())
+            .unwrap_or_else(|| text_projection.clone());
+        let text = text_projection
+            .value
+            .as_str()
+            .expect("prompt text projection is a string")
+            .to_owned();
+        let context = result
+            .value
+            .get("context")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        ModPromptScreen::Admit {
+            text,
+            text_projection,
+            context,
+        }
+    }
+
+    /// Screen an accepted external delivery before it becomes a transcript
+    /// message. The first `next(e)` to reach core wins, as in native `JDt`;
+    /// a hook answer without `next` consumes the delivery even if it returns
+    /// `{ text }`.
+    pub(super) async fn screen_mod_session_receive(&self, text: &str, origin_kind: &str) -> bool {
+        self.resolve_mod_session_receive(text, origin_kind, true)
+            .await
+            .is_some()
+    }
+
+    async fn screen_mod_uds_receive(
+        &self,
+        text: &str,
+        commit: lingxi_core::host::uds_inbox::PeerQueueCommit,
+    ) {
+        let _ = self
+            .resolve_mod_session_receive_with_queue(text, "peer", false, Some(commit))
+            .await;
+    }
+
+    /// Screen a host-stamped external prompt while it is still in the input
+    /// queue. The existing turn driver will persist the admitted text once.
+    pub(super) async fn screen_mod_queued_receive(
+        &self,
+        text: &str,
+        origin_kind: &str,
+    ) -> Option<String> {
+        self.resolve_mod_session_receive(text, origin_kind, false)
+            .await
+    }
+
+    async fn resolve_mod_session_receive(
+        &self,
+        text: &str,
+        origin_kind: &str,
+        persist_at_core: bool,
+    ) -> Option<String> {
+        self.resolve_mod_session_receive_with_queue(text, origin_kind, persist_at_core, None)
+            .await
+    }
+
+    async fn resolve_mod_session_receive_with_queue(
+        &self,
+        text: &str,
+        origin_kind: &str,
+        persist_at_core: bool,
+        queue_commit: Option<lingxi_core::host::uds_inbox::PeerQueueCommit>,
+    ) -> Option<String> {
+        let host = if let Some(registry) = &self.lifecycle_runtime.hook_registry {
+            registry.read().await.mod_host()
+        } else {
+            None
+        };
+        let Some(host) = host.filter(|host| host.has_event("session.receive")) else {
+            if let Some(commit) = queue_commit {
+                let _ = commit_peer_queue(commit, text.to_owned()).await;
+            } else if persist_at_core {
+                self.inject_user_text(text, true).await;
+            }
+            return Some(text.to_owned());
+        };
+        let origin = serde_json::json!({"kind":origin_kind});
+        let input = serde_json::json!({"origin":origin,"text":text});
+        // 0 = no core arrival, 1 = first core arrival, 2 = answered without
+        // core. Closing state 0 when the hook answers prevents a late,
+        // unawaited next(e) from injecting a supposedly consumed delivery.
+        let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let state_for_core = state.clone();
+        let admitted = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let admitted_for_core = admitted.clone();
+        let commit_for_core = queue_commit.clone();
+        let (done_tx, mut done_rx) = tokio::sync::watch::channel(false);
+        let pinned_origin = origin.clone();
+        let log_output = self.output.clone();
+        let toast_output = self.output.clone();
+        let status_output = self.output.clone();
+        let result = host
+            .dispatch_with_ui_at_session(
+                "session.receive",
+                input,
+                self,
+                move |forwarded| {
+                    let pinned_origin = pinned_origin.clone();
+                    let state = state_for_core.clone();
+                    let admitted = admitted_for_core.clone();
+                    let commit = commit_for_core.clone();
+                    let done_tx = done_tx.clone();
+                    async move {
+                        if forwarded.get("origin") != Some(&pinned_origin)
+                            || forwarded.get("event").is_some()
+                            || forwarded.get("agentId").is_some()
+                        {
+                            return Err(hooks::mods::ModError::Hook(
+                                "session.receive origin and event are pinned".into(),
+                            ));
+                        }
+                        let rewritten = forwarded
+                            .get("text")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| {
+                            hooks::mods::ModError::Hook(
+                                "session.receive text must be a string".into(),
+                            )
+                        })?;
+                        if state
+                            .compare_exchange(
+                                0,
+                                1,
+                                std::sync::atomic::Ordering::AcqRel,
+                                std::sync::atomic::Ordering::Acquire,
+                            )
+                            .is_ok()
+                        {
+                            *admitted
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                Some(rewritten.to_owned());
+                            let queued = if let Some(commit) = commit {
+                                commit_peer_queue(commit, rewritten.to_owned()).await
+                            } else {
+                                true
+                            };
+                            if persist_at_core && queued {
+                                self.inject_user_text(rewritten, true).await;
+                            }
+                            done_tx.send_replace(true);
+                            if !queued {
+                                return Err(hooks::mods::ModError::Hook(
+                                    "session.receive delivery was not queued by inbound policy"
+                                        .into(),
+                                ));
+                            }
+                        } else if state.load(std::sync::atomic::Ordering::Acquire) == 2 {
+                            return Err(hooks::mods::ModError::Hook(
+                                "session.receive delivery was consumed before next(e)".into(),
+                            ));
+                        }
+                        Ok(serde_json::json!({"text":rewritten}))
+                    }
+                },
+                move |plugin, text| {
+                    let output = log_output.clone();
+                    async move { output.emit_mod_log(&plugin, &text).await }
+                },
+                move |plugin, text, timeout_ms| {
+                    let output = toast_output.clone();
+                    async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+                },
+                move |plugin, text| {
+                    let output = status_output.clone();
+                    async move { output.emit_mod_status(&plugin, text.as_deref()).await }
+                },
+            )
+            .await;
+        let reached_core = state
+            .compare_exchange(
+                0,
+                2,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err();
+        if !reached_core {
+            if let Err(error) = result {
+                tracing::warn!(%error, "session.receive Mod dispatch failed");
+                if persist_at_core {
+                    self.inject_user_text(text, true).await;
+                } else if let Some(commit) = queue_commit {
+                    let _ = commit_peer_queue(commit, text.to_owned()).await;
+                }
+                return Some(text.to_owned());
+            }
+            return None;
+        }
+        if !*done_rx.borrow() && done_rx.changed().await.is_err() {
+            tracing::warn!("session.receive core ended before confirming transcript persistence");
+        }
+        if let Err(error) = result {
+            tracing::warn!(%error, "session.receive Mod dispatch failed after core arrival");
+        }
+        let answer = admitted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        answer
+    }
+
+    pub(super) async fn append_mod_prompt_context(&self, context: &[String]) {
+        if context.is_empty() {
+            return;
+        }
+        let exact_context: Vec<_> = context
+            .iter()
+            .cloned()
+            .map(|text| hooks::ExactHookText::from_text(text))
+            .collect();
+        let tool_use_id = format!("hook-{}", lingxi_core::types::HookId::new().as_uuid());
+        let attachment = hooks::additional_context_attachment(
+            "prompt.submit",
+            &tool_use_id,
+            "UserPromptSubmit",
+            &exact_context,
+        );
+        self.persist_exact_hook_attachment(attachment).await;
+        let body = hooks::ExactHookText::join(&exact_context, "\n");
+        let message = hooks::ExactHookText::wrapped(
+            "<system-reminder>\nprompt.submit hook additional context: ",
+            &body,
+            "\n</system-reminder>",
+        )
+        .to_conversation_message(MessageId::new(), true);
+        self.register_mod_persisted_attachment(
+            &message,
+            "hook_additional_context",
+            serde_json::json!({"kind":"plugin","event":"prompt.submit"}),
+        )
+        .await;
+        self.session.lock().await.history.push(message);
+    }
+
+    async fn persist_exact_hook_attachment(
+        &self,
+        projection: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
+        let overrides = projection.string_overrides();
+        self.persist_hook_attachment_to_jsonl(projection.value, overrides)
+            .await;
+    }
+
+    pub(super) async fn emit_mod_prompt_drop(&self, reason: &str) {
+        self.output
+            .emit_text(&format!("Prompt dropped by a hook: {reason}"))
+            .await;
+    }
     pub(crate) async fn upsert_active_goal_stop_hook_for_session(
         &self,
         session_id: SessionId,
@@ -168,12 +1059,16 @@ impl ConversationOrchestrator {
         // `transcript_path` EMPTY for every lifecycle hook. `computed_transcript_path`
         // is itself `""` only when neither a writer nor a `config_home` is present
         // (library/test builds), preserving the old behavior there.
-        let (session_id, plan_mode, last_assistant_message) = {
+        let (session_id, plan_mode, last_assistant_message, model_selection) = {
             let s = self.session.lock().await;
             (
                 s.session_id,
                 s.plan_mode,
                 Self::last_assistant_message_for_hooks(&s.history),
+                hooks::HookModelSelection {
+                    model: s.model.clone(),
+                    model_profile: s.model_profile.clone(),
+                },
             )
         };
         let transcript_path = self
@@ -206,6 +1101,9 @@ impl ConversationOrchestrator {
         let prompt_id = self.prompt_runtime.current_prompt_id.lock().await.clone();
         HookContext {
             prompt_transcript: Some(self.prompt_hook_transcript().await),
+            model_selection: Some(model_selection),
+            inherit: self.hook_agent_inheritance.clone(),
+            agent_depth: Some(0),
             session_id,
             cwd: self.current_cwd(),
             transcript_path,
@@ -251,10 +1149,7 @@ impl ConversationOrchestrator {
         })?;
         let joined = assistant
             .iter()
-            .filter_map(|block| match block {
-                lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
+            .filter_map(lingxi_core::types::ContentBlock::visible_text)
             .collect::<Vec<_>>()
             .join("\n");
         let trimmed = joined.trim();
@@ -320,6 +1215,22 @@ impl ConversationOrchestrator {
         prompt: &str,
         message_id: MessageId,
     ) -> bool {
+        self.fire_user_prompt_submit_projected(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!(prompt)),
+            message_id,
+        )
+        .await
+    }
+
+    pub(super) async fn fire_user_prompt_submit_projected(
+        &self,
+        projection: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        message_id: MessageId,
+    ) -> bool {
+        let prompt = projection
+            .value
+            .as_str()
+            .expect("prompt projection is a string");
         // The JSONL append immediately before this seam minted the stable
         // per-turn prompt id. Emit once for all batched/streaming/cancelable
         // prompt paths before hooks can block the API call.
@@ -342,6 +1253,7 @@ impl ConversationOrchestrator {
             .execute(
                 HookEvent::UserPromptSubmit {
                     prompt: prompt.to_string(),
+                    prompt_projection: Some(projection.clone()),
                 },
                 ctx,
             )
@@ -1607,30 +2519,20 @@ impl ConversationOrchestrator {
                     .last_response_output_tokens
                     .load(std::sync::atomic::Ordering::Relaxed),
             );
-        let ttl_1h = lingxi_core::host::env::is_env_truthy(
+        let fallback_ttl = if lingxi_core::host::env::is_env_truthy(
             std::env::var("ENABLE_PROMPT_CACHING_1H").ok().as_deref(),
-        );
-        let cache_ttl = if ttl_1h { "1h" } else { "5m" };
-        let ttl_ms = if ttl_1h {
-            60 * 60 * 1_000
+        ) {
+            cost::prompt_cache_ledger::CacheTtl::OneHour
         } else {
-            5 * 60 * 1_000
+            cost::prompt_cache_ledger::CacheTtl::FiveMinutes
         };
-        let last_call_ms = self
-            .model_runtime
-            .last_api_call_at_ms
-            .load(std::sync::atomic::Ordering::SeqCst);
-        let now_ms = i64::try_from(
-            self.model_runtime
-                .session_started_at
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .elapsed()
-                .as_millis(),
-        )
-        .unwrap_or(i64::MAX);
-        let prompt_cache_warm =
-            last_call_ms >= 0 && now_ms.saturating_sub(last_call_ms) <= i64::from(ttl_ms);
+        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+        let (prompt_cache_warm, ttl) = self
+            .current_prompt_cache_ledger()
+            .await
+            .model_switch_cache_state(now_ms, fallback_ttl);
+        let ttl_1h = ttl == cost::prompt_cache_ledger::CacheTtl::OneHour;
+        let cache_ttl = ttl.as_str();
         let (estimated_cache_write_usd, pricing) =
             self.model_switch_cache_write_estimate(to_model, to_profile, context_tokens, ttl_1h);
         (
@@ -1831,20 +2733,27 @@ impl ConversationOrchestrator {
 
         if !aggregate.additional_contexts.is_empty() {
             let tool_use_id = format!("hook-{}", lingxi_core::types::HookId::new().as_uuid());
-            self.persist_hook_attachment_to_jsonl(hooks::additional_context_attachment(
+            let attachment = hooks::additional_context_attachment(
                 "PostModelSwitch",
                 &tool_use_id,
                 "PostModelSwitch",
                 &aggregate.additional_contexts,
-            ))
+            );
+            self.persist_exact_hook_attachment(attachment).await;
+            let body = ExactHookText::join(&aggregate.additional_contexts, "\n");
+            let message_text = ExactHookText::wrapped(
+                "<system-reminder>\nPostModelSwitch hook additional context: ",
+                &body,
+                "\n</system-reminder>",
+            );
+            let message = message_text.to_conversation_message(MessageId::new(), true);
+            self.register_mod_persisted_attachment(
+                &message,
+                "hook_additional_context",
+                serde_json::json!({"kind":"hook","event":"PostModelSwitch"}),
+            )
             .await;
-            let body = aggregate.additional_contexts.join("\n");
-            self.session.lock().await.history.push(ConversationMessage::user_meta(
-                MessageId::new(),
-                format!(
-                    "<system-reminder>\nPostModelSwitch hook additional context: {body}\n</system-reminder>"
-                ),
-            ));
+            self.session.lock().await.history.push(message);
         }
         aggregate
     }
@@ -1854,7 +2763,16 @@ impl ConversationOrchestrator {
         source: &str,
     ) -> Vec<ConversationMessage> {
         let agg = self.run_session_start_hooks(source).await;
-        Self::session_start_context_messages(&agg)
+        let messages = Self::session_start_context_messages(&agg);
+        for message in &messages {
+            self.register_mod_persisted_attachment(
+                message,
+                "hook_additional_context",
+                serde_json::json!({"kind":"hook","event":"SessionStart"}),
+            )
+            .await;
+        }
+        messages
     }
 
     /// Build the model-facing `hook_additional_context` meta message(s) from a
@@ -1889,13 +2807,13 @@ impl ConversationOrchestrator {
         if agg.additional_contexts.is_empty() {
             return Vec::new();
         }
-        let body = agg.additional_contexts.join("\n");
-        vec![ConversationMessage::user_meta(
-            MessageId::new(),
-            format!(
-                "<system-reminder>\nSessionStart hook additional context: {body}\n</system-reminder>"
-            ),
-        )]
+        let body = ExactHookText::join(&agg.additional_contexts, "\n");
+        vec![ExactHookText::wrapped(
+            "<system-reminder>\nSessionStart hook additional context: ",
+            &body,
+            "\n</system-reminder>",
+        )
+        .to_conversation_message(MessageId::new(), true)]
     }
 
     /// Fire SessionStart and append its model-facing additional context, then
@@ -1903,10 +2821,75 @@ impl ConversationOrchestrator {
     /// user prompt — claude-code `if(p.initialUserMessage)$os=p.initialUserMessage`)
     /// and return the folded hook aggregate so the composition root can apply
     /// host-owned follow-up actions such as `reloadSkills`.
+    async fn fire_mod_session_start(&self) {
+        let Some(registry) = &self.lifecycle_runtime.hook_registry else {
+            return;
+        };
+        let Some(host) = registry.read().await.mod_host() else {
+            return;
+        };
+        let interactive = self.prompt_is_interactive();
+        let surface = if interactive
+            && self
+                .config
+                .query_source
+                .starts_with(crate::config::QUERY_SOURCE_REPL_MAIN_THREAD)
+        {
+            Some("terminal")
+        } else {
+            None
+        };
+        let input = serde_json::json!({
+            "cwd":self.current_cwd().to_string_lossy(),
+            "surface":surface,
+            "isInteractive":interactive,
+        });
+        let log_output = self.output.clone();
+        let toast_output = self.output.clone();
+        let status_output = self.output.clone();
+        let _ = host
+            .dispatch_with_ui_at_session(
+                "session.start",
+                input,
+                self,
+                |event| async move {
+                    let cwd = event
+                        .get("cwd")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            hooks::mods::ModError::Hook("session.start needs cwd".into())
+                        })?;
+                    Ok(serde_json::json!({"cwd":cwd}))
+                },
+                move |plugin, text| {
+                    let output = log_output.clone();
+                    async move { output.emit_mod_log(&plugin, &text).await }
+                },
+                move |plugin, text, timeout_ms| {
+                    let output = toast_output.clone();
+                    async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+                },
+                move |plugin, text| {
+                    let output = status_output.clone();
+                    async move { output.emit_mod_status(&plugin, text.as_deref()).await }
+                },
+            )
+            .await;
+    }
+
     pub async fn fire_session_start(&self, source: &str) -> hooks::response::AggregateHookResult {
+        self.fire_mod_session_start().await;
         let agg = self.run_session_start_hooks(source).await;
         let messages = Self::session_start_context_messages(&agg);
         if !messages.is_empty() {
+            for message in &messages {
+                self.register_mod_persisted_attachment(
+                    message,
+                    "hook_additional_context",
+                    serde_json::json!({"kind":"hook","event":"SessionStart"}),
+                )
+                .await;
+            }
             // O3: the PERSISTED record is a `hook_additional_context`
             // ATTACHMENT line (2.1.220 BIN off 232675554). Note the three
             // LITERALS at that site — `hookName:"SessionStart"` (BARE, NOT
@@ -1918,18 +2901,18 @@ impl ConversationOrchestrator {
             // (`zr({content: Ww(…), isMeta:true})`, renderer BIN off
             // 238107100); it only enters `history` and is never persisted from
             // here, so this attachment is the sole on-disk record.
-            self.persist_hook_attachment_to_jsonl(hooks::additional_context_attachment(
+            let attachment = hooks::additional_context_attachment(
                 "SessionStart",
                 "SessionStart",
                 "SessionStart",
                 &agg.additional_contexts,
-            ))
-            .await;
+            );
+            self.persist_exact_hook_attachment(attachment).await;
             self.session.lock().await.history.extend(messages);
         }
         // `initialUserMessage` → seed the initial user prompt (claude-code `$os`).
         if let Some(initial) = &agg.initial_user_message {
-            self.inject_user_message(initial).await;
+            self.inject_user_text_exact(initial, false).await;
         }
         agg
     }
@@ -1949,14 +2932,10 @@ impl ConversationOrchestrator {
     /// [`memory::lingxi_md::LingxiMdTier`]; `memory_type` is taken directly from
     /// that tier (so an enterprise-`Managed` file is reported as `Managed`).
     ///
-    /// Conditional (`paths:`-gated) rules are filtered out of the eager set by
-    /// the provider, so every file fired here is unconditional and top-level ⇒
-    /// `load_reason = session_start` with `globs = None`.
-    ///
-    /// `trigger_file_path` / `parent_file_path` are omitted — the eager pass
-    /// carries no lazy-trigger or `@include`-parent metadata (those wire fields
-    /// are `.optional()` and elided when absent, matching the TS session-start
-    /// fire).
+    /// Conditional rule-directory projections are filtered at acquisition.
+    /// Named files retain globs, and all retained imports carry their direct
+    /// parent path and report `load_reason = include`. The eager pass omits the
+    /// lazy trigger path.
     ///
     /// The orchestrator already owns the memory provider AND the hook registry, so
     /// it loads memory ONCE here (the same `memory.load(&cwd)` the system-prompt
@@ -1977,29 +2956,29 @@ impl ConversationOrchestrator {
         &self,
         load_reason: hooks::events::InstructionsLoadReason,
     ) {
-        let cwd = self.cwd.clone();
-        let memory_files = self.memory.load(&cwd).await;
+        let memory_files = match self.instruction_file_snapshot().await {
+            Ok(files) => files,
+            Err(error) => {
+                tracing::warn!(%error, "eager instruction reload failed");
+                return;
+            }
+        };
+        if self
+            .prompt_runtime
+            .instruction_cache
+            .consume_eager_load_reason()
+            .is_none()
+        {
+            return;
+        }
         if memory_files.is_empty() {
             return;
         }
-        // Seed the read-state registry BEFORE (and OUTSIDE) the hook loop.
-        // Outside is load-bearing: the loop's `if file.globs.is_some() {
-        // continue; }` skips conditional rules for the InstructionsLoaded fire,
-        // but the oracle's `xCt` seeds them too — with `seededFromContext:
-        // false` — so folding this into the loop would silently drop them.
-        // Re-entry with `load_reason = Compact` is safe: `seed_memory_read_state`
-        // skips every path already present.
+        // The eager acquisition already filtered conditional rule-directory
+        // projections. Named files and their imports keep glob/parent metadata
+        // and participate in both eager seeding and InstructionsLoaded.
         self.seed_memory_read_state(&memory_files).await;
-        for file in memory_files {
-            // §F: `load()` now also returns conditional (`paths:`-gated) rules.
-            // Those are NOT eagerly loaded, so they must not fire a
-            // `session_start` `InstructionsLoaded` event here — claude-code fires
-            // them at lazy-activation time with `load_reason: 'path_glob_match'`
-            // (`memoryFilesToAttachments`, attachments.ts:1754-1769). Skip them
-            // so the eager fire stays unconditional-only.
-            if file.globs.is_some() {
-                continue;
-            }
+        for file in memory_files.iter().cloned() {
             // `memory_type` is taken straight from the file's tier (claude-code
             // fires `file.type`, claudemd.ts:1058-1062), so the Managed tier is
             // reported faithfully rather than misclassified as Project. The
@@ -2016,16 +2995,14 @@ impl ConversationOrchestrator {
                     HookEvent::InstructionsLoaded {
                         file_path: file.path,
                         memory_type,
-                        // Top-level eager load (no `@include` parent). Session
-                        // boot uses `session_start`; post-compact reload uses
-                        // `compact`, matching Claude's memory-cache reload cause.
-                        load_reason,
-                        // Always `None` here — conditional (`globs.is_some()`)
-                        // rules were skipped above; only unconditional files reach
-                        // this fire.
+                        load_reason: if file.parent.is_some() {
+                            hooks::events::InstructionsLoadReason::Include
+                        } else {
+                            load_reason
+                        },
                         globs: file.globs,
                         trigger_file_path: None,
-                        parent_file_path: None,
+                        parent_file_path: file.parent,
                     },
                     ctx,
                 )
@@ -2042,8 +3019,62 @@ impl ConversationOrchestrator {
     /// seam when one exists. Best-effort like [`Self::fire_session_start`] — a
     /// failing hook never breaks teardown, and it is a strict no-op when no
     /// `SessionEnd` hook is registered.
+    async fn fire_mod_session_end(&self, reason: &str, session_id: &str) {
+        let Some(registry) = &self.lifecycle_runtime.hook_registry else {
+            return;
+        };
+        let Some(host) = registry.read().await.mod_host() else {
+            return;
+        };
+        struct ResetModStateOnDrop(std::sync::Arc<hooks::mods::ModHost>);
+        impl Drop for ResetModStateOnDrop {
+            fn drop(&mut self) {
+                self.0.reset_session_state();
+            }
+        }
+        let _reset_state = ResetModStateOnDrop(host.clone());
+        let input = serde_json::json!({
+            "reason": reason,
+            "sessionId": session_id,
+            "resume": { "id": session_id },
+        });
+        let log_output = self.output.clone();
+        let toast_output = self.output.clone();
+        let status_output = self.output.clone();
+        let pinned_session_id = session_id.to_owned();
+        let _ = host
+            .dispatch_with_ui_at_session(
+                "session.end",
+                input,
+                self,
+                move |_| {
+                    let session_id = pinned_session_id.clone();
+                    async move { Ok(serde_json::json!({"sessionId":session_id})) }
+                },
+                move |plugin, text| {
+                    let output = log_output.clone();
+                    async move { output.emit_mod_log(&plugin, &text).await }
+                },
+                move |plugin, text, timeout_ms| {
+                    let output = toast_output.clone();
+                    async move { output.emit_mod_toast(&plugin, &text, timeout_ms).await }
+                },
+                move |plugin, text| {
+                    let output = status_output.clone();
+                    async move { output.emit_mod_status(&plugin, text.as_deref()).await }
+                },
+            )
+            .await;
+    }
+
     pub async fn fire_session_end(&self, reason: &str) {
         let session_id = { self.session.lock().await.session_id };
+        let mut ended = self.session_end_fired.lock().await;
+        let session_id_text = session_id.to_string();
+        if ended.contains(&session_id_text) {
+            return;
+        }
+        self.fire_mod_session_end(reason, &session_id_text).await;
         let ctx = self.lifecycle_hook_ctx(false).await;
         // Route through the SessionEnd *batch-deadline* path (claude-code `lje`
         // → `cH({signal: AbortSignal.timeout(Wqt())})`): the whole SessionEnd
@@ -2062,6 +3093,7 @@ impl ConversationOrchestrator {
             )
             .await;
         compaction::invoked_skills::clear_session(&session_id.to_string());
+        ended.insert(session_id_text);
     }
 
     /// Fire the `Notification` lifecycle hooks (hooks runtime lifecycle, TS
@@ -2148,6 +3180,9 @@ impl ConversationOrchestrator {
         directory: &str,
         source: &str,
     ) -> lingxi_core::host::DirectoryAddedHookSummary {
+        self.refresh_instruction_context(
+            lingxi_core::host::instructions::InstructionRefreshReason::DirectoryAdded,
+        );
         let ctx = self.lifecycle_hook_ctx(false).await;
         let aggregate = self
             .hooks
@@ -2178,6 +3213,7 @@ impl ConversationOrchestrator {
         const TOTAL_LIMIT: usize = 16 * 1024;
         let mut remaining = TOTAL_LIMIT;
         let mut context_messages = Vec::new();
+        let mut exact_context_messages = Vec::new();
         for message in aggregate
             .system_messages
             .iter()
@@ -2187,40 +3223,30 @@ impl ConversationOrchestrator {
                 break;
             }
             let cap = PER_MESSAGE_LIMIT.min(remaining);
-            let mut used = 0usize;
-            let bounded: String = message
-                .chars()
-                .take_while(|ch| {
-                    let width = ch.len_utf8();
-                    if used.saturating_add(width) > cap {
-                        false
-                    } else {
-                        used += width;
-                        true
-                    }
-                })
-                .collect();
-            remaining = remaining.saturating_sub(bounded.len());
+            let bounded = message.truncate_utf8_bytes(cap);
+            remaining = remaining.saturating_sub(bounded.encoded_utf8_len());
             if !bounded.is_empty() {
-                context_messages.push(bounded);
+                context_messages.push(bounded.display.clone());
+                exact_context_messages.push(bounded);
             }
         }
         if failure_count > 0 {
-            context_messages.push(format!(
+            let failure = format!(
                 "{failure_count} DirectoryAdded hook(s) failed; output is in the debug log, not shown here"
-            ));
+            );
+            context_messages.push(failure.clone());
+            exact_context_messages.push(failure.into());
         }
 
-        if !context_messages.is_empty() {
-            let body = context_messages
+        if !exact_context_messages.is_empty() {
+            let body = exact_context_messages
                 .iter()
-                .map(|message| format!("DirectoryAdded hook: {message}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let message = ConversationMessage::user_meta(
-                MessageId::new(),
-                format!("<system-reminder>\n{body}\n</system-reminder>"),
-            );
+                .map(|message| ExactHookText::wrapped("DirectoryAdded hook: ", message, ""))
+                .collect::<Vec<_>>();
+            let body = ExactHookText::join(&body, "\n");
+            let message =
+                ExactHookText::wrapped("<system-reminder>\n", &body, "\n</system-reminder>")
+                    .to_conversation_message(MessageId::new(), true);
             self.session.lock().await.history.push(message.clone());
             self.persist_message_to_jsonl(&message).await;
         }
@@ -2292,10 +3318,9 @@ impl ConversationOrchestrator {
             .await;
 
         if request.reload_claude_md {
-            self.fire_instructions_loaded_with_reason(
-                hooks::events::InstructionsLoadReason::NestedTraversal,
-            )
-            .await;
+            // Native register_repo_root clears the eager cache; it does not
+            // synthesize a nested traversal InstructionsLoaded event.
+            self.clear_instruction_files();
         }
         let reload = if request.reload_skills || request.reload_plugins {
             if let Some(reloader) = &self.repo_root_reloader {
@@ -2368,23 +3393,49 @@ impl ConversationOrchestrator {
         // The derived meta message is kept in live API history but is not written
         // as a second JSONL row. Cold resume performs the same normalization from
         // this attachment, so the on-disk transcript has one source of truth.
-        self.persist_hook_attachment_to_jsonl(hooks::stopped_continuation_attachment(
-            &hooks::HookAttachmentIdentity {
-                hook_name: "Stop".to_string(),
-                hook_event: "Stop".to_string(),
-                tool_use_id: format!("hook-{}", lingxi_core::types::HookId::new().as_uuid()),
-            },
-            reason,
-        ))
+        self.persist_hook_attachment_to_jsonl(
+            hooks::stopped_continuation_attachment(
+                &hooks::HookAttachmentIdentity {
+                    hook_name: "Stop".to_string(),
+                    hook_event: "Stop".to_string(),
+                    tool_use_id: format!("hook-{}", lingxi_core::types::HookId::new().as_uuid()),
+                },
+                reason,
+            ),
+            Default::default(),
+        )
         .await;
         let content = format!(
             "<system-reminder>\nStop hook stopped continuation: {reason}\n</system-reminder>"
         );
         let msg = ConversationMessage::user_meta(MessageId::new(), content);
+        self.register_mod_persisted_attachment(
+            &msg,
+            "hook_stopped_continuation",
+            serde_json::json!({"kind":"hook","event":"Stop"}),
+        )
+        .await;
         {
             let mut s = self.session.lock().await;
             s.history.push(msg);
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl lingxi_core::host::uds_inbox::PeerReceiveGate for ConversationOrchestrator {
+    async fn receive(
+        &self,
+        destination_session_id: &str,
+        text: &str,
+        commit: lingxi_core::host::uds_inbox::PeerQueueCommit,
+    ) -> bool {
+        let current = lingxi_core::host::OrchestratorHandle::current_session_id(self).await;
+        if lingxi_core::types::SessionId::parse_prefixed(destination_session_id) != Some(current) {
+            return false;
+        }
+        self.screen_mod_uds_receive(text, commit).await;
+        true
     }
 }
 

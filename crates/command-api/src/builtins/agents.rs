@@ -13,9 +13,7 @@
 //! `agents/` paths are branded via [`branding::DOT_DIR`] (`.lingxi/agents/`)
 //! because they point users at the dirs lingxi ACTUALLY loads
 //! (`engine-desktop` (5.3) scans `<cwd>/.lingxi/agents` +
-//! `<lingxi_home>/agents`); the docs URL stays verbatim. The command
-//! DESCRIPTION stays byte-verbatim per the `core_description` convention
-//! (command help strings are 1:1 with the oracle).
+//! `<lingxi_home>/agents`). Guidance and help use the current product identity.
 
 use crate::builtin_support::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
@@ -31,12 +29,12 @@ use telemetry::tengu::command as cmd_evt;
 fn agents_removed_message() -> String {
     format!(
         "The /agents wizard has been removed.\n\n\
-         Ask Claude to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\n\
+         Ask {product} to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\n\
          or edit the files directly:\n  \
          \u{2022} {dot}/agents/       (this project)\n  \
-         \u{2022} ~/{dot}/agents/     (all projects)\n\n\
-         Docs: https://code.claude.com/docs/en/sub-agents",
-        dot = branding::DOT_DIR
+         \u{2022} ~/{dot}/agents/     (all projects)",
+        dot = branding::DOT_DIR,
+        product = branding::PRODUCT_NAME,
     )
 }
 
@@ -90,7 +88,7 @@ mod tests {
     #[tokio::test]
     async fn returns_removed_wizard_guidance() {
         let h = AgentsHandler::new(Arc::new(MockOrchestratorHandle::new()));
-        let locked = "The /agents wizard has been removed.\n\nAsk Claude to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\nor edit the files directly:\n  \u{2022} .lingxi/agents/       (this project)\n  \u{2022} ~/.lingxi/agents/     (all projects)\n\nDocs: https://code.claude.com/docs/en/sub-agents";
+        let locked = format!("The /agents wizard has been removed.\n\nAsk {} to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\nor edit the files directly:\n  \u{2022} {}/agents/       (this project)\n  \u{2022} ~/{}/agents/     (all projects)", branding::PRODUCT_NAME, branding::DOT_DIR, branding::DOT_DIR);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
             assert_eq!(s, locked);
         } else {
@@ -126,7 +124,11 @@ mod tests {
         assert_eq!(h.name(), "agents");
         assert_eq!(
             h.description(),
-            "(removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/"
+            format!(
+                "(removed) Ask {} to create/manage subagents, or edit {}/agents/",
+                branding::PRODUCT_NAME,
+                branding::DOT_DIR
+            )
         );
     }
 }

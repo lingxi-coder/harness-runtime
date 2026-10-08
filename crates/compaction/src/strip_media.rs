@@ -39,10 +39,10 @@ fn strip_one(message: ConversationMessage) -> ConversationMessage {
         .into_iter()
         .map(|block| match block {
             ContentBlock::Image { .. } => ContentBlock::Text {
-                text: STRIPPED_IMAGE_PLACEHOLDER.to_string(),
+                text: STRIPPED_IMAGE_PLACEHOLDER.to_string(), citations: None,
             },
             ContentBlock::Document { .. } => ContentBlock::Text {
-                text: STRIPPED_DOCUMENT_PLACEHOLDER.to_string(),
+                text: STRIPPED_DOCUMENT_PLACEHOLDER.to_string(), citations: None,
             },
             ContentBlock::ToolResult {
                 tool_use_id,
@@ -92,11 +92,11 @@ mod tests {
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
-                    text: "before".to_string(),
+                    text: "before".to_string(), citations: None,
                 },
                 image_block(),
                 ContentBlock::Text {
-                    text: "after".to_string(),
+                    text: "after".to_string(), citations: None,
                 },
             ],
             is_meta: false,
@@ -110,9 +110,9 @@ mod tests {
         // The image became a `[image]` text block; surrounding text is intact
         // and block order/count is preserved.
         assert_eq!(content.len(), 3);
-        assert!(matches!(&content[0], ContentBlock::Text { text } if text == "before"));
-        assert!(matches!(&content[1], ContentBlock::Text { text } if text == "[image]"));
-        assert!(matches!(&content[2], ContentBlock::Text { text } if text == "after"));
+        assert!(matches!(&content[0], ContentBlock::Text { text, .. } if text == "before"));
+        assert!(matches!(&content[1], ContentBlock::Text { text, .. } if text == "[image]"));
+        assert!(matches!(&content[2], ContentBlock::Text { text, .. } if text == "after"));
     }
 
     #[test]
@@ -143,7 +143,7 @@ mod tests {
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: id.clone(),
                 content: "read result".into(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: Some("provider-read".into()),
                 content_blocks: Some(vec![
                     serde_json::json!({"type":"text", "text":"page 1"}),

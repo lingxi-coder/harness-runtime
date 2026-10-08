@@ -161,7 +161,7 @@ impl Sandbox {
         self,
         source: &str,
         input: &serde_json::Value,
-    ) -> Result<serde_json::Value, FunctionHookError> {
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, FunctionHookError> {
         let sandbox = self.clamped();
         // A small grace so the in-engine interrupt gets to report `TimedOut`
         // (with its cheaper cleanup) before the outer deadline gives up.
@@ -190,7 +190,7 @@ impl Sandbox {
         self,
         source: &str,
         input: &serde_json::Value,
-    ) -> Result<serde_json::Value, FunctionHookError> {
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, FunctionHookError> {
         let runtime = rquickjs::Runtime::new()
             .map_err(|error| FunctionHookError::EngineUnavailable(error.to_string()))?;
         runtime.set_memory_limit(self.memory_limit);
@@ -232,11 +232,15 @@ impl Sandbox {
                 .remove("queueMicrotask")
                 .map_err(|error| FunctionHookError::EngineUnavailable(error.to_string()))?;
             match ctx.eval::<Option<String>, _>(program.as_str()) {
-                Ok(Some(text)) => serde_json::from_str(&text)
+                Ok(Some(text)) => lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&text)
                     .map_err(|error| FunctionHookError::NotSerialisable(error.to_string())),
                 // `JSON.stringify(undefined)` is `undefined`: the hook declined
                 // to answer, which is a valid "no opinion", not an error.
-                Ok(None) => Ok(serde_json::Value::Null),
+                Ok(None) => Ok(
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                        serde_json::Value::Null,
+                    ),
+                ),
                 Err(error) => {
                     if tripped.load(Ordering::SeqCst) {
                         return Err(FunctionHookError::TimedOut);
@@ -273,7 +277,9 @@ mod tests {
     use serde_json::json;
 
     fn run(source: &str) -> Result<serde_json::Value, FunctionHookError> {
-        Sandbox::default().eval(source, &json!({"tool": "Bash"}))
+        Sandbox::default()
+            .eval(source, &json!({"tool": "Bash"}))
+            .map(|projection| projection.value)
     }
 
     /// 🚨 THE security test. Every name below is a host capability that must be
@@ -470,7 +476,26 @@ mod tests {
                 &json!({"tool": "Bash"}),
             )
             .unwrap();
-        assert_eq!(out, json!({"seen": "Bash", "ok": true}));
+        assert_eq!(out.value, json!({"seen": "Bash", "ok": true}));
+    }
+
+    #[test]
+    fn function_result_projection_preserves_escaped_lone_surrogates() {
+        let projection = Sandbox::default()
+            .eval_abandonable(
+                r#"return {systemMessage:"\uD800x",hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:"a\uDC00",initialUserMessage:"\uD800"}};"#,
+                &json!({}),
+            )
+            .unwrap();
+        assert_eq!(projection.string_units("/systemMessage"), Some(vec![0xD800, u16::from(b'x')]));
+        assert_eq!(
+            projection.string_units("/hookSpecificOutput/additionalContext"),
+            Some(vec![u16::from(b'a'), 0xDC00])
+        );
+        assert_eq!(
+            projection.string_units("/hookSpecificOutput/initialUserMessage"),
+            Some(vec![0xD800])
+        );
     }
 
     /// A hook with no opinion returns nothing; that is not an error.
@@ -508,12 +533,12 @@ mod tests {
                 &json!({"text": "a\u{2028}b\u{2029}c"}),
             )
             .unwrap();
-        assert_eq!(out, json!(5));
+        assert_eq!(out.value, json!(5));
         let round_tripped = Sandbox::default()
             .eval("return input.text;", &json!({"text": "a\u{2028}b"}))
             .unwrap();
         assert_eq!(
-            round_tripped,
+            round_tripped.value,
             json!("a\u{2028}b"),
             "the separator must survive verbatim"
         );
@@ -526,7 +551,7 @@ mod tests {
         let out = Sandbox::default()
             .eval("return typeof globalThis.__pwned;", &hostile)
             .unwrap();
-        assert_eq!(out, json!("undefined"));
+        assert_eq!(out.value, json!("undefined"));
     }
 }
 

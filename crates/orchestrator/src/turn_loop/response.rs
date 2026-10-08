@@ -30,7 +30,7 @@ pub(super) async fn handle_max_output_tokens(
     // `tengu_otk_slot_v1` (here `escalate_max_output_tokens`) and "not already
     // escalated". We arm `max_output_tokens_override` — which the next
     // `execute_one_turn_with_recovery_tracked` TAKEs and passes to
-    // `messages_create_with_opts` — and return `Continue` so the same step
+    // `messages_create` — and return `Continue` so the same step
     // re-issues at 64k with NO nudge injected. The override is taken per call,
     // so a separate `max_output_tokens_escalated` flag (reset alongside the
     // recovery count) gates this to once per episode and prevents an
@@ -81,7 +81,7 @@ pub(super) async fn handle_max_output_tokens(
 pub(super) fn has_visible_text(blocks: &[ContentBlock]) -> bool {
     blocks
         .iter()
-        .any(|b| matches!(b, ContentBlock::Text { text } if !text.trim().is_empty()))
+        .any(|block| block.visible_text().is_some_and(|text| !text.trim().is_empty()))
 }
 
 /// Port of claude-code's `Pt(ce)` (query module, `bin/claude.exe` offset
@@ -155,7 +155,7 @@ pub(super) async fn handle_malformed_tool_use(
         let failed_msg = ConversationMessage::Assistant {
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
-                text: MALFORMED_TOOL_USE_RETRY_FAILED.to_string(),
+                text: MALFORMED_TOOL_USE_RETRY_FAILED.to_string(), citations: None,
             }],
             stop_reason: Some("stop_sequence".to_string()),
         };
@@ -226,10 +226,20 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
         .iter()
         .filter_map(|b| match b {
             LlmContentBlock::ProviderContent { protocol, value } => Some(ContentBlock::ProviderContent { protocol: protocol.clone(), value: value.clone() }),
-            LlmContentBlock::Text { text, .. }
-            | LlmContentBlock::TextJsUtf16 { text, .. } => {
-                Some(ContentBlock::Text { text: text.clone() })
-            }
+            LlmContentBlock::Text { text, citations, .. } => Some(ContentBlock::Text {
+                text: text.clone(),
+                citations: citations.clone(),
+            }),
+            LlmContentBlock::TextJsUtf16 {
+                text,
+                utf16_code_units,
+                citations,
+                ..
+            } => Some(ContentBlock::TextJsUtf16 {
+                text: text.clone(),
+                utf16_code_units: utf16_code_units.clone(),
+                citations: citations.clone(),
+            }),
             LlmContentBlock::ToolCall { id, name, input } => {
                 // The provider-issued id (e.g. Anthropic `toolu_…`, OpenAI
                 // `call_…`) IS the canonical `ToolUseId`, so JSONL/resume bytes

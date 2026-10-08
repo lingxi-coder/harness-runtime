@@ -32,7 +32,7 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use telemetry::pii::Verified;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
@@ -41,13 +41,13 @@ use telemetry::tengu::tool::{
     EXIT_PLAN_MODE_COMPLETED, EXIT_PLAN_MODE_FAILED, EXIT_PLAN_MODE_STARTED,
 };
 
+use tool_api::BuiltinToolContext;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext,
 };
-use tool_api::BuiltinToolContext;
 
 /// Instruction block surfaced to the model on entering plan mode. Byte-faithful
 /// port of the non-interview-phase branch of `EnterPlanModeTool.ts`
@@ -229,8 +229,7 @@ const EXIT_PLAN_APPROVED_HEADING_EDITED: &str = "Approved Plan (edited by user)"
 /// Model-facing approval text emitted by `ExitPlanMode` in an agent context —
 /// byte-faithful port of the `isAgent` branch of
 /// `mapToolResultToToolResultBlockParam` (`ExitPlanModeV2Tool.ts:452-459`).
-const EXIT_PLAN_APPROVED_AGENT_MSG: &str =
-    "User has approved the plan. There is nothing else needed from you now. Please respond with \"ok\"";
+const EXIT_PLAN_APPROVED_AGENT_MSG: &str = "User has approved the plan. There is nothing else needed from you now. Please respond with \"ok\"";
 
 /// Model-facing approval text when the plan is empty — byte-faithful port of the
 /// empty-plan branch (`ExitPlanModeV2Tool.ts:461-468`).
@@ -242,13 +241,11 @@ const EXIT_PLAN_APPROVED_EMPTY_MSG: &str =
 /// follow it are [`EXIT_PLAN_SAVED_TO_PREFIX`] / [`EXIT_PLAN_REFER_BACK_LINE`],
 /// and the echoed plan section comes LAST, after the optional
 /// [`EXIT_PLAN_TEAMMATE_SUFFIX`].
-const EXIT_PLAN_APPROVED_PREFIX: &str =
-    "User has approved your plan. You can now start coding. Start with updating your todo list if applicable";
+const EXIT_PLAN_APPROVED_PREFIX: &str = "User has approved your plan. You can now start coding. Start with updating your todo list if applicable";
 
 /// Locked rejection string for calling `ExitPlanMode` outside plan mode —
 /// byte-faithful to `validateInput` (`ExitPlanModeV2Tool.ts:212-216`).
-const EXIT_PLAN_MODE_NOT_IN_PLAN_MODE_MSG: &str =
-    "You are not in plan mode. To enter plan mode, call the EnterPlanMode tool first. If your plan was already approved, continue with implementation.";
+const EXIT_PLAN_MODE_NOT_IN_PLAN_MODE_MSG: &str = "You are not in plan mode. To enter plan mode, call the EnterPlanMode tool first. If your plan was already approved, continue with implementation.";
 
 /// A missing permission gate is never an approval. Hosts that cannot wire an
 /// enforcing gate must fail closed instead of allowing `ExitPlanMode` to
@@ -743,7 +740,10 @@ impl Tool for ExitPlanModeTool {
             }
             | lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
                 if let Some(updated) = updated_input {
-                    input = updated;
+                    updated
+                        .validate()
+                        .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+                    input = updated.value;
                 }
             }
             lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason } => {
@@ -854,8 +854,8 @@ impl Tool for ExitPlanModeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_core::types::{AgentId, SessionId};
     use lingxi_core::SessionState;
+    use lingxi_core::types::{AgentId, SessionId};
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
     use telemetry::{AnalyticsBus, InMemorySink};
@@ -949,8 +949,10 @@ mod tests {
         );
         let instructions = res.data["message"].as_str().unwrap();
         assert!(instructions.starts_with("Entered plan mode."));
-        assert!(instructions
-            .contains("6. When ready, use ExitPlanMode to present your plan for approval"));
+        assert!(
+            instructions
+                .contains("6. When ready, use ExitPlanMode to present your plan for approval")
+        );
         assert!(instructions.contains("DO NOT write or edit any files yet"));
         assert!(session.lock().await.plan_mode);
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
@@ -1112,10 +1114,12 @@ mod tests {
             "fresh plan",
             "an inline plan is persisted to the plan file"
         );
-        assert!(res.data["model_content"]
-            .as_str()
-            .expect("model content")
-            .ends_with("## Approved Plan (edited by user):\nfresh plan"));
+        assert!(
+            res.data["model_content"]
+                .as_str()
+                .expect("model content")
+                .ends_with("## Approved Plan (edited by user):\nfresh plan")
+        );
         std::fs::remove_dir_all(&plans_dir).ok();
     }
 
@@ -1263,6 +1267,7 @@ mod tests {
                 include_examples: true,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
             .await;
         // Verbatim port of `EXIT_PLAN_MODE_V2_TOOL_PROMPT` (prompt.ts:6-29).
@@ -1388,11 +1393,12 @@ mod tests {
             session.lock().await.plan_mode,
             "teammate review must not change leader session mode"
         );
-        assert!(sink
-            .events()
-            .await
-            .iter()
-            .any(|event| event.name == EXIT_PLAN_MODE_COMPLETED));
+        assert!(
+            sink.events()
+                .await
+                .iter()
+                .any(|event| event.name == EXIT_PLAN_MODE_COMPLETED)
+        );
     }
     /// Unlike the interactive ExitPlanMode fixture, this transport never
     /// supplies a user approval for ordinary file writes.
@@ -1499,7 +1505,11 @@ mod tests {
         let invoker = tool_api::tool_invoker_impl::RegistryToolInvoker::new(Arc::new(registry))
             .with_gate(gate);
         let context = || lingxi_core::host::tool_invoker::SubagentInvocationContext {
+            input_projection: None,
+            cancellation_token: lingxi_core::host::CancellationToken::new(),
             permission_pause_observer: None,
+            instruction_context: None,
+            fork_context: None,
             tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
             parent_agent_id: Some(id),
             origin_session_id: None,
@@ -1515,6 +1525,11 @@ mod tests {
             observer: None,
             parent_model: None,
             parent_model_profile: None,
+            agent_spawn_provenance: Default::default(),
+            tool_context_state: None,
+            assistant_message: None,
+            same_turn_tool_uses: Vec::new(),
+            current_history: Vec::new(),
             mode_override: Some("plan".into()),
             request_source: None,
             frozen_command_denies: vec![],
@@ -1527,14 +1542,16 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(invoker
-            .invoke(
-                "Write",
-                json!({"file_path":root.join("other.md"),"content":"no"}),
-                context()
-            )
-            .await
-            .is_err());
+        assert!(
+            invoker
+                .invoke(
+                    "Write",
+                    json!({"file_path":root.join("other.md"),"content":"no"}),
+                    context()
+                )
+                .await
+                .is_err()
+        );
         let result = invoker
             .invoke_detailed("ExitPlanMode", json!({}), context(), None)
             .await
@@ -1542,7 +1559,12 @@ mod tests {
         assert_eq!(result.data["plan"], "Inspect, test, implement");
         assert_eq!(result.data["awaitingLeaderApproval"], true);
         assert!(result.data.get("model_content").is_none());
-        assert_eq!(result.model_content.as_deref(), Some("Your plan has been submitted to the team lead for approval.\n\nDo NOT proceed until you receive approval."));
+        assert_eq!(
+            result.model_content.as_deref(),
+            Some(
+                "Your plan has been submitted to the team lead for approval.\n\nDo NOT proceed until you receive approval."
+            )
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

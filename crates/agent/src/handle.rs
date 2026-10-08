@@ -14,14 +14,18 @@
 use crate::api::SubagentApiClient;
 use crate::builtins::builtin_agent_definitions;
 use crate::definition::{AgentDefinition, AgentIsolation, AgentModel, AgentSource};
+use crate::model_resolution::{
+    ModelResolutionContext, ModelResolutionContextProvider, ModelResolutionError,
+};
 use crate::pool::StateMachinePool;
 use crate::runner::SubagentEvent;
 use async_trait::async_trait;
+use lingxi_core::host::agent_name_registry::{AgentNameRegistry, InMemoryAgentNameRegistry};
 use lingxi_core::host::coordinator_mode::CoordinatorModeHandle;
 use lingxi_core::host::subagent_spawn::{
-    SubagentInheritance, SubagentListingEntry, SubagentObservation, SubagentResult,
-    SubagentSpawnError, SubagentSpawnObserver, SubagentSpawnRequest, SubagentSpawner,
-    SubagentUsage, SubagentUsageRecorder,
+    AgentOfferCandidate, SubagentInheritance, SubagentListingEntry, SubagentObservation,
+    SubagentResult, SubagentSpawnError, SubagentSpawnObserver, SubagentSpawnRequest,
+    SubagentSpawner, SubagentUsage, SubagentUsageRecorder,
 };
 use lingxi_core::types::{AgentId, ConversationMessage};
 use permission::PermissionMode;
@@ -42,8 +46,8 @@ use crate::definition::AgentPermissionMode;
 #[cfg(test)]
 use crate::definition::AgentToolPolicy;
 use cleanup::McpCleanupGuard;
-use cleanup::SpawnDeallocGuard;
 use cleanup::SPAWN_CANCEL_GRACE;
+use cleanup::SpawnDeallocGuard;
 #[cfg(test)]
 use lingxi_core::types::MessageId;
 pub(crate) use output::agent_source_to_claude_str;
@@ -55,13 +59,13 @@ use output::short_input_hint;
 use output::subagent_tool_call_lines;
 pub(crate) use output::subagent_usage_from_llm_usage;
 pub use runtime_links::RuntimeLink;
-pub use spawn_context::agent_listing_entries;
 pub use spawn_context::append_subagent_system_prompt_suffix;
 #[cfg(test)]
 use spawn_context::apply_spawn_rewrite;
 pub use spawn_context::normalizes_to_fusion;
 pub use spawn_context::tools_denied_agent_types;
 pub use spawn_context::tools_description;
+pub use spawn_context::{agent_listing_candidates, agent_listing_entries};
 
 tokio::task_local! {
     static WORKFLOW_TRANSCRIPT_SUBDIR_OVERRIDE: Option<std::path::PathBuf>;
@@ -114,9 +118,10 @@ pub struct PoolSubagentSpawner {
     /// competes for.
     panel_pool: Arc<StateMachinePool>,
     /// Optional model API seam handed to every child runner via the
-    /// child's [`SubagentContext`]. `None` keeps the legacy stub behavior
-    /// (the runner emits a synthetic completion without calling the model).
+    /// child's [`SubagentContext`]. `None` fails the child before startup writes.
     api_client: Option<Arc<dyn SubagentApiClient>>,
+    instruction_provider:
+        Option<Arc<dyn lingxi_core::host::instructions::InstructionContextProvider>>,
     /// The refusal-fallback chain handed to every child runner. Empty (the
     /// default) leaves a refusing subagent ending its run, which is what this
     /// port did before the cascade reached the `agent` crate. Filled by the
@@ -143,9 +148,9 @@ pub struct PoolSubagentSpawner {
     /// names into [`SubagentContext::allowed_tools`] (the runner's dispatch
     /// allow-list). Even under `AgentToolPolicy::All` the resolver strips the
     /// always-disallowed agent-tool set (`Agent`/`TaskOutput`/`ExitPlanMode`/
-    /// `EnterPlanMode`/`AskUserQuestion`/`TaskStop`, gated by `USER_TYPE !==
-    /// 'ant'`) plus the definition's own `disallowed_tools`, so a
-    /// general-purpose child no longer inherits `Agent`/`Task`; it narrows
+    /// `EnterPlanMode`/`AskUserQuestion`/`TaskStop`) plus the definition's own
+    /// `disallowed_tools`, so a
+    /// general-purpose child no longer inherits `Agent`; it narrows
     /// further once the spawn path loads real per-agent definitions.
     tool_registry: Arc<RuntimeLink<Arc<ToolRegistry>>>,
     task_registry: std::sync::OnceLock<
@@ -214,10 +219,10 @@ pub struct PoolSubagentSpawner {
     /// selection. This takes precedence over the model-only provider above so
     /// workflow and background spawns cannot lose provider identity.
     default_model_selection_provider: Arc<std::sync::OnceLock<DefaultModelSelectionProvider>>,
-    /// Authoritative provider classification keyed by configured profile id.
-    /// User profiles may target Anthropic first-party under arbitrary names, so
-    /// model routing must never infer this property from the profile string.
-    provider_first_party_resolver: Arc<std::sync::OnceLock<ProviderFirstPartyResolver>>,
+    /// Route-context provider for profile-aware model resolution. Its value API
+    /// keeps the `ModelRuntime` implementation in the host crate.
+    model_resolution_context_provider:
+        Arc<std::sync::OnceLock<Arc<dyn ModelResolutionContextProvider>>>,
     /// Live/boot permission-mode anchor threaded into
     /// [`crate::model_resolution::resolve_agent_model`] so an `AgentModel::Inherit`
     /// spawn gets the plan-mode runtime resolution (`opusplan`→Opus / `haiku`→
@@ -250,14 +255,6 @@ pub struct PoolSubagentSpawner {
     /// a default install with no policy allowlist) ⇒ the unrestricted resolution
     /// (byte-identical legacy). Set at boot via [`Self::with_model_restriction_opt`].
     model_restriction: Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)>,
-    /// LingXi multi-provider half of the 2.1.198 `GAe`/`obm` firstParty gate
-    /// (`fr() !== "firstParty"`): `false` when the session's default model
-    /// routes to a non-Anthropic provider profile (OpenAI/Gemini/…), which
-    /// makes the built-in Explore agent resolve to `"inherit"` exactly like
-    /// the TS non-firstParty branch. Default `true` (the Anthropic default
-    /// install); the env half (Bedrock/Vertex/Foundry) is checked inside
-    /// [`crate::model_resolution::resolve_builtin_explore_model`].
-    session_provider_first_party: bool,
     /// Hook executor handed to every child runner via
     /// [`SubagentContext::hook_executor`] so the runner can fire `SubagentStart`
     /// (collecting + injecting the hooks' `additionalContexts`, claude
@@ -346,7 +343,7 @@ pub struct PoolSubagentSpawner {
     /// async spawn that carried a `name`; a `SendMessage({ to: name })` resolver
     /// reads it via [`SubagentSpawner::resolve_name`]. Shared `Arc` so the same
     /// map is visible across spawner clones. Sync agents are NOT registered.
-    name_registry: Arc<RwLock<HashMap<String, AgentId>>>,
+    name_registry: Arc<InMemoryAgentNameRegistry>,
     /// TOOL-WIDE deny-rule names from the boot permission policy, applied in
     /// [`Self::resolve_tools`] so a blanket-denied tool never leaks into a
     /// subagent's advertised wire `tools` array — matching claude-code, where
@@ -424,16 +421,13 @@ pub struct DefaultModelSelection {
     pub model: String,
     /// Provider profile that disambiguates overlapping model ids.
     pub model_profile: Option<String>,
-    /// Whether the resolved provider is Anthropic first-party.
-    pub provider_first_party: bool,
+    /// Route-scoped facts used by the pure alias resolver.
+    pub model_resolution_context: ModelResolutionContext,
 }
 
 /// Reads the LIVE model and provider profile together at spawn time.
 pub type DefaultModelSelectionProvider =
-    Arc<dyn Fn() -> Option<DefaultModelSelection> + Send + Sync>;
-
-/// Resolves whether a configured provider profile is Anthropic first-party.
-pub type ProviderFirstPartyResolver = Arc<dyn Fn(&str) -> Option<bool> + Send + Sync>;
+    Arc<dyn Fn() -> Result<Option<DefaultModelSelection>, ModelResolutionError> + Send + Sync>;
 
 /// Gate for [`append_subagent_system_prompt_suffix`] — the port of
 /// `CLAUDE_CODE_ENABLE_APPEND_SUBAGENT_PROMPT`. `--append-subagent-system-prompt`
@@ -468,9 +462,8 @@ impl PoolSubagentSpawner {
         &self.panel_pool
     }
 
-    /// Construct an adapter wrapping `pool` with no API client (legacy stub
-    /// runner). Use [`Self::with_api_client`] to enable the real multi-turn
-    /// loop.
+    /// Construct an adapter wrapping `pool`. Configure its required model
+    /// client with [`Self::with_api_client`] before launching a child.
     #[must_use]
     pub fn new(pool: Arc<StateMachinePool>) -> Self {
         let builtins = builtin_agent_definitions()
@@ -485,6 +478,7 @@ impl PoolSubagentSpawner {
             pool,
             panel_pool,
             api_client: None,
+            instruction_provider: None,
             tool_registry: Arc::new(RuntimeLink::new()),
             refusal_fallback_chain: Vec::new(),
             task_registry: std::sync::OnceLock::new(),
@@ -495,12 +489,11 @@ impl PoolSubagentSpawner {
             default_model: None,
             default_model_provider: Arc::new(std::sync::OnceLock::new()),
             default_model_selection_provider: Arc::new(std::sync::OnceLock::new()),
-            provider_first_party_resolver: Arc::new(std::sync::OnceLock::new()),
+            model_resolution_context_provider: Arc::new(std::sync::OnceLock::new()),
             permission_mode: PermissionMode::Default,
             spawn_bypass_gates: Arc::new(std::sync::OnceLock::new()),
             model_setting: None,
             model_restriction: None,
-            session_provider_first_party: true,
             hook_executor: Arc::new(RuntimeLink::new()),
             permission_gate: Arc::new(std::sync::OnceLock::new()),
             strict_plugin_only_hooks: Arc::new(std::sync::OnceLock::new()),
@@ -512,7 +505,7 @@ impl PoolSubagentSpawner {
             subagents_dir_for_session_provider: None,
             allocated_transcript_paths: Arc::new(std::sync::Mutex::new(HashMap::new())),
             transcript_fs: None,
-            name_registry: Arc::new(RwLock::new(HashMap::new())),
+            name_registry: Arc::new(InMemoryAgentNameRegistry::new()),
             tool_wide_deny_names: Arc::new(std::sync::OnceLock::new()),
             subagent_env_renderer: Arc::new(std::sync::OnceLock::new()),
             mcp_tool_builder: Arc::new(RuntimeLink::new()),
@@ -523,6 +516,16 @@ impl PoolSubagentSpawner {
             spawn_observer: None,
             usage_recorder: None,
         }
+    }
+
+    /// Share the main session's host-owned instruction source with children.
+    #[must_use]
+    pub fn with_instruction_provider(
+        mut self,
+        provider: Arc<dyn lingxi_core::host::instructions::InstructionContextProvider>,
+    ) -> Self {
+        self.instruction_provider = Some(provider);
+        self
     }
 
     /// Builder: attach a global structured observer for every spawned child.
@@ -730,19 +733,21 @@ impl PoolSubagentSpawner {
         self
     }
 
-    /// Return the set-once cell composition roots fill from their authoritative
-    /// provider catalog. A profile id alone is never interpreted here.
+    /// Return the set-once cell the composition root shares with the
+    /// Orchestrator for current-route alias resolution.
     #[must_use]
-    pub fn provider_first_party_resolver_handle(
+    pub fn model_resolution_context_provider_handle(
         &self,
-    ) -> Arc<std::sync::OnceLock<ProviderFirstPartyResolver>> {
-        self.provider_first_party_resolver.clone()
+    ) -> Arc<std::sync::OnceLock<Arc<dyn ModelResolutionContextProvider>>> {
+        self.model_resolution_context_provider.clone()
     }
 
-    /// Set the provider classifier immediately (tests/minimal hosts).
-    #[must_use]
-    pub fn with_provider_first_party_resolver(self, resolver: ProviderFirstPartyResolver) -> Self {
-        let _ = self.provider_first_party_resolver.set(resolver);
+    /// Attach the host's real current-route context provider.
+    pub fn with_model_resolution_context_provider(
+        self,
+        provider: Arc<dyn ModelResolutionContextProvider>,
+    ) -> Self {
+        let _ = self.model_resolution_context_provider.set(provider);
         self
     }
 
@@ -783,18 +788,8 @@ impl PoolSubagentSpawner {
         self
     }
 
-    /// Builder: LingXi multi-provider half of the 2.1.198 Explore firstParty
-    /// gate — pass `false` when the session's default model routes to a
-    /// non-Anthropic provider profile so the built-in Explore agent resolves
-    /// to `inherit` (never the opus cap). See the field docs.
-    #[must_use]
-    pub fn with_session_provider_first_party(mut self, first_party: bool) -> Self {
-        self.session_provider_first_party = first_party;
-        self
-    }
-
     /// Builder: attach the model API seam the child runner uses to drive the
-    /// real multi-turn loop. Without this, `spawn` produces stub completions.
+    /// multi-turn loop. Launching without a client returns a startup failure.
     #[must_use]
     pub fn with_api_client(mut self, api_client: Arc<dyn SubagentApiClient>) -> Self {
         self.api_client = Some(api_client);
@@ -1070,6 +1065,11 @@ impl PoolSubagentSpawner {
         let _ = self.task_registry.set(Arc::downgrade(&registry));
     }
 
+    /// Share the live ordered name store with Agent tools and Mod enumeration.
+    pub fn agent_name_registry(&self) -> Arc<dyn AgentNameRegistry> {
+        self.name_registry.clone()
+    }
+
     /// Builder: set the file-loaded user/project agent catalog the spawn path
     /// resolves against (it overrides built-ins on `agent_type` collision). Sets
     /// the cell immediately — use when the catalog is available at construction
@@ -1233,6 +1233,17 @@ pub trait StreamingSubagentSpawner: Send + Sync {
     /// unknown / its runner has terminated.
     async fn resume(&self, agent_id: &AgentId, message: String) -> Result<(), SubagentSpawnError>;
 
+    /// Deliver an already admitted report preserving its typed peer origin.
+    async fn resume_peer(
+        &self,
+        _agent_id: &AgentId,
+        _envelope: lingxi_core::host::handback::HandbackEnvelope,
+    ) -> Result<(), SubagentSpawnError> {
+        Err(SubagentSpawnError::Runtime(
+            "typed peer resume is unavailable".into(),
+        ))
+    }
+
     /// Tear down a persistent subagent's INNER pool runner and free its slot.
     ///
     /// The persistent runner "comes to rest" between turn-sets and parks on its
@@ -1325,6 +1336,25 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
             .map_err(|e| SubagentSpawnError::Runtime(e.to_string()))
     }
 
+    async fn resume_peer(
+        &self,
+        agent_id: &AgentId,
+        envelope: lingxi_core::host::handback::HandbackEnvelope,
+    ) -> Result<(), SubagentSpawnError> {
+        if !envelope.validate()
+            || !matches!(envelope.receipt.recipient, lingxi_core::host::handback::HandbackRecipient::Agent { agent_id: recipient, .. } if recipient == *agent_id)
+        {
+            return Err(SubagentSpawnError::Runtime(
+                "invalid peer report recipient".into(),
+            ));
+        }
+        self.pool
+            .try_send_event(agent_id, lingxi_core::Event::PeerMessage { envelope })
+            .await
+            .map(|_| ())
+            .map_err(|e| SubagentSpawnError::Runtime(e.to_string()))
+    }
+
     async fn stop(&self, agent_id: &AgentId) -> Result<(), SubagentSpawnError> {
         // Close the spawn gate throughout cooperative cancellation and teardown.
         let _stop_pending =
@@ -1370,12 +1400,33 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
 
 #[async_trait]
 impl SubagentSpawner for PoolSubagentSpawner {
+    fn owns_subagent_stop_hooks(
+        &self,
+        persistent: bool,
+        session_id: Option<lingxi_core::types::SessionId>,
+        scope: lingxi_core::host::subagent_spawn::SubagentStopScope,
+    ) -> bool {
+        scope == lingxi_core::host::subagent_spawn::SubagentStopScope::Session
+            && persistent
+            && self.hook_executor.get().is_some_and(|executor| {
+                executor
+                    .subagent_stop_firer(session_id.unwrap_or(self.hook_session_id))
+                    .is_some()
+            })
+    }
     async fn resume_foreground(
         &self,
         agent_id: &AgentId,
         message: String,
     ) -> Result<(), SubagentSpawnError> {
         <Self as StreamingSubagentSpawner>::resume(self, agent_id, message).await
+    }
+    async fn resume_foreground_peer(
+        &self,
+        agent_id: &AgentId,
+        envelope: lingxi_core::host::handback::HandbackEnvelope,
+    ) -> Result<(), SubagentSpawnError> {
+        <Self as StreamingSubagentSpawner>::resume_peer(self, agent_id, envelope).await
     }
 
     fn transcript_path(&self, agent_id: AgentId) -> Option<std::path::PathBuf> {
@@ -1591,7 +1642,11 @@ impl SubagentSpawner for PoolSubagentSpawner {
                 .on_model_selected(&allocation_event, display_effort.as_deref())
                 .await;
         }
-        let _ = start.send(());
+        if start.send(()).is_ok() {
+            for observer in &observers {
+                observer.on_started(&allocation_event);
+            }
+        }
         observer_events.try_emit(allocation_event);
 
         // Pump the slot until terminal. The runner emits Progress/Message
@@ -1609,6 +1664,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
                     last_request_id,
                     cumulative_usage,
                     usage_complete,
+                    handback,
                 }) => {
                     // Translate the wire usage into the trait rollup. claude
                     // `getTokenCountFromUsage` = input + cache_creation + cache_read
@@ -1647,6 +1703,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
                         last_request_id,
                         cumulative_usage: cumulative_usage_rollup,
                         usage_complete,
+                        handback,
                     };
                 }
                 Some(SubagentEvent::Failed {
@@ -1674,14 +1731,26 @@ impl SubagentSpawner for PoolSubagentSpawner {
                 // turns — forward a one-line summary of each tool call it makes
                 // to `progress` so the parent UI can show nested execution.
                 // Best-effort: a full/closed channel just drops the line.
-                Some(SubagentEvent::Message { message, .. }) => {
+                Some(SubagentEvent::Message {
+                    message,
+                    message_index,
+                    ..
+                }) => {
                     if let Ok(conversation) =
                         serde_json::from_value::<ConversationMessage>(message.clone())
                     {
-                        observer_events.try_emit(SubagentObservation::Message {
-                            agent_id,
-                            message: conversation,
-                        });
+                        if let Some(message_index) = message_index {
+                            observer_events.try_emit(SubagentObservation::MessageRow {
+                                agent_id,
+                                message: conversation,
+                                message_index,
+                            });
+                        } else {
+                            observer_events.try_emit(SubagentObservation::Message {
+                                agent_id,
+                                message: conversation,
+                            });
+                        }
                     }
                     if let Some(sink) = progress.as_ref() {
                         for line in subagent_tool_call_lines(&message) {
@@ -1703,6 +1772,43 @@ impl SubagentSpawner for PoolSubagentSpawner {
                         }
                     }
                 }
+                Some(SubagentEvent::ServerFallbackTombstone {
+                    agent_id: child_id,
+                    message,
+                    display_only,
+                }) => {
+                    observer_events.try_emit(SubagentObservation::ServerFallbackTombstone {
+                        agent_id: child_id,
+                        message: message.clone(),
+                        display_only,
+                    });
+                    if let Some(sink) = progress.as_ref() {
+                        if let Some(line) =
+                            output::forward_subagent_tombstone_line(&message, display_only)
+                        {
+                            let _ = sink.try_send(line);
+                        }
+                    }
+                }
+                Some(SubagentEvent::ServerFallbackApiErrorRow {
+                    agent_id: child_id,
+                    row,
+                    message_index,
+                }) => {
+                    let message = row.query_message();
+                    observer_events.try_emit(SubagentObservation::ServerFallbackApiErrorRow {
+                        agent_id: child_id,
+                        row: row.clone(),
+                        message_index,
+                    });
+                    if let Some(sink) = progress.as_ref() {
+                        let value = serde_json::to_value(message)
+                            .expect("host API-error query message serializes");
+                        if let Some(line) = forward_subagent_message_line(&value) {
+                            let _ = sink.try_send(line);
+                        }
+                    }
+                }
                 Some(SubagentEvent::Progress {
                     tool_use_count,
                     token_count,
@@ -1719,6 +1825,9 @@ impl SubagentSpawner for PoolSubagentSpawner {
                         ));
                     }
                 }
+                // The terminal transcript is an internal task-registry
+                // snapshot. It is not a model/tool progress event.
+                Some(SubagentEvent::TranscriptSnapshot { .. }) => {}
                 None => {
                     // No terminal event ever arrived; fall back to the bound
                     // ctx agent_id (still the REAL child id, never a fresh one).
@@ -1904,6 +2013,10 @@ impl SubagentSpawner for PoolSubagentSpawner {
         self.listing_entries().await
     }
 
+    async fn agent_offer_candidates(&self) -> Vec<AgentOfferCandidate> {
+        self.listing_candidates().await
+    }
+
     /// claude 2.1.238 `NJa` (@290291941) — the agent types every one of whose
     /// tools is denied by the current permission settings. Computed over the
     /// SAME merged catalog [`Self::listing_entries`] renders, against the boot
@@ -1981,15 +2094,14 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // takes precedence over the definition's model frontmatter. Resolve to a
         // concrete id when a parent/main-loop model is wired; without one the
         // resolved id is left empty (no default to anchor against).
-        // Use the LIVE default (provider else boot snapshot) so the
-        // `tengu_agent_tool_selected` metadata reports the model a top-level spawn
-        // will actually resolve to after a mid-session `/model` switch. (The
-        // per-spawn `parent_model_override` is not available at this pre-spawn
-        // selection seam — a nested selection's telemetry therefore reports the
-        // top-level model, a minor telemetry-only nuance; the SPAWN itself uses the
-        // correct immediate-parent model via `build_subagent_context`.)
+        // Use the current route selection for telemetry. If a configured live
+        // selection source reports that its route is unavailable, keep this
+        // pre-spawn metadata unresolved rather than substituting a boot snapshot.
+        // (The per-spawn `parent_model_override` is not available at this seam, so
+        // nested selection telemetry reports the top-level route; the spawn path
+        // itself uses the immediate-parent route via `build_subagent_context`.)
         let resolved_model = match self.resolved_default_selection() {
-            Some(selection) => {
+            Ok(Some(selection)) => {
                 let parent = selection.model;
                 let pref = match model {
                     Some(m) => AgentModel::Alias(m.to_string()),
@@ -2000,12 +2112,31 @@ impl SubagentSpawner for PoolSubagentSpawner {
                     None => crate::model_resolution::resolve_builtin_explore_model(
                         &def,
                         &parent,
-                        selection.provider_first_party,
+                        selection.model_resolution_context.route.provider
+                            == Some(crate::model_resolution::ModelProviderKind::FirstParty),
                     ),
                 };
-                self.resolve_model_pref(&pref, &parent)
+                match self.resolve_model_pref(&pref, &parent, &selection.model_resolution_context) {
+                    Ok(model) => model,
+                    Err(error) => {
+                        tracing::warn!(
+                            subagent_type,
+                            error = %error,
+                            "agent selection model route is unavailable"
+                        );
+                        String::new()
+                    }
+                }
             }
-            None => String::new(),
+            Ok(None) => String::new(),
+            Err(error) => {
+                tracing::warn!(
+                    subagent_type,
+                    error = %error,
+                    "agent selection model route is unavailable"
+                );
+                String::new()
+            }
         };
         lingxi_core::host::subagent_spawn::SelectedAgentMeta {
             agent_type: def.agent_type.clone(),
@@ -2027,15 +2158,12 @@ impl SubagentSpawner for PoolSubagentSpawner {
     /// G14: register `name → child agent-id` for `SendMessage` routing of a
     /// spawned ASYNC subagent (claude `agentNameRegistry.set`, AgentTool.tsx:706).
     async fn register_name(&self, name: &str, agent_id: AgentId) {
-        self.name_registry
-            .write()
-            .await
-            .insert(name.to_string(), agent_id);
+        self.name_registry.register(name, agent_id).await;
     }
 
     /// G14: resolve a previously-registered async-agent name to its child id.
     async fn resolve_name(&self, name: &str) -> Option<AgentId> {
-        self.name_registry.read().await.get(name).copied()
+        self.name_registry.resolve(name).await
     }
 }
 
@@ -2085,6 +2213,10 @@ impl PoolSubagentSpawner {
         };
         let resolved_model = crate::runner::resolve_model(&ctx);
         let resolved_model_profile = ctx.model_profile.clone();
+        let stop_firer = (ctx.stop_hook_scope
+            == lingxi_core::host::subagent_spawn::SubagentStopScope::Session)
+            .then(|| ctx.subagent_stop_firer.clone())
+            .flatten();
         let initial_message_index = observer_initial_message_index(ctx.resumed_history.as_deref());
         // Publish persistent allocations through the same synchronous receipt
         // used by one-shot spawns.  The async observer wrapper below remains
@@ -2184,7 +2316,11 @@ impl PoolSubagentSpawner {
         // From here the task handler owns stop/deallocation, including any
         // terminal events produced immediately when this gate opens.
         dealloc_guard.armed = false;
-        let _ = start.send(());
+        if start.send(()).is_ok() {
+            for observer in &observers {
+                observer.on_started(&allocation_event);
+            }
+        }
         // Persistent agents are pumped by the task layer rather than this
         // spawner, so wrap their channel to preserve the same global observer
         // contract as one-shot agents. The forwarded receiver retains the
@@ -2194,7 +2330,7 @@ impl PoolSubagentSpawner {
         let query_source_label = request.query_source_label.clone();
         let should_record_usage = usage_recorder.is_some()
             && query_source_label.as_deref() != Some(FUSION_PANEL_QUERY_SOURCE);
-        if observers.is_empty() && !should_record_usage {
+        if observers.is_empty() && !should_record_usage && stop_firer.is_none() {
             return Ok((agent_id, rx));
         }
         let observer_events =
@@ -2213,17 +2349,75 @@ impl PoolSubagentSpawner {
             let mut recorded_cumulative = SubagentUsage::default();
             let mut recorded_duration_ms = 0_u64;
             while let Some(event) = rx.recv().await {
+                if let Some(firer) = stop_firer.as_ref() {
+                    let status = match &event {
+                        SubagentEvent::Completed { .. } => {
+                            Some(lingxi_core::host::subagent_spawn::SubagentStopStatus::Completed)
+                        }
+                        SubagentEvent::Failed { .. } => {
+                            Some(lingxi_core::host::subagent_spawn::SubagentStopStatus::Failed)
+                        }
+                        _ => None,
+                    };
+                    if let Some(status) = status {
+                        firer
+                            .fire(forward_agent_id, &resolved_agent_type, status)
+                            .await;
+                    }
+                }
                 match &event {
-                    SubagentEvent::Message { message, .. } => {
+                    SubagentEvent::Message {
+                        message,
+                        message_index,
+                        ..
+                    } => {
                         if let Ok(conversation) =
                             serde_json::from_value::<ConversationMessage>(message.clone())
                         {
                             if let Some(observer_events) = observer_events.as_ref() {
-                                observer_events.try_emit(SubagentObservation::Message {
-                                    agent_id: forward_agent_id,
-                                    message: conversation,
-                                });
+                                if let Some(message_index) = message_index {
+                                    observer_events.try_emit(SubagentObservation::MessageRow {
+                                        agent_id: forward_agent_id,
+                                        message: conversation,
+                                        message_index: *message_index,
+                                    });
+                                } else {
+                                    observer_events.try_emit(SubagentObservation::Message {
+                                        agent_id: forward_agent_id,
+                                        message: conversation,
+                                    });
+                                }
                             }
+                        }
+                    }
+                    SubagentEvent::ServerFallbackTombstone {
+                        agent_id,
+                        message,
+                        display_only,
+                    } => {
+                        if let Some(observer_events) = observer_events.as_ref() {
+                            observer_events.try_emit(
+                                SubagentObservation::ServerFallbackTombstone {
+                                    agent_id: *agent_id,
+                                    message: message.clone(),
+                                    display_only: *display_only,
+                                },
+                            );
+                        }
+                    }
+                    SubagentEvent::ServerFallbackApiErrorRow {
+                        agent_id,
+                        row,
+                        message_index,
+                    } => {
+                        if let Some(observer_events) = observer_events.as_ref() {
+                            observer_events.try_emit(
+                                SubagentObservation::ServerFallbackApiErrorRow {
+                                    agent_id: *agent_id,
+                                    row: row.clone(),
+                                    message_index: *message_index,
+                                },
+                            );
                         }
                     }
                     SubagentEvent::Completed {
@@ -2319,6 +2513,9 @@ impl PoolSubagentSpawner {
                             });
                         }
                     }
+                    // Forward to the task-layer consumer, but never expose
+                    // this host-only snapshot as an observer/SDK event.
+                    SubagentEvent::TranscriptSnapshot { .. } => {}
                 }
                 if forwarding && tx.send(event).await.is_err() {
                     // The task-side consumer disappeared, but this wrapper is

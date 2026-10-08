@@ -27,6 +27,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+// This key is an upstream passthrough setting read with `=== true`, rather
+// than a schema-validated boolean. Preserve the presence of null/nonboolean
+// values as explicit false so they override a lower tier without rejecting it.
+fn deserialize_code_review_suggestion<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(|value| Some(value == Value::Bool(true)))
+}
+
 /// Per-field merge strategy.
 ///
 /// The merger ([`crate::settings::merger`]) consults [`strategy_for`] to pick
@@ -140,6 +150,38 @@ pub enum TeammateMode {
     ITerm2,
 }
 
+/// Prompt-cache lifetime accepted by Claude Code 2.1.290 settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum PromptCacheTtl {
+    /// Keep the cache for five minutes.
+    #[serde(rename = "5m")]
+    FiveMinutes,
+    /// Keep the cache for one hour.
+    #[serde(rename = "1h")]
+    OneHour,
+}
+
+/// Main and non-main cache TTL settings separated from the full settings tree
+/// for request-time LLM policy sampling.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PromptCacheTtlSettings {
+    /// `promptCacheTtl` applied to main-query sources.
+    pub main: Option<PromptCacheTtl>,
+    /// `subagentPromptCacheTtl` applied to every non-main query source.
+    pub subagent: Option<PromptCacheTtl>,
+}
+
+fn deserialize_prompt_cache_ttl<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<PromptCacheTtl>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value.as_str() {
+        Some("5m") => Some(PromptCacheTtl::FiveMinutes),
+        Some("1h") => Some(PromptCacheTtl::OneHour),
+        _ => None,
+    })
+}
+
 /// Mirror of claude-code's `settings.json` shape.
 ///
 /// All fields `Option<T>` so a partial file (one layer of the 4-layer stack)
@@ -161,16 +203,57 @@ pub enum TeammateMode {
 /// trailer at its default. An empty string DISABLES that trailer, which is why
 /// these are `Option<String>` rather than `String` — "unset" and "set to empty"
 /// must stay distinguishable.
+fn deserialize_effort<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+    levels: &[&str],
+) -> Result<Option<String>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_str()
+        .filter(|level| levels.contains(level))
+        .map(str::to_string))
+}
+
+fn deserialize_persisted_effort<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    deserialize_effort(deserializer, &["low", "medium", "high", "xhigh"])
+}
+
+fn deserialize_max_effort<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    deserialize_effort(deserializer, &crate::host::effort::LEVELS)
+}
+
+fn deserialize_model_settings<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<indexmap::IndexMap<String, ModelSettings>>, D::Error> {
+    let mut value = serde_json::Value::deserialize(deserializer)?;
+    if let Some(entries) = value.as_object_mut() {
+        entries.retain(|key, _| !crate::host::effort_table::object_prototype_key(key));
+    }
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
+}
+
 /// Per-model effort overrides (`modelSettings.<model>`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSettings {
     /// Persisted effort for this model.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_persisted_effort"
+    )]
     pub effort_level: Option<String>,
     /// Cap for this model; replaces the top-level `maxEffortLevel`. `"max"`
     /// exempts the model from the top-level cap.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_max_effort"
+    )]
     pub max_effort_level: Option<String>,
 }
 
@@ -209,12 +292,33 @@ impl ProviderRegion {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsJson {
+    /// Native Fast mode default and session-only opt-in policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_mode: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_mode_per_session_opt_in: Option<bool>,
     /// Region used to list and resolve model connections. Absence means international.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_region: Option<ProviderRegion>,
     /// Terminal backend used for experimental agent-team members.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub teammate_mode: Option<TeammateMode>,
+
+    /// Main-query cache lifetime (`promptCacheTtl`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_prompt_cache_ttl"
+    )]
+    pub prompt_cache_ttl: Option<PromptCacheTtl>,
+
+    /// Subagent and background-query cache lifetime (`subagentPromptCacheTtl`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_prompt_cache_ttl"
+    )]
+    pub subagent_prompt_cache_ttl: Option<PromptCacheTtl>,
 
     /// Forward-compat: claude-code @ 6a25909 does NOT emit this; we keep it
     /// typed so a `$schema` reference injected by IDE tooling round-trips
@@ -436,6 +540,15 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_git_instructions: Option<bool>,
 
+    /// Include `/code-review medium` in the Bash precommit skill suggestion
+    /// when that skill is available. Only an explicit `true` enables it.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_code_review_suggestion",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub include_code_review_suggestion: Option<bool>,
+
     /// Scalar field (later source wins). When enabled, a Bash command that
     /// changes files reports a diff of them in its tool result (CLI-5).
     ///
@@ -464,21 +577,34 @@ pub struct SettingsJson {
 
     /// Persisted `/effort` default (`effortLevel`). `max` is session-only and
     /// is not written here.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_persisted_effort"
+    )]
     pub effort_level: Option<String>,
 
     /// Client-side effort cap (`maxEffortLevel`). `/effort`, `--effort`,
     /// `LINGXI_EFFORT_LEVEL`, and model defaults above this value are clamped
     /// to it. `"max"` does not cap. Across settings files the **lowest**
     /// applicable value wins — do not rely on the merged scalar for that fold.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_max_effort"
+    )]
     pub max_effort_level: Option<String>,
 
     /// Per-model `effortLevel` / `maxEffortLevel`. A matching model's
     /// `maxEffortLevel` replaces the top-level cap for that model (`"max"`
     /// exempts it).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_settings: Option<BTreeMap<String, ModelSettings>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_model_settings"
+    )]
+    #[schemars(with = "Option<BTreeMap<String, ModelSettings>>")]
+    pub model_settings: Option<indexmap::IndexMap<String, ModelSettings>>,
 
     /// Scalar field (later source wins). Session-scoped gate for dynamic
     /// workflows. Absence resolves to enabled at the composition root, matching
@@ -1453,6 +1579,16 @@ impl FusionSettingsJson {
 }
 
 impl SettingsJson {
+    /// Return the two current Native prompt-cache settings as a compact
+    /// request-time policy input.
+    #[must_use]
+    pub fn prompt_cache_ttl_settings(&self) -> PromptCacheTtlSettings {
+        PromptCacheTtlSettings {
+            main: self.prompt_cache_ttl,
+            subagent: self.subagent_prompt_cache_ttl,
+        }
+    }
+
     /// Run cross-field semantic checks beyond what serde's typed
     /// deserialization catches (unknown keys are tolerated, not validated).
     ///
@@ -1910,6 +2046,27 @@ mod tests {
             parsed.trusted_directories.as_deref(),
             Some(&["/foo".to_string()][..])
         );
+    }
+
+    #[test]
+    fn code_review_suggestion_tolerates_passthrough_values_and_keeps_presence() {
+        for value in ["true", "false", "null", "1", "\"false\"", "{}", "[]"] {
+            let parsed: SettingsJson = serde_json::from_str(&format!(
+                "{{\"includeCodeReviewSuggestion\":{value},\"requiredMinimumVersion\":\"999.0.0\"}}"
+            ))
+            .unwrap();
+            assert_eq!(parsed.include_code_review_suggestion, Some(value == "true"));
+            assert_eq!(parsed.required_minimum_version.as_deref(), Some("999.0.0"));
+            let previous = SettingsJson {
+                include_code_review_suggestion: Some(true),
+                ..Default::default()
+            };
+            assert_eq!(
+                crate::settings::merger::merge(previous, parsed).include_code_review_suggestion,
+                Some(value == "true")
+            );
+        }
+        assert_eq!(SettingsJson::default().include_code_review_suggestion, None);
     }
 
     #[test]
@@ -2479,6 +2636,32 @@ mod tests {
             strategy_for("askUserQuestionTimeout").is_none(),
             "askUserQuestionTimeout must be scalar-override (later source wins)"
         );
+    }
+
+    #[test]
+    fn prompt_cache_ttl_settings_use_current_enum_values_and_scalar_override() {
+        let parsed: SettingsJson = serde_json::from_str(
+            r#"{"promptCacheTtl":"1h","subagentPromptCacheTtl":"5m"}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.prompt_cache_ttl, Some(PromptCacheTtl::OneHour));
+        assert_eq!(
+            parsed.subagent_prompt_cache_ttl,
+            Some(PromptCacheTtl::FiveMinutes)
+        );
+        let serialized = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(serialized["promptCacheTtl"], "1h");
+        assert_eq!(serialized["subagentPromptCacheTtl"], "5m");
+
+        let invalid: SettingsJson = serde_json::from_value(serde_json::json!({
+            "promptCacheTtl": "never",
+            "subagentPromptCacheTtl": true
+        }))
+        .unwrap();
+        assert_eq!(invalid.prompt_cache_ttl, None);
+        assert_eq!(invalid.subagent_prompt_cache_ttl, None);
+        assert!(strategy_for("promptCacheTtl").is_none());
+        assert!(strategy_for("subagentPromptCacheTtl").is_none());
     }
 
     #[test]

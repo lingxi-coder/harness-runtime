@@ -29,6 +29,8 @@ pub struct SubagentContext {
     pub task_registry: Option<Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>>,
     /// Parent agent id, when this agent was dispatched by another agent.
     pub parent_agent_id: Option<AgentId>,
+    /// Host-trusted caller/origin snapshot inherited by nested Agent launches.
+    pub agent_spawn_provenance: lingxi_core::host::subagent_spawn::AgentSpawnProvenance,
     /// DISPLAY NAME of this agent when it is an in-process teammate in a swarm
     /// (claude-code `TeammateContext.agentName`, surfaced via `getAgentName()`).
     /// For a teammate this is its human name (e.g. `"researcher"`), NOT the
@@ -137,6 +139,12 @@ pub struct SubagentContext {
     /// Per-spawn guest workspace reminder, kept separate from the stable mobile
     /// runtime prefix because explicit cwd/worktree isolation can vary.
     pub mobile_runtime_workspace_reminder: Option<Arc<str>>,
+    /// Resolved user context and per-agent lazy instruction cursor.
+    pub instruction_context: lingxi_core::host::instructions::InstructionContext,
+    /// Explicit fork userContext overrides bypass omitInstructions selection.
+    pub instruction_context_is_override: bool,
+    pub instruction_provider:
+        Option<Arc<dyn lingxi_core::host::instructions::InstructionContextProvider>>,
     /// Shared content-replacement state (e.g. file mention expansion). Wrapped
     /// in a `Mutex` so the tool layer can mutate it across awaits.
     pub content_replacement_state: Option<Arc<Mutex<ContentReplacementState>>>,
@@ -148,12 +156,17 @@ pub struct SubagentContext {
     /// a specific provider (the dual-LLM candidate's resolved profile). Threaded
     /// from [`lingxi_core::host::subagent_spawn::SubagentSpawnRequest::model_profile`] by the
     /// spawner; the runner passes it as the `profile` arg of the api client's
-    /// `messages_create_*_in` methods. `None` ⇒ default/unscoped provider
-    /// resolution (the legacy single-provider behavior).
+    /// typed streaming request. `None` selects the host's current default
+    /// provider route.
     pub model_profile: Option<String>,
-    /// Model API seam used by the multi-turn [`crate::runner::run_subagent`]
-    /// loop. `None` keeps the legacy stub behavior (no real API calls) for
-    /// back-compat with callers that haven't wired an API client yet.
+    /// Live configured routes used to resolve model changes returned by child
+    /// tools against this agent's current model and provider profile.
+    pub model_resolution_context_provider:
+        Option<Arc<dyn crate::model_resolution::ModelResolutionContextProvider>>,
+    /// Managed model restriction snapshot used to validate a provider-admitted
+    /// server fallback before the child accepts its response. This carries no
+    /// provider catalog; `None` means the host supplied no restriction.
+    pub server_fallback_model_enforcement: Option<llm_runtime::model::allowlist::ModelEnforcement>,
     /// The refusal-fallback CHAIN this run may walk when the model refuses.
     ///
     /// claude-code runs subagents through the same query generator as the main
@@ -161,6 +174,8 @@ pub struct SubagentContext {
     /// the chain is handed down explicitly. Empty (the default) means a refusal
     /// ends the run, which is what this port did for every subagent before.
     pub refusal_fallback_chain: Vec<String>,
+    /// Model API for the multi-turn runner. `None` is an unconfigured host
+    /// and fails before instruction discovery or startup writes.
     pub api_client: Option<Arc<dyn crate::api::SubagentApiClient>>,
     /// Tool dispatch seam inherited from the parent via
     /// [`lingxi_core::host::subagent_spawn::SubagentInheritance`]. `None` means the agent
@@ -226,6 +241,12 @@ pub struct SubagentContext {
     /// runner skips SubagentStart firing + frontmatter-hook registration, keeping
     /// the child's history byte-identical to legacy.
     pub hook_executor: Option<Arc<hooks::HookExecutorImpl>>,
+    /// Whether this producer has a consumer for session/plugin terminal hooks.
+    pub stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope,
+    /// Session epoch captured at admission. Snapshot publication cannot bind a
+    /// retained child to a later restored run or session generation.
+    pub subagent_stop_firer:
+        Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>>,
     /// Managed `strictPluginOnlyCustomization:["hooks"]` decision captured by
     /// the composition root. When true, user/project definitions may not
     /// register command-capable frontmatter hooks.
@@ -250,7 +271,7 @@ pub struct SubagentContext {
     /// [`lingxi_core::host::tool_invoker::SubagentInvocationContext::depth`] →
     /// `ToolUseContext.depth`, and the spawner passes it to
     /// [`crate::tool_resolver::AgentToolResolver`] to gate the `Agent` tool at
-    /// `depth < CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` (default 1).
+    /// `depth < LINGXI_MAX_SUBAGENT_SPAWN_DEPTH` (default 1).
     pub depth: u32,
     /// Observer declaration whose companion watches this agent and, when
     /// enabled, propagates to recursive children.
@@ -294,4 +315,22 @@ pub struct SubagentContext {
     /// [`lingxi_core::host::subagent_spawn::SubagentSpawnRequest::model_attempt`]:
     /// `main` grows this struct from the front.
     pub model_attempt: Option<lingxi_core::host::ModelAttemptContext>,
+    /// Private reporting contract and runtime-minted run capability.
+    pub handback: Option<Arc<crate::handback::HandbackRuntime>>,
+    /// One-shot cold-restore publication barrier, independent of tool opt-in.
+    pub handback_restore_start: Option<lingxi_core::host::handback::HandbackRestoreParticipant>,
+}
+
+/// Held outside the runner future so cancellation before its first poll still
+/// releases a published cold-restore slot. Arrival is idempotent.
+pub(crate) struct HandbackRestoreStartupGuard(
+    pub Option<lingxi_core::host::handback::HandbackRestoreParticipant>,
+);
+
+impl Drop for HandbackRestoreStartupGuard {
+    fn drop(&mut self) {
+        if let Some(participant) = &self.0 {
+            participant.release_failed();
+        }
+    }
 }

@@ -10,7 +10,18 @@ use lingxi_core::host::SubagentInheritance;
 use lingxi_core::types::{AgentId, HookId, PluginId, SessionId};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Weak};
 use telemetry::otel::SerializedTraceContext;
+
+/// Host-owned logical route of the agent whose hook is being evaluated.
+/// This metadata is never decoded from the command/HTTP event payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HookModelSelection {
+    /// Provider-local logical model id.
+    pub model: String,
+    /// Configured provider connection paired with the model.
+    pub model_profile: Option<String>,
+}
 
 /// Per-call context handed to hooks alongside the event payload.
 ///
@@ -22,6 +33,18 @@ use telemetry::otel::SerializedTraceContext;
 /// having to populate everything.
 #[derive(Clone, Default)]
 pub struct HookContext {
+    /// Current logical route of the immediate agent, independent of serving
+    /// refusal fallbacks or a separately bound root session.
+    pub model_selection: Option<HookModelSelection>,
+    /// Captured terminal-owner epoch. An old callback or dispatch must not
+    /// consume a newer restored run's snapshot under the same child id.
+    pub subagent_stop_epoch: Option<lingxi_core::types::MessageId>,
+    /// Owning agent's spawn depth; absent for a root/session hook.
+    pub agent_depth: Option<u32>,
+    /// Optional lease for visible side effects produced by this hook dispatch.
+    /// Tool dispatches set it to their executor generation; lifecycle and
+    /// standalone hook calls leave it absent.
+    pub publication_guard: Option<Arc<dyn crate::attachment::HookPublicationGuard>>,
     /// Live history for prompt evaluation; never serialized into command/HTTP input.
     pub prompt_transcript: Option<crate::PromptHookTranscript>,
     /// Session this event belongs to.
@@ -139,6 +162,10 @@ pub struct HookContext {
 /// agent's lifetime — that index is plumbed in Plan 09 alongside the agent
 /// loader.
 pub struct HookRegistry {
+    /// Shared session Mod host, installed when the first plugin Mod loads.
+    mod_host: Option<Arc<crate::mods::ModHost>>,
+    mod_background_context: Option<Weak<dyn crate::mods::ModSessionContext>>,
+    mod_model_policy: Option<Arc<dyn crate::mods::ModSettingsReader>>,
     sources: HashMap<HookSource, Vec<HookDefinition>>,
     plugin: HashMap<PluginId, Vec<HookDefinition>>,
     /// Session-scoped named hooks keyed by session id then logical hook name.
@@ -170,12 +197,74 @@ impl HookRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            mod_host: None,
+            mod_background_context: None,
+            mod_model_policy: None,
             sources: HashMap::new(),
             plugin: HashMap::new(),
             session_named: HashMap::new(),
             frontmatter: HashMap::new(),
             frontmatter_is_agent: HashMap::new(),
         }
+    }
+
+    /// Expose the session's Mod host without keeping the registry lock while
+    /// a handler waits on tool execution or user interaction.
+    pub fn mod_host(&self) -> Option<Arc<crate::mods::ModHost>> {
+        self.mod_host.clone()
+    }
+
+    /// The live session binding to attach to a newly created Mod worker
+    /// before its first `plugin.register` policy check.
+    pub fn mod_background_context(&self) -> Option<Weak<dyn crate::mods::ModSessionContext>> {
+        self.mod_background_context.clone()
+    }
+
+    pub fn mod_model_policy(&self) -> Option<Arc<dyn crate::mods::ModSettingsReader>> {
+        self.mod_model_policy.clone()
+    }
+
+    pub fn attach_mod_model_policy(&mut self, reader: Arc<dyn crate::mods::ModSettingsReader>) {
+        if let Some(host) = &self.mod_host {
+            host.attach_model_policy(reader.clone());
+        }
+        self.mod_model_policy = Some(reader);
+    }
+
+    /// Interim safety gate until managed PreToolUse hooks can run before the
+    /// Mod chain and again after a rewritten call. A matching managed hook must
+    /// never be bypassed by a Mod's short-circuit answer.
+    pub fn has_managed_pre_tool_use_match(&self, event: &HookEvent, ctx: &HookContext) -> bool {
+        self.match_event(event, ctx).into_iter().any(|hook| {
+            hook.source == HookSource::Settings(lingxi_core::types::SettingsScope::Managed)
+        })
+    }
+
+    /// Install the host shared by plugin lifecycle and event dispatch.
+    pub fn set_mod_host(&mut self, host: Arc<crate::mods::ModHost>) {
+        if let Some(context) = &self.mod_background_context {
+            host.attach_background_context(context.clone());
+        }
+        if let Some(policy) = &self.mod_model_policy {
+            host.attach_model_policy(policy.clone());
+        }
+        self.mod_host = Some(host);
+    }
+
+    /// Attach the owning session for callbacks fired after a hook has settled.
+    pub fn attach_mod_background_context(
+        &mut self,
+        context: Weak<dyn crate::mods::ModSessionContext>,
+    ) {
+        if let Some(host) = &self.mod_host {
+            host.attach_background_context(context.clone());
+        }
+        self.mod_background_context = Some(context);
+    }
+
+    /// Stop dispatching through a Mod host when no modules remain active.
+    pub fn clear_mod_host(&mut self) {
+        self.mod_host = None;
     }
 
     /// Register a hook under its declared source.
@@ -1215,9 +1304,10 @@ mod all_hooks_tests {
             HookSource::Settings(lingxi_core::types::SettingsScope::User),
         );
 
-        assert!(r
-            .upsert_session_named_hook(a, "goal-stop".into(), first)
-            .is_none());
+        assert!(
+            r.upsert_session_named_hook(a, "goal-stop".into(), first)
+                .is_none()
+        );
         let previous = r
             .upsert_session_named_hook(a, "goal-stop".into(), replaced)
             .expect("existing hook replaced");

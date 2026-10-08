@@ -1,19 +1,21 @@
 use lingxi_core::host::AuthHandle;
 #[cfg(windows)]
-use platform_windows::process::supervisor as shell_supervisor;
-#[cfg(windows)]
 use platform_windows::WindowsMcpTransport;
+#[cfg(windows)]
+use platform_windows::process::supervisor as shell_supervisor;
 use secret::CredentialManager;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use super::{
-    fusion_attempts, load_effective_settings_for_config, managed_model_policy_source,
-    managed_settings_raw_tiers_sync, DesktopConfig,
+    DesktopConfig, fusion_attempts, load_effective_settings_for_config,
+    managed_model_policy_source, managed_settings_raw_tiers_sync,
 };
 
-/// `billing_mode` is the OWNING profile's `PricingConfig.billing_mode` (the
-/// same bit `provider-config::cost_translate` keys `mark_unpriced` on).
+/// `billing_mode` is the OWNING profile's source-resolved
+/// `PricingConfig.billing_mode` (the same bit `provider-config::cost_translate`
+/// keys `mark_unpriced` on). `None` remains distinct from explicit `Unknown`;
+/// only a source-proven subscription mode changes Fusion's cost class.
 ///
 /// Finding [2]: the checked-in `llm_runtime::fusion_hints` table only carries
 /// a handful of rows per subscription-billed profile (e.g. 8 of
@@ -33,11 +35,11 @@ use super::{
 pub(super) fn desktop_fusion_catalog_row(
     profile: &str,
     model: &llm_runtime::ModelProfile,
-    billing_mode: lingxi_core::host::ModelBillingMode,
+    billing_mode: Option<lingxi_core::host::ModelBillingMode>,
     protocol: &llm_runtime::ProtocolFamily,
 ) -> fusion::CatalogModel {
     let mut hints = llm_runtime::hints_for(profile, &model.request_model).unwrap_or_default();
-    if billing_mode == lingxi_core::host::ModelBillingMode::Subscription {
+    if billing_mode == Some(lingxi_core::host::ModelBillingMode::Subscription) {
         hints.cost_class = lingxi_core::host::FusionCostClass::Subscription;
     }
     fusion::CatalogModel {
@@ -201,8 +203,8 @@ impl fusion::ModelSource for FusionCatalogModelSource {
     }
 }
 
-pub(super) fn live_managed_model_restriction_sync(
-) -> Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)> {
+pub(super) fn live_managed_model_restriction_sync()
+-> Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)> {
     use llm_runtime::model::allowlist::{self, ModelEnforcement};
 
     let source = managed_model_policy_source(&managed_settings_raw_tiers_sync());
@@ -1190,6 +1192,13 @@ pub(super) struct FusionCatalogClearingAuth {
 
 #[async_trait::async_trait]
 impl AuthHandle for FusionCatalogClearingAuth {
+    fn register_account_change_observer(
+        &self,
+        observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+    ) {
+        self.inner.register_account_change_observer(observer);
+    }
+
     async fn login(
         &self,
     ) -> Result<lingxi_core::host::auth::LoginInfo, lingxi_core::host::auth::AuthError> {

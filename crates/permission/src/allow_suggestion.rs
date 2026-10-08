@@ -604,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn permission_persistence_suggestion_handles_legacy_tool_wide_rules() {
+    fn permission_persistence_suggestion_rejects_removed_agent_alias() {
         let suggestions = json!([
             {
                 "type": "addRules",
@@ -616,7 +616,7 @@ mod tests {
         assert_eq!(
             permission_persistence_suggestion("Agent", &suggestions)
                 .map(|suggestion| suggestion.label),
-            Some("Yes, and don't ask again for any Agent command".to_string())
+            None
         );
     }
 
