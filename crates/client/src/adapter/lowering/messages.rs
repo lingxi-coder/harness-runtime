@@ -193,6 +193,19 @@ pub fn lower_transcript_with_tool_results<S: std::hash::BuildHasher>(
     history: &[ConversationMessage],
     tool_results: &std::collections::HashMap<String, serde_json::Value, S>,
 ) -> Vec<MessageDto> {
+    lower_transcript_with_identities(history, tool_results)
+        .into_iter()
+        .map(|(_, message)| message)
+        .collect()
+}
+
+/// Preserve each surviving row's identity through the same transcript lowering
+/// and tool-result restoration used for ordinary session replay.
+#[must_use]
+pub fn lower_transcript_with_identities<S: std::hash::BuildHasher>(
+    history: &[ConversationMessage],
+    tool_results: &std::collections::HashMap<String, serde_json::Value, S>,
+) -> Vec<(lingxi_core::types::MessageId, MessageDto)> {
     let mut transcript = lower_transcript_inner(history);
     // A post-pass rather than a hook inside `lower_content_block_with`: that
     // function is on the LIVE `MessageComplete` path too, and nothing about
@@ -201,7 +214,7 @@ pub fn lower_transcript_with_tool_results<S: std::hash::BuildHasher>(
     if !tool_results.is_empty() {
         for block in transcript
             .iter_mut()
-            .flat_map(|message| &mut message.blocks)
+            .flat_map(|(_, message)| &mut message.blocks)
         {
             if let MessageBlockDto::ToolResult {
                 id, result_json, ..
@@ -216,7 +229,9 @@ pub fn lower_transcript_with_tool_results<S: std::hash::BuildHasher>(
     transcript
 }
 
-fn lower_transcript_inner(history: &[ConversationMessage]) -> Vec<MessageDto> {
+fn lower_transcript_inner(
+    history: &[ConversationMessage],
+) -> Vec<(lingxi_core::types::MessageId, MessageDto)> {
     let mut transcript = Vec::with_capacity(history.len());
     // ONE index for the WHOLE transcript: a `ToolUse` in assistant message N
     // pairs with its `ToolResult` in user message N+1.
@@ -267,7 +282,7 @@ fn lower_transcript_inner(history: &[ConversationMessage]) -> Vec<MessageDto> {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                let Some(MessageDto { blocks, .. }) = transcript.last_mut() else {
+                let Some((_, MessageDto { blocks, .. })) = transcript.last_mut() else {
                     continue;
                 };
                 let Some(MessageBlockDto::CompactBoundary {
@@ -306,16 +321,47 @@ fn lower_transcript_inner(history: &[ConversationMessage]) -> Vec<MessageDto> {
                     })
                     .collect();
                 if !blocks.is_empty() {
-                    transcript.push(MessageDto {
-                        role: "user".to_string(),
-                        blocks,
-                        images: Vec::new(),
-                        loop_wakeup: None,
-                    });
+                    transcript.push((
+                        message.id(),
+                        MessageDto {
+                            role: "user".to_string(),
+                            blocks,
+                            images: Vec::new(),
+                            loop_wakeup: None,
+                        },
+                    ));
                 }
             }
-            _ => transcript.push(lower_conversation_message_with(message, &mut tool_uses)),
+            _ => transcript.push((
+                message.id(),
+                lower_conversation_message_with(message, &mut tool_uses),
+            )),
         }
     }
     transcript
+}
+
+#[cfg(test)]
+mod identity_projection_tests {
+    use super::*;
+    #[test]
+    fn filtered_meta_rows_do_not_shift_retained_transcript_identities() {
+        let first = lingxi_core::types::MessageId::new();
+        let last = lingxi_core::types::MessageId::new();
+        let history = vec![
+            ConversationMessage::user(first, "first".into()),
+            ConversationMessage::user_meta(lingxi_core::types::MessageId::new(), "hidden".into()),
+            ConversationMessage::user(last, "last".into()),
+        ];
+        let tool_results = std::collections::HashMap::new();
+        let rows = lower_transcript_with_identities(&history, &tool_results);
+        assert_eq!(
+            rows.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![first, last]
+        );
+        assert_eq!(
+            rows.into_iter().map(|(_, row)| row).collect::<Vec<_>>(),
+            lower_transcript(&history)
+        );
+    }
 }

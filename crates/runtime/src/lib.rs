@@ -23,6 +23,9 @@ pub use api::{
 pub mod models;
 
 #[cfg(any(feature = "desktop", feature = "mobile"))]
+pub mod session_agent_transcript;
+
+#[cfg(any(feature = "desktop", feature = "mobile"))]
 mod effort_settings;
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 mod fast_settings;

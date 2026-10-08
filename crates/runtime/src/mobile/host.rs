@@ -116,6 +116,7 @@ use client::protocol::commands::{
     PromptModeDto, ProviderCredentialSecretDto,
 };
 use client::protocol::controls::{ConversationControlsDto, ReasoningSelectionDto};
+use crate::session_agent_transcript::{parse_session_agent_message_rows, parse_main_session_agent_message_rows, session_identity_snapshot_for_path, read_session_agent_next_message_index, session_agent_conversation_is_visible};
 use client::protocol::error::ClientError;
 use client::protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto, TurnRecoveryStateDto};
 use client::protocol::listings::{
@@ -1553,106 +1554,6 @@ fn session_agent_transcript_event(
     })
 }
 
-fn parse_session_agent_message_rows(
-    raw: &[u8],
-) -> Result<Vec<client::protocol::listings::SessionAgentMessageRowDto>, String> {
-    parse_session_agent_message_rows_with_identity(raw, |value, message| {
-        Some((
-            value.get("message_index")?.as_u64()?,
-            value
-                .get("uuid")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .unwrap_or_else(|| message.id().as_uuid().to_string()),
-        ))
-    })
-}
-
-fn parse_main_session_agent_message_rows(
-    raw: &[u8],
-    identities: &session::jsonl::SessionMessageIdentitySnapshot,
-) -> Result<Vec<client::protocol::listings::SessionAgentMessageRowDto>, String> {
-    parse_session_agent_message_rows_with_identity(raw, |value, _message| {
-        let message_uuid = value
-            .get("uuid")
-            .and_then(serde_json::Value::as_str)?
-            .to_owned();
-        let message_index = *identities.by_uuid.get(&message_uuid)?;
-        Some((message_index, message_uuid))
-    })
-}
-
-fn session_agent_message_from_projection(
-    row: &lingxi_core::types::utf16_json::Utf16JsonProjection,
-) -> Result<lingxi_core::types::ConversationMessage, String> {
-    use lingxi_core::types::{ContentBlock, ConversationMessage};
-
-    let value = row
-        .value
-        .get("message")
-        .cloned()
-        .ok_or_else(|| "session-agent transcript row omitted its message".to_string())?;
-    let mut message: ConversationMessage = serde_json::from_value(value)
-        .map_err(|error| format!("invalid session-agent message: {error}"))?;
-    let content = match &mut message {
-        ConversationMessage::User { content, .. }
-        | ConversationMessage::Assistant { content, .. } => content,
-        ConversationMessage::System { .. } => return Ok(message),
-    };
-    for (index, block) in content.iter_mut().enumerate() {
-        let pointer = format!("/message/content/{index}/text");
-        let Some(code_units) = row.string_units(&pointer) else {
-            continue;
-        };
-        let ContentBlock::Text { text, citations } = block else {
-            return Err(format!(
-                "session-agent exact text points to a non-text block at {pointer}"
-            ));
-        };
-        if String::from_utf16_lossy(&code_units) != *text {
-            return Err(format!(
-                "session-agent exact text display does not match {pointer}"
-            ));
-        }
-        *block = ContentBlock::TextJsUtf16 {
-            text: text.clone(),
-            utf16_code_units: code_units,
-            citations: citations.clone(),
-        };
-    }
-    Ok(message)
-}
-
-async fn session_identity_snapshot_for_path(
-    writer: &session::jsonl::JsonlWriter,
-    transcript_path: &std::path::Path,
-) -> Result<session::jsonl::SessionMessageIdentitySnapshot, String> {
-    match tokio::fs::symlink_metadata(transcript_path).await {
-        Ok(metadata) if !metadata.file_type().is_file() => {
-            return Err(format!(
-                "transcript is not a regular file: {}",
-                transcript_path.display()
-            ));
-        }
-        Ok(metadata) if metadata.len() > 0 => writer
-            .bootstrap_session_message_identity_snapshot(transcript_path)
-            .await
-            .map_err(|error| error.to_string()),
-        Ok(_) => writer
-            .read_session_message_identity_snapshot(transcript_path)
-            .await
-            .map_err(|error| error.to_string()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => writer
-            .read_session_message_identity_snapshot(transcript_path)
-            .await
-            .map_err(|error| error.to_string()),
-        Err(error) => Err(format!(
-            "could not inspect transcript {}: {error}",
-            transcript_path.display()
-        )),
-    }
-}
-
 #[cfg(test)]
 mod session_identity_import_tests {
     use super::session_identity_snapshot_for_path;
@@ -1741,69 +1642,6 @@ mod session_identity_import_tests {
     }
 }
 
-fn parse_session_agent_message_rows_with_identity(
-    raw: &[u8],
-    mut identity_for: impl FnMut(
-        &serde_json::Value,
-        &lingxi_core::types::ConversationMessage,
-    ) -> Option<(u64, String)>,
-) -> Result<Vec<client::protocol::listings::SessionAgentMessageRowDto>, String> {
-    let mut rows = Vec::new();
-    let mut tool_index = client::adapter::turn::ToolUseIndex::default();
-    for line in raw
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        let line = std::str::from_utf8(line)
-            .map_err(|error| format!("invalid session-agent transcript UTF-8: {error}"))?;
-        let projection = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line)
-            .map_err(|error| format!("invalid session-agent transcript row: {error}"))?;
-        let value = &projection.value;
-        // Source-attachment sidecars retain a duplicate `message` projection
-        // beside their payload; they are not another conversation row.
-        if value.get("type").and_then(serde_json::Value::as_str) == Some("attachment") {
-            continue;
-        }
-        let Some(message_value) = value.get("message") else {
-            continue;
-        };
-        if message_value.is_null() {
-            continue;
-        }
-        let message = session_agent_message_from_projection(&projection)?;
-        if matches!(
-            &message,
-            lingxi_core::types::ConversationMessage::System {
-                subtype: Some(subtype),
-                ..
-            } if subtype.starts_with("agent_")
-        ) || !session_agent_conversation_is_visible(&message)
-        {
-            continue;
-        }
-        let (message_index, message_uuid) = identity_for(value, &message).ok_or_else(|| {
-            "session-agent message row lacks its stable identity index".to_string()
-        })?;
-        let message =
-            client::adapter::lowering::lower_conversation_message_with(&message, &mut tool_index);
-        rows.push(client::protocol::listings::SessionAgentMessageRowDto {
-            message_index,
-            message_uuid,
-            message,
-            api_error_json: value
-                .get("server_fallback_api_error_json")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .or_else(|| {
-                    (value.get("isApiErrorMessage") == Some(&serde_json::Value::Bool(true)))
-                        .then(|| serde_json::to_string(value).ok())
-                        .flatten()
-                }),
-        });
-    }
-    Ok(rows)
-}
-
 #[cfg(test)]
 mod session_agent_exact_utf16_tests {
     use super::*;
@@ -1844,42 +1682,6 @@ mod session_agent_exact_utf16_tests {
         );
         assert_eq!(session_agent_transcript_revision(raw.as_bytes()), 1);
     }
-}
-
-async fn read_session_agent_next_message_index(
-    fs: &dyn lingxi_core::host::FileSystem,
-    path: &std::path::Path,
-) -> Result<u64, ClientError> {
-    let root = path.parent().ok_or_else(|| ClientError::Rejected {
-        message: "session-agent transcript has no parent directory".into(),
-    })?;
-    let filename = path.file_name().ok_or_else(|| ClientError::Rejected {
-        message: "session-agent transcript has no filename".into(),
-    })?;
-    let mut metadata_path = filename.to_os_string();
-    metadata_path.push(".meta");
-    let metadata_path = std::path::PathBuf::from(metadata_path);
-    let file = fs
-        .read_file_rooted_no_follow_window(root, &metadata_path, None, None)
-        .await
-        .map_err(|error| ClientError::Rejected {
-            message: format!("read session-agent message index failed: {error}"),
-        })?;
-    if file.truncated {
-        return Err(ClientError::Rejected {
-            message: "session-agent message index is truncated".into(),
-        });
-    }
-    let metadata: serde_json::Value =
-        serde_json::from_str(&file.content).map_err(|error| ClientError::Rejected {
-            message: format!("parse session-agent message index failed: {error}"),
-        })?;
-    metadata
-        .get("next_message_index")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| ClientError::Rejected {
-            message: "session-agent index metadata omitted next_message_index".into(),
-        })
 }
 
 fn session_agent_id_from_path(path: &std::path::Path) -> Option<String> {
@@ -1936,23 +1738,6 @@ async fn find_session_agent_transcript_path(
 /// compact-summary, and transcript-only user records must not become
 /// standalone MessageDto rows. Agent indexes count only rows that the full
 /// transcript and live stream can both expose.
-fn session_agent_conversation_is_visible(
-    message: &lingxi_core::types::ConversationMessage,
-) -> bool {
-    !matches!(
-        message,
-        lingxi_core::types::ConversationMessage::User { is_meta: true, .. }
-            | lingxi_core::types::ConversationMessage::User {
-                is_compact_summary: true,
-                ..
-            }
-            | lingxi_core::types::ConversationMessage::User {
-                is_visible_in_transcript_only: true,
-                ..
-            }
-    )
-}
-
 /// Lower a complete JSONL prefix into the same snapshot DTOs used by the
 /// explicit transcript-load command. This is intentionally prefix-scoped: a
 /// compact-summary mutation can trigger a replacement snapshot before later
@@ -7943,7 +7728,7 @@ impl MobileEngineHandle {
     > {
         let (messages, revision, next_message_index) = if agent_id == "main" {
             let uuid = session_id.as_uuid();
-            let _replayed = orchestrator::replay_session_state(
+            let replayed = orchestrator::replay_session_state(
                 &self.lingxi_home,
                 &self.session_cwd,
                 uuid,
@@ -7981,7 +7766,7 @@ impl MobileEngineHandle {
                     .map_err(|error| ClientError::Rejected {
                         message: format!("load main transcript identity import failed: {error}"),
                     })?;
-            let rows = parse_main_session_agent_message_rows(&raw, &identity_snapshot).map_err(
+            let rows = parse_main_session_agent_message_rows(&replayed, &identity_snapshot).map_err(
                 |message| ClientError::Rejected {
                     message: format!("load main transcript rows failed: {message}"),
                 },
