@@ -12,7 +12,11 @@ mod keymap;
 mod tcc;
 
 use async_trait::async_trait;
-use enigo::{Axis, Button, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
+use enigo::{Axis, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
+use lingxi_core::host::computer_control::{
+    AppInfo, ComputerBackendCapabilities, ComputerControl, ComputerError, ComputerFrameGeometry,
+    DisplayInfo, Screenshot,
+};
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
 use objc2_foundation::NSString;
 
@@ -60,6 +64,38 @@ fn monitor_error(e: &xcap::XCapError) -> ComputerError {
     ComputerError::Other(format!("display error: {e}"))
 }
 
+fn monitor_geometry(monitor: &xcap::Monitor) -> Result<ComputerFrameGeometry, ComputerError> {
+    let display_id = monitor.id().map_err(|e| monitor_error(&e))?;
+    let scale = f64::from(monitor.scale_factor().map_err(|e| monitor_error(&e))?);
+    let origin_x = f64::from(monitor.x().map_err(|e| monitor_error(&e))?);
+    let origin_y = f64::from(monitor.y().map_err(|e| monitor_error(&e))?);
+    // xcap's macOS monitor bounds are global OS points, while this host
+    // contract exposes capture pixels for both display listings and frames.
+    let pixel_width =
+        (f64::from(monitor.width().map_err(|e| monitor_error(&e))?) * scale).round() as u32;
+    let pixel_height =
+        (f64::from(monitor.height().map_err(|e| monitor_error(&e))?) * scale).round() as u32;
+    Ok(ComputerFrameGeometry {
+        display_id,
+        pixel_width,
+        pixel_height,
+        origin_x,
+        origin_y,
+        scale,
+        version: format!(
+            "macos-v1:{display_id}:{pixel_width}:{pixel_height}:{origin_x}:{origin_y}:{scale}"
+        ),
+    })
+}
+
+/// Real macOS automation backend.
+///
+/// Native input handles live on one dedicated worker thread. This preserves
+/// modifier flags and pressed inputs across asynchronous calls while keeping
+/// the non-Send Enigo handle on its owning thread.
+type InputJob = Box<dyn FnOnce(&mut Option<Enigo>) + Send>;
+
+/// Real macOS computer input and capture backend.
 pub struct MacosComputerControl {
     selected_display: std::sync::Mutex<Option<u32>>,
     input_worker: std::sync::mpsc::Sender<InputJob>,
@@ -109,6 +145,25 @@ impl MacosComputerControl {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    /// The pinned display's origin `(x, y)` in the global desktop coordinate
+    /// space enigo's `Coordinate::Abs` operates in, or `(0, 0)` for
+    /// automatic/primary selection — macOS defines the primary display's
+    /// origin as `(0, 0)`, so "no translation" is already exactly correct
+    /// there. Every pixel-coordinate action below adds this offset before
+    /// handing coordinates to enigo, and [`Self::cursor_position`] subtracts
+    /// it back out, so a caller's coordinates always stay relative to
+    /// whichever display `screenshot`/`zoom` are currently capturing —
+    /// without this a click computed from a secondary display's screenshot
+    /// would land on the primary display instead.
+    fn geometry(&self) -> Result<ComputerFrameGeometry, ComputerError> {
+        let monitor = target_monitor(self.pinned_display())?;
+        monitor_geometry(&monitor)
+    }
+    fn target_point(&self, x: u32, y: u32) -> Result<(i32, i32), ComputerError> {
+        let geometry = self.geometry()?;
+        pixel_to_global(&geometry, x, y)
+    }
     fn with_enigo<T: Send + 'static>(
         &self,
         f: impl FnOnce(&mut Enigo) -> enigo::InputResult<T> + Send + 'static,
@@ -144,25 +199,6 @@ impl MacosComputerControl {
     fn press_chord(enigo: &mut Enigo, chord: &keymap::Chord) -> enigo::InputResult<()> {
         let held = enigo.held().0;
         Self::press_chord_with(&held, chord, |key, direction| enigo.key(key, direction))
-    }
-
-    /// The pinned display's origin `(x, y)` in the global desktop coordinate
-    /// space enigo's `Coordinate::Abs` operates in, or `(0, 0)` for
-    /// automatic/primary selection — macOS defines the primary display's
-    /// origin as `(0, 0)`, so "no translation" is already exactly correct
-    /// there. Every pixel-coordinate action below adds this offset before
-    /// handing coordinates to enigo, and [`Self::cursor_position`] subtracts
-    /// it back out, so a caller's coordinates always stay relative to
-    /// whichever display `screenshot`/`zoom` are currently capturing —
-    /// without this a click computed from a secondary display's screenshot
-    /// would land on the primary display instead.
-    fn geometry(&self) -> Result<ComputerFrameGeometry, ComputerError> {
-        let monitor = target_monitor(self.pinned_display())?;
-        monitor_geometry(&monitor)
-    }
-    fn target_point(&self, x: u32, y: u32) -> Result<(i32, i32), ComputerError> {
-        let geometry = self.geometry()?;
-        pixel_to_global(&geometry, x, y)
     }
 
     fn press_chord_with(
@@ -213,6 +249,132 @@ fn app_info_from(app: &NSRunningApplication) -> Option<AppInfo> {
 
 #[async_trait]
 impl ComputerControl for MacosComputerControl {
+    fn desktop_lock_scope(&self) -> Option<std::path::PathBuf> {
+        // Effective UID identifies the current user's macOS desktop. The
+        // literal OS temporary root deliberately ignores HOME, TMPDIR and
+        // the application's configurable data directory.
+        unsafe extern "C" {
+            fn geteuid() -> u32;
+        }
+        let uid = unsafe { geteuid() };
+        Some(std::path::PathBuf::from(format!(
+            "/private/tmp/lingxi-computer-desktop-{uid}"
+        )))
+    }
+    fn capabilities(&self) -> ComputerBackendCapabilities {
+        ComputerBackendCapabilities {
+            held_keys: true,
+            pixel_scroll: true,
+            side_buttons: true,
+            frame_geometry: true,
+        }
+    }
+    async fn frame_geometry(&self) -> Result<Option<ComputerFrameGeometry>, ComputerError> {
+        self.geometry().map(Some)
+    }
+    async fn validate_keys(&self, keys: &[String]) -> Result<(), ComputerError> {
+        for key in keys {
+            if keymap::parse_key_name(key).is_none() {
+                return Err(ComputerError::Other(format!(
+                    "unrecognized key name: {key}"
+                )));
+            }
+        }
+        Ok(())
+    }
+    async fn key_down(&self, key: String) -> Result<(), ComputerError> {
+        let key = keymap::parse_key_name(&key)
+            .ok_or_else(|| ComputerError::Other(format!("unrecognized key name: {key}")))?;
+        self.with_enigo(move |e| e.key(key, Direction::Press))
+    }
+    async fn key_up(&self, key: String) -> Result<(), ComputerError> {
+        let key = keymap::parse_key_name(&key)
+            .ok_or_else(|| ComputerError::Other(format!("unrecognized key name: {key}")))?;
+        self.with_enigo(move |e| e.key(key, Direction::Release))
+    }
+    async fn key_chord(&self, keys: Vec<String>) -> Result<(), ComputerError> {
+        let parsed = keys
+            .iter()
+            .map(|key| {
+                keymap::parse_key_name(key)
+                    .ok_or_else(|| ComputerError::Other(format!("unrecognized key name: {key}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let Some((main, modifiers)) = parsed.split_last() else {
+            return Err(ComputerError::Other("empty key chord".into()));
+        };
+        let chord = keymap::Chord {
+            main: *main,
+            modifiers: modifiers.to_vec(),
+        };
+        self.with_enigo(move |e| Self::press_chord(e, &chord))
+    }
+    async fn release_held_keys(&self) -> Result<(), ComputerError> {
+        self.with_enigo(|enigo| {
+            let (keys, raw_keys) = enigo.held();
+            let mut result = Ok(());
+            for key in keys {
+                if let Err(error) = enigo.key(key, Direction::Release) {
+                    result = Err(error);
+                }
+            }
+            for key in raw_keys {
+                if let Err(error) = enigo.raw(key, Direction::Release) {
+                    result = Err(error);
+                }
+            }
+            result
+        })
+    }
+    async fn mouse_click(&self, x: u32, y: u32, button: &str) -> Result<(), ComputerError> {
+        let button = mouse_button_id(button)?;
+        let (x, y) = self.target_point(x, y)?;
+        let owned = self.owned_mouse.clone();
+        self.with_enigo(move |e| {
+            move_mouse_and_settle(e, x, y)?;
+            click_button_with(&owned, button, 1, |direction, click_count| {
+                send_button_with_count(e, button, direction, click_count)
+            })
+        })
+    }
+    async fn click_current(&self, button: &str, count: u32) -> Result<(), ComputerError> {
+        let button = mouse_button_id(button)?;
+        if count == 0 || count > 3 || (button >= 3 && count != 1) {
+            return Err(ComputerError::Unsupported("mouse click count".into()));
+        }
+        let owned = self.owned_mouse.clone();
+        self.with_enigo(move |e| {
+            click_button_with(&owned, button, count, |direction, click_count| {
+                send_button_with_count(e, button, direction, click_count)
+            })
+        })
+    }
+    async fn release_held_buttons(&self) -> Result<(), ComputerError> {
+        let owned = self.owned_mouse.clone();
+        self.with_enigo(move |e| {
+            release_buttons_with(&owned, |button| send_button(e, button, Direction::Release))
+        })
+    }
+    async fn scroll_current(&self, dx: i32, dy: i32, pixels: bool) -> Result<(), ComputerError> {
+        if pixels {
+            return post_pixel_scroll(dx, dy);
+        }
+        self.with_enigo(move |e| {
+            if dy != 0 {
+                e.scroll(dy, Axis::Vertical)?;
+            }
+            if dx != 0 {
+                e.scroll(dx, Axis::Horizontal)?;
+            }
+            Ok(())
+        })
+    }
+    async fn scroll_pixels(&self, x: u32, y: u32, dx: i32, dy: i32) -> Result<(), ComputerError> {
+        let (x, y) = self.target_point(x, y)?;
+        self.with_enigo(move |e| move_mouse_and_settle(e, x, y))?;
+        post_pixel_scroll(dx, dy)
+    }
+
     async fn screenshot(&self) -> Result<Screenshot, ComputerError> {
         let monitor = target_monitor(self.pinned_display())?;
         let img = monitor.capture_image().map_err(|e| monitor_error(&e))?;
@@ -232,7 +394,7 @@ impl ComputerControl for MacosComputerControl {
 
     async fn mouse_move(&self, x: u32, y: u32) -> Result<(), ComputerError> {
         let (gx, gy) = self.target_point(x, y)?;
-        self.with_enigo(move |e| e.move_mouse(gx, gy, Coordinate::Abs))
+        self.with_enigo(move |e| move_mouse_and_settle(e, gx, gy))
     }
 
     async fn left_click(&self, x: u32, y: u32) -> Result<(), ComputerError> {
@@ -245,8 +407,10 @@ impl ComputerControl for MacosComputerControl {
         let (x, y) = self.target_point(x, y)?;
         let owned = self.owned_mouse.clone();
         self.with_enigo(move |e| {
-            e.move_mouse(x, y, Coordinate::Abs)?;
-            click_button_with(&owned, 0, 2, |direction| send_button(e, 0, direction))
+            move_mouse_and_settle(e, x, y)?;
+            click_button_with(&owned, 0, 2, |direction, click_count| {
+                send_button_with_count(e, 0, direction, click_count)
+            })
         })
     }
     async fn type_text(&self, text: String) -> Result<(), ComputerError> {
@@ -273,7 +437,7 @@ impl ComputerControl for MacosComputerControl {
     async fn scroll(&self, x: u32, y: u32, dx: i32, dy: i32) -> Result<(), ComputerError> {
         let (gx, gy) = self.target_point(x, y)?;
         self.with_enigo(move |e| {
-            e.move_mouse(gx, gy, Coordinate::Abs)?;
+            move_mouse_and_settle(e, gx, gy)?;
             if dy != 0 {
                 e.scroll(dy, Axis::Vertical)?;
             }
@@ -291,8 +455,10 @@ impl ComputerControl for MacosComputerControl {
         let (x, y) = self.target_point(x, y)?;
         let owned = self.owned_mouse.clone();
         self.with_enigo(move |e| {
-            e.move_mouse(x, y, Coordinate::Abs)?;
-            click_button_with(&owned, 0, 3, |direction| send_button(e, 0, direction))
+            move_mouse_and_settle(e, x, y)?;
+            click_button_with(&owned, 0, 3, |direction, click_count| {
+                send_button_with_count(e, 0, direction, click_count)
+            })
         })
     }
 
@@ -302,12 +468,12 @@ impl ComputerControl for MacosComputerControl {
         let owned = self.owned_mouse.clone();
         self.with_enigo(move |e| {
             if let Some((x, y)) = from {
-                e.move_mouse(x, y, Coordinate::Abs)?;
+                move_mouse_and_settle(e, x, y)?;
             }
-            e.button(Button::Left, Direction::Press)?;
+            send_button(e, 0, Direction::Press)?;
             owned.fetch_or(1, std::sync::atomic::Ordering::AcqRel);
-            let moved = e.move_mouse(tx, ty, Coordinate::Abs);
-            let release = e.button(Button::Left, Direction::Release);
+            let moved = move_mouse_and_settle(e, tx, ty);
+            let release = send_button(e, 0, Direction::Release);
             if release.is_ok() {
                 owned.fetch_and(!1, std::sync::atomic::Ordering::AcqRel);
             }
@@ -316,14 +482,14 @@ impl ComputerControl for MacosComputerControl {
     }
 
     async fn mouse_down(&self) -> Result<(), ComputerError> {
-        self.with_enigo(move |e| e.button(Button::Left, Direction::Press))?;
+        self.with_enigo(move |e| send_button(e, 0, Direction::Press))?;
         self.owned_mouse
             .fetch_or(1, std::sync::atomic::Ordering::AcqRel);
         Ok(())
     }
 
     async fn mouse_up(&self) -> Result<(), ComputerError> {
-        self.with_enigo(move |e| e.button(Button::Left, Direction::Release))?;
+        self.with_enigo(move |e| send_button(e, 0, Direction::Release))?;
         self.owned_mouse
             .fetch_and(!1, std::sync::atomic::Ordering::AcqRel);
         Ok(())
@@ -526,167 +692,7 @@ impl ComputerControl for MacosComputerControl {
     async fn check_os_permissions(&self) -> Option<(bool, bool)> {
         Some(tcc::check_os_permissions())
     }
-    fn desktop_lock_scope(&self) -> Option<std::path::PathBuf> {
-        // Effective UID identifies the current user's macOS desktop. The
-        // literal OS temporary root deliberately ignores HOME, TMPDIR and
-        // the application's configurable data directory.
-        unsafe extern "C" {
-            fn geteuid() -> u32;
-        }
-        let uid = unsafe { geteuid() };
-        Some(std::path::PathBuf::from(format!(
-            "/private/tmp/lingxi-computer-desktop-{uid}"
-        )))
-    }
-    fn capabilities(&self) -> ComputerBackendCapabilities {
-        ComputerBackendCapabilities {
-            held_keys: true,
-            pixel_scroll: true,
-            side_buttons: true,
-            frame_geometry: true,
-        }
-    }
-    async fn frame_geometry(&self) -> Result<Option<ComputerFrameGeometry>, ComputerError> {
-        self.geometry().map(Some)
-    }
-    async fn validate_keys(&self, keys: &[String]) -> Result<(), ComputerError> {
-        for key in keys {
-            if keymap::parse_key_name(key).is_none() {
-                return Err(ComputerError::Other(format!(
-                    "unrecognized key name: {key}"
-                )));
-            }
-        }
-        Ok(())
-    }
-    async fn key_down(&self, key: String) -> Result<(), ComputerError> {
-        let key = keymap::parse_key_name(&key)
-            .ok_or_else(|| ComputerError::Other(format!("unrecognized key name: {key}")))?;
-        self.with_enigo(move |e| e.key(key, Direction::Press))
-    }
-    async fn key_up(&self, key: String) -> Result<(), ComputerError> {
-        let key = keymap::parse_key_name(&key)
-            .ok_or_else(|| ComputerError::Other(format!("unrecognized key name: {key}")))?;
-        self.with_enigo(move |e| e.key(key, Direction::Release))
-    }
-    async fn key_chord(&self, keys: Vec<String>) -> Result<(), ComputerError> {
-        let parsed = keys
-            .iter()
-            .map(|key| {
-                keymap::parse_key_name(key)
-                    .ok_or_else(|| ComputerError::Other(format!("unrecognized key name: {key}")))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let Some((main, modifiers)) = parsed.split_last() else {
-            return Err(ComputerError::Other("empty key chord".into()));
-        };
-        let chord = keymap::Chord {
-            main: *main,
-            modifiers: modifiers.to_vec(),
-        };
-        self.with_enigo(move |e| Self::press_chord(e, &chord))
-    }
-    async fn release_held_keys(&self) -> Result<(), ComputerError> {
-        self.with_enigo(|enigo| {
-            let (keys, raw_keys) = enigo.held();
-            let mut result = Ok(());
-            for key in keys {
-                if let Err(error) = enigo.key(key, Direction::Release) {
-                    result = Err(error);
-                }
-            }
-            for key in raw_keys {
-                if let Err(error) = enigo.raw(key, Direction::Release) {
-                    result = Err(error);
-                }
-            }
-            result
-        })
-    }
-    async fn mouse_click(&self, x: u32, y: u32, button: &str) -> Result<(), ComputerError> {
-        let button = mouse_button_id(button)?;
-        let (x, y) = self.target_point(x, y)?;
-        let owned = self.owned_mouse.clone();
-        self.with_enigo(move |e| {
-            e.move_mouse(x, y, Coordinate::Abs)?;
-            click_button_with(&owned, button, 1, |direction| {
-                send_button(e, button, direction)
-            })
-        })
-    }
-    async fn click_current(&self, button: &str, count: u32) -> Result<(), ComputerError> {
-        let button = mouse_button_id(button)?;
-        if count == 0 || count > 3 || (button >= 3 && count != 1) {
-            return Err(ComputerError::Unsupported("mouse click count".into()));
-        }
-        let owned = self.owned_mouse.clone();
-        self.with_enigo(move |e| {
-            click_button_with(&owned, button, count, |direction| {
-                send_button(e, button, direction)
-            })
-        })
-    }
-    async fn release_held_buttons(&self) -> Result<(), ComputerError> {
-        let owned = self.owned_mouse.clone();
-        self.with_enigo(move |e| {
-            release_buttons_with(&owned, |button| send_button(e, button, Direction::Release))
-        })
-    }
-    async fn scroll_current(&self, dx: i32, dy: i32, pixels: bool) -> Result<(), ComputerError> {
-        if pixels {
-            return post_pixel_scroll(dx, dy);
-        }
-        self.with_enigo(move |e| {
-            if dy != 0 {
-                e.scroll(dy, Axis::Vertical)?;
-            }
-            if dx != 0 {
-                e.scroll(dx, Axis::Horizontal)?;
-            }
-            Ok(())
-        })
-    }
-    async fn scroll_pixels(&self, x: u32, y: u32, dx: i32, dy: i32) -> Result<(), ComputerError> {
-        let (x, y) = self.target_point(x, y)?;
-        self.with_enigo(move |e| e.move_mouse(x, y, Coordinate::Abs))?;
-        post_pixel_scroll(dx, dy)
-    }
 }
-use lingxi_core::host::computer_control::{
-    AppInfo, ComputerBackendCapabilities, ComputerControl, ComputerError, ComputerFrameGeometry,
-    DisplayInfo, Screenshot,
-};
-
-fn monitor_geometry(monitor: &xcap::Monitor) -> Result<ComputerFrameGeometry, ComputerError> {
-    let display_id = monitor.id().map_err(|e| monitor_error(&e))?;
-    let scale = f64::from(monitor.scale_factor().map_err(|e| monitor_error(&e))?);
-    let origin_x = f64::from(monitor.x().map_err(|e| monitor_error(&e))?);
-    let origin_y = f64::from(monitor.y().map_err(|e| monitor_error(&e))?);
-    // xcap's macOS monitor bounds are global OS points, while this host
-    // contract exposes capture pixels for both display listings and frames.
-    let pixel_width =
-        (f64::from(monitor.width().map_err(|e| monitor_error(&e))?) * scale).round() as u32;
-    let pixel_height =
-        (f64::from(monitor.height().map_err(|e| monitor_error(&e))?) * scale).round() as u32;
-    Ok(ComputerFrameGeometry {
-        display_id,
-        pixel_width,
-        pixel_height,
-        origin_x,
-        origin_y,
-        scale,
-        version: format!(
-            "macos-v1:{display_id}:{pixel_width}:{pixel_height}:{origin_x}:{origin_y}:{scale}"
-        ),
-    })
-}
-
-/// Real macOS automation backend.
-///
-/// Native input handles live on one dedicated worker thread. This preserves
-/// modifier flags and pressed inputs across asynchronous calls while keeping
-/// the non-Send Enigo handle on its owning thread.
-type InputJob = Box<dyn FnOnce(&mut Option<Enigo>) + Send>;
 
 fn event_source() -> Result<core_graphics::event_source::CGEventSource, ComputerError> {
     core_graphics::event_source::CGEventSource::new(
@@ -748,12 +754,12 @@ fn click_button_with<E>(
     owned: &std::sync::atomic::AtomicU8,
     button: u8,
     count: u32,
-    mut send: impl FnMut(Direction) -> Result<(), E>,
+    mut send: impl FnMut(Direction, u32) -> Result<(), E>,
 ) -> Result<(), E> {
-    for _ in 0..count {
-        send(Direction::Press)?;
+    for click_count in 1..=count {
+        send(Direction::Press, click_count)?;
         owned.fetch_or(1 << button, std::sync::atomic::Ordering::AcqRel);
-        send(Direction::Release)?;
+        send(Direction::Release, click_count)?;
         owned.fetch_and(!(1 << button), std::sync::atomic::Ordering::AcqRel);
     }
     Ok(())
@@ -777,49 +783,118 @@ fn release_buttons_with<E>(
     }
     error.map_or(Ok(()), Err)
 }
-fn send_button(enigo: &mut Enigo, button: u8, direction: Direction) -> enigo::InputResult<()> {
-    match button {
-        0 => enigo.button(Button::Left, direction),
-        1 => enigo.button(Button::Right, direction),
-        2 => enigo.button(Button::Middle, direction),
-        _ => {
-            let (x, y) = enigo.location()?;
-            post_side_button_event(x, y, i64::from(button), direction)
-                .map_err(|_| enigo::InputError::Simulate("side button event creation failed"))
+// Enigo posts asynchronously and its next button/drag reads OS cursor and
+// button state. The persistent worker must settle each event before those reads;
+// otherwise mouse-down uses the preceding cursor and path moves are coalesced.
+fn move_mouse_and_settle(enigo: &mut Enigo, x: i32, y: i32) -> enigo::InputResult<()> {
+    enigo.move_mouse(x, y, Coordinate::Abs)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    loop {
+        let actual = enigo.location()?;
+        // Quartz clips the outer Retina edge to the nearest global OS point.
+        if (i64::from(actual.0) - i64::from(x)).abs() <= 1
+            && (i64::from(actual.1) - i64::from(y)).abs() <= 1
+        {
+            break;
         }
+        if std::time::Instant::now() >= deadline {
+            return Err(enigo::InputError::Simulate(
+                "mouse movement was not observed",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
+    // Match Enigo's native per-event drain interval so application queues see
+    // each path point before a later point replaces it.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    Ok(())
 }
-fn post_side_button_event(
+fn send_button(enigo: &mut Enigo, button: u8, direction: Direction) -> enigo::InputResult<()> {
+    send_button_with_count(enigo, button, direction, 1)
+}
+fn send_button_with_count(
+    enigo: &mut Enigo,
+    button: u8,
+    direction: Direction,
+    click_count: u32,
+) -> enigo::InputResult<()> {
+    use core_graphics::event::{CGEvent, CGEventFlags};
+    let source = event_source()
+        .map_err(|_| enigo::InputError::Simulate("mouse event source unavailable"))?;
+    let mut flags = CGEvent::new(source.clone())
+        .map_err(|_| enigo::InputError::Simulate("mouse event flags unavailable"))?
+        .get_flags();
+    let modifiers = CGEventFlags::CGEventFlagShift
+        | CGEventFlags::CGEventFlagControl
+        | CGEventFlags::CGEventFlagAlternate
+        | CGEventFlags::CGEventFlagCommand;
+    flags.remove(modifiers);
+    // Use the actor's accepted held keys, including a just-posted modifier;
+    // WindowServer's global flags may still describe the preceding event.
+    let (keys, raw_keys) = enigo.held();
+    let codes = raw_keys.into_iter().chain(
+        keys.into_iter()
+            .filter_map(|key| core_graphics::event::CGKeyCode::try_from(key).ok()),
+    );
+    for code in codes {
+        flags |= match code {
+            54 | 55 => CGEventFlags::CGEventFlagCommand,
+            56 | 60 => CGEventFlags::CGEventFlagShift,
+            58 | 61 => CGEventFlags::CGEventFlagAlternate,
+            59 | 62 => CGEventFlags::CGEventFlagControl,
+            _ => CGEventFlags::empty(),
+        };
+    }
+    let (x, y) = enigo.location()?;
+    let event = mouse_button_event(source, x, y, button, direction, click_count, flags)
+        .map_err(|_| enigo::InputError::Simulate("mouse button event creation failed"))?;
+    event.post(core_graphics::event::CGEventTapLocation::HID);
+    // A successfully posted press remains successful, so its caller records
+    // ownership even if later actions or cleanup fail.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    Ok(())
+}
+fn mouse_button_event(
+    source: core_graphics::event_source::CGEventSource,
     x: i32,
     y: i32,
-    button: i64,
+    button: u8,
     direction: Direction,
-) -> Result<(), ComputerError> {
+    click_count: u32,
+    flags: core_graphics::event::CGEventFlags,
+) -> Result<core_graphics::event::CGEvent, ComputerError> {
     use core_graphics::{
-        event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, EventField},
+        event::{CGEvent, CGEventType, CGMouseButton, EventField},
         geometry::CGPoint,
     };
-    let source = event_source()?;
-    let event_type = match direction {
-        Direction::Press => CGEventType::OtherMouseDown,
-        Direction::Release => CGEventType::OtherMouseUp,
-        Direction::Click => return Err(ComputerError::Other("untracked side button click".into())),
+    let mouse = match button {
+        0 => CGMouseButton::Left,
+        1 => CGMouseButton::Right,
+        2..=4 => CGMouseButton::Center,
+        _ => return Err(ComputerError::Unsupported("mouse button".into())),
+    };
+    let event_type = match (button, direction) {
+        (0, Direction::Press) => CGEventType::LeftMouseDown,
+        (0, Direction::Release) => CGEventType::LeftMouseUp,
+        (1, Direction::Press) => CGEventType::RightMouseDown,
+        (1, Direction::Release) => CGEventType::RightMouseUp,
+        (2..=4, Direction::Press) => CGEventType::OtherMouseDown,
+        (2..=4, Direction::Release) => CGEventType::OtherMouseUp,
+        _ => return Err(ComputerError::Other("untracked mouse click".into())),
     };
     let event = CGEvent::new_mouse_event(
-        source.clone(),
+        source,
         event_type,
         CGPoint::new(f64::from(x), f64::from(y)),
-        CGMouseButton::Center,
+        mouse,
     )
     .map_err(|()| ComputerError::Other("mouse event creation failed".into()))?;
-    event.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, button);
-    event.set_flags(
-        CGEvent::new(source)
-            .map_err(|()| ComputerError::Other("event flags unavailable".into()))?
-            .get_flags(),
-    );
-    event.post(CGEventTapLocation::HID);
-    Ok(())
+    event.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, i64::from(button));
+    // Each requested click sequence starts at one. Enigo's time-only counter
+    // otherwise turns a click on a different target into an unintended double click.
+    event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, i64::from(click_count));
+    event.set_flags(flags);
+    Ok(event)
 }
 fn post_pixel_scroll(dx: i32, dy: i32) -> Result<(), ComputerError> {
     use core_graphics::event::{CGEvent, CGEventTapLocation, ScrollEventUnit};
@@ -858,6 +933,74 @@ fn pixel_to_global(
 #[cfg(test)]
 mod geometry_tests {
     use super::*;
+    #[test]
+    fn mouse_click_events_preserve_requested_count_position_button_and_flags() {
+        use core_graphics::event::{CGEventFlags, CGEventType, EventField};
+        let flags = CGEventFlags::CGEventFlagShift | CGEventFlags::CGEventFlagCommand;
+        for button in 0..5 {
+            for count in 1..=3 {
+                for direction in [Direction::Press, Direction::Release] {
+                    let event = mouse_button_event(
+                        event_source().unwrap(),
+                        120,
+                        -45,
+                        button,
+                        direction,
+                        count,
+                        flags,
+                    )
+                    .unwrap();
+                    let expected = match (button, direction) {
+                        (0, Direction::Press) => CGEventType::LeftMouseDown,
+                        (0, _) => CGEventType::LeftMouseUp,
+                        (1, Direction::Press) => CGEventType::RightMouseDown,
+                        (1, _) => CGEventType::RightMouseUp,
+                        (_, Direction::Press) => CGEventType::OtherMouseDown,
+                        _ => CGEventType::OtherMouseUp,
+                    };
+                    assert_eq!(event.get_type() as u32, expected as u32);
+                    assert_eq!(
+                        event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER),
+                        i64::from(button)
+                    );
+                    assert_eq!(
+                        event.get_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE),
+                        i64::from(count)
+                    );
+                    assert_eq!(event.location().x, 120.0);
+                    assert_eq!(event.location().y, -45.0);
+                    assert_eq!(event.get_flags(), flags);
+                }
+            }
+        }
+    }
+    #[test]
+    fn compound_click_ordinals_reset_and_late_release_failure_retains_ownership() {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        let owned = AtomicU8::new(0);
+        for count in [1, 2, 3, 1] {
+            let mut sent = Vec::new();
+            click_button_with(&owned, 0, count, |direction, ordinal| {
+                sent.push((direction, ordinal));
+                Ok::<_, &str>(())
+            })
+            .unwrap();
+            let expected: Vec<_> = (1..=count)
+                .flat_map(|ordinal| [(Direction::Press, ordinal), (Direction::Release, ordinal)])
+                .collect();
+            assert_eq!(sent, expected);
+            assert_eq!(owned.load(Ordering::Acquire), 0);
+        }
+        assert!(click_button_with(&owned, 0, 3, |direction, ordinal| {
+            if direction == Direction::Release && ordinal == 2 {
+                Err("release failed")
+            } else {
+                Ok(())
+            }
+        })
+        .is_err());
+        assert_eq!(owned.load(Ordering::Acquire), 1);
+    }
     #[test]
     fn typed_leading_tabs_are_tracked_and_stop_text_after_a_release_failure() {
         let mut held = Vec::new();
@@ -922,7 +1065,7 @@ mod geometry_tests {
         for button in 0..5 {
             let held = AtomicU8::new(0);
             let mut directions = Vec::new();
-            let result = click_button_with(&held, button, 1, |direction| {
+            let result = click_button_with(&held, button, 1, |direction, _click_count| {
                 directions.push(direction);
                 if direction == Direction::Release {
                     Err("release failed")
