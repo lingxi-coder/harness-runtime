@@ -1,20 +1,20 @@
 # Computer Use：接入、动作与恢复
 
-本文描述 2026-10-07 工作树中的实现及验收边界。实现范围是 macOS、OpenAI Responses、Claude Messages client toolset 与 Gemini Desktop Interactions。目前没有本轮真实 Provider API 或可见 macOS 桌面验收证据；协议 fixture、fake backend 和恢复测试不能代替这些验收，也不能据此宣称 NativeFirst 已开启。
+本文描述 2026-10-07 工作树中的实现及验收边界。实现范围是 macOS、OpenAI Responses、Claude Messages client toolset 与 Gemini Desktop Interactions。本轮已完成独立 ComputerTool + 真实 macOS 后端的单显示器 Retina 桌面验收，包括点击、输入、两种滚动单位、完整拖拽路径、侧键、跨调用持键与取消释放。真实 Provider API、完整 Agent 到 Provider 的桌面闭环及多显示器仍未验收；协议 fixture、fake backend 和独立桌面验收不能据此开启 NativeFirst。
 
 ## 源码与配置身份
 
 | 项目 | 当前身份 |
 |---|---|
-| Harness HEAD | `4dfd9abef1dc293a9617d35387165cb2256b5d98`，另有工作树修改 |
-| 实际 SDK HEAD | `18ab9d51e6591f9619be8cf23aa2f62d10deb1c4`，另有工作树修改 |
-| Harness manifest 中的 Git rev | `0c6a907d897a54e656700c00cf335d91b10dca0b` |
+| Harness HEAD | Computer 增量基于共享基线 `18aa57f62fa6a6761bfe5ff3da4864571dc47ddb`；本地 main 为 `04b526239545fa4d253ef6c50fca2a6102d9cc48`，另有工作树修改 |
+| 实际 SDK HEAD | `67370eb9d10bf87c19fea424cff91d67d86cfa2c`；Computer 提交为其父提交 `aeca59b11383ab92edc5b3a3da1243a37bf22ece`，另有工作树修改 |
+| Harness manifest 中的 Git rev | `67370eb9d10bf87c19fea424cff91d67d86cfa2c` |
 | 当前生效的 SDK 来源 | Cargo `[patch."https://github.com/lingxi-coder/llm-client"]` 指向 `../llm-client` |
 | SDK 基线合并报告 | 工作区 `.omx/context/computer-use-implementation-20261006/sdk-baseline-alignment-20261006/alignment-report.md` |
 
-manifest 仍保留原 Git 提交；当前验证使用本地 patch 指向的新 SDK 工作树。新实现尚无已发布的不可变提交。发布前需提交并发布 SDK，再将 Harness 的 Git rev 对齐该提交；当前配对工作树构建已使用新源码。
+manifest 仍保留原 Git 提交；当前验证使用本地 patch 指向的新 SDK 工作树。Computer 实现与共享 SDK 基线已有本地不可变提交，当前分支的 Harness Git rev 已指向共享 SDK 提交。仍需验证去掉路径 patch 后的不可变依赖构建，并完成 main 整合与发布；本地路径 patch 不能证明远端依赖可获取。
 
-原生启用由 host 提供 `VerifiedComputerProfile { model, profile, provider, evidence }`，通过 `ConversationOrchestrator::with_verified_computer_profiles` 注入。空 allowlist 保持 function 投影。构造器过滤空 `evidence`，但无法鉴定一段字符串是否来自真实验收；集成方必须提供能够定位实际 model/profile、endpoint、协议、操作与桌面结果的证据。当前 desktop assembly 没有注入已验收 profile；本轮不能填写虚假的 evidence 来启用原生。
+原生启用由 host 提供 `VerifiedComputerProfile { model, profile, provider, evidence }`，通过 `ConversationOrchestrator::with_verified_computer_profiles` 注入。空 allowlist 保持 function 投影。构造器过滤空 `evidence`，但无法鉴定一段字符串是否来自真实验收；集成方必须提供能够定位实际 model/profile、endpoint、协议、操作与桌面结果的证据。desktop host 通过 `DesktopConfig.verified_computer_profiles` 配置，并由现有 assembly 传入该 builder；`VerifiedComputerProfile` 与 `NativeComputerProvider` 从 desktop 公共入口导出。默认配置为空，本轮独立桌面验收不能用作真实 Provider profile 的 evidence。
 
 ## 既有工具生命周期
 
@@ -73,11 +73,11 @@ Gemini 管理函数和 Desktop 原生控制共享 Interactions endpoint、统一
 
 ### Backend 与测试定位约定
 
-下面动作矩阵中的 `B-*` 指当前 macOS 实现入口，均尚未做本轮真实桌面验收：
+下面动作矩阵中的 `B-*` 指当前 macOS 实现入口；具体本机通过范围与未验收边界见后面的桌面验收章节：
 
 | 编号 | Backend 入口 |
 |---|---|
-| B-C | `mouse_click` / `click_current`；侧键由 `post_side_button` 发真实 CGEvent |
+| B-C | `mouse_click` / `click_current`；按钮由 `mouse_button_event` / `send_button_with_count` 构造与发送真实 CGEvent |
 | B-M | `mouse_move`、鼠标 down/up；path 由 ComputerTool 按点顺序执行并收尾释放 |
 | B-S | 旧 wheel `scroll` / `scroll_current(..., false)`；pixel 为 `scroll_pixels` / `post_pixel_scroll` |
 | B-K | `key_chord`、`key_down`、`key_up` 与解析后的 enigo key；ComputerTool 跟踪跨调用持键 |
@@ -180,9 +180,9 @@ Gemini 管理函数和 Desktop 原生控制共享 Interactions endpoint、统一
 
 清理释放键鼠也是桌面输入：在实际 release 前更新同一 lease 的共享输入版本，并撤销当前与冻结观察，包括部分失败。版本更新失败仍尝试必要的物理释放，但保留租约隔离，直到重试成功发布失效；无持有或 dirty 输入的清理不推进版本。
 
-`computer_frame` 保存模型图像尺寸、capture 尺寸、display ID、origin、scale、crop 与 geometry_version。SDK 先将 Provider 坐标归一到模型图像；ComputerTool 按实际缩放把模型图像坐标换到 capture 像素；macOS `pixel_to_global` 再用 `origin + pixel/scale` 换到系统点。每次输入重查当前显示器几何；切屏、分辨率变化或最终 hook 替图/删图使旧观察失效。screenshot 的图像处理和 metadata 必须一致；当前 zoom 返回裁剪图与 capture_region，并使旧 native frame 失效，不把裁剪图冒充下一轮全屏坐标依据。继续原生输入前需要重新 screenshot。桌面输入版本保存在现有独占租约的锁文件中，并在输入前更新，包括部分失败。观察记录捕获时的版本；其他 Agent、同一桌面的其他 Tool 实例或进程操作后，旧图、已 lower 的输入和新租约中的旧 sequence 均拒绝。冻结版本只在当前 owner 的独占 sequence 内有效；再次截图记录新版本。macOS 的整数系统点采用向下取整，使合法 capture 像素留在对应逻辑点内，避免 Retina 最右/下像素被四舍五入到相邻显示器。真实 Retina、多显示器落点仍待桌面验收。
+`computer_frame` 保存模型图像尺寸、capture 尺寸、display ID、origin、scale、crop 与 geometry_version。SDK 先将 Provider 坐标归一到模型图像；ComputerTool 按实际缩放把模型图像坐标换到 capture 像素；macOS `pixel_to_global` 再用 `origin + pixel/scale` 换到系统点。每次输入重查当前显示器几何；切屏、分辨率变化或最终 hook 替图/删图使旧观察失效。screenshot 的图像处理和 metadata 必须一致；当前 zoom 返回裁剪图与 capture_region，并使旧 native frame 失效，不把裁剪图冒充下一轮全屏坐标依据。继续原生输入前需要重新 screenshot。桌面输入版本保存在现有独占租约的锁文件中，并在输入前更新，包括部分失败。观察记录捕获时的版本；其他 Agent、同一桌面的其他 Tool 实例或进程操作后，旧图、已 lower 的输入和新租约中的旧 sequence 均拒绝。冻结版本只在当前 owner 的独占 sequence 内有效；再次截图记录新版本。macOS 的整数系统点采用向下取整，使合法 capture 像素留在对应逻辑点内，避免 Retina 最右/下像素被四舍五入到相邻显示器。本轮真实单显示器 Retina 落点已验收，多显示器仍待验收。
 
-macOS 的显示器列表、`display_size` 与 `frame_geometry` 共用像素尺寸换算；xcap 的逻辑点尺寸需要乘以 scale。2026-10-07 本机只读检查暴露并修复了 Retina 列表返回逻辑点的问题。该检查只读取权限和显示器几何，不构成实际输入、截图、多显示器落点或 Provider 原生协议验收。
+macOS 的显示器列表、`display_size` 与 `frame_geometry` 共用像素尺寸换算；xcap 的逻辑点尺寸需要乘以 scale。2026-10-07 本机只读检查暴露并修复了 Retina 列表返回逻辑点的问题。只读检查之后，又完成了下述实际输入与截图验收；多显示器及 Provider 原生协议仍待验收。
 
 ## 普通与原生工具结果发布
 
@@ -233,9 +233,32 @@ live refresh 与冷启动使用相同的 `needs_fresh_observation` 判断：已�
 
 session event encode/decode、语义 fold、snapshot、hydration 与 retention 一并覆盖执行/回执。尚未 Published 的执行和未 Received 的回执保留审计，不能因 coordinator 缓存回收丢失待处理状态。
 
+## 本轮桌面验收与交付边界
+
+可重复的真实桌面验收入口：
+
+```sh
+# 构建已更新的锁文件后运行；会短暂显示专用 AppKit 测试窗口并操作它。
+python3 scripts/tests/computer_desktop_acceptance.py --run --output /absolute/path/to/new-output
+```
+
+runner 只给临时测试应用授权，记录该应用实际收到的事件。通过条件包括精确输入文本、wheel 三刻度与 pixel 120 像素的原始 CGEvent 值、按顺序经过非共线中间点的完整拖拽、侧键按下/释放、取消阶段实际 Shift 释放及前后截图。使用 Cargo 报告的确切可执行文件，记录 Computer 源码与二进制摘要；列出文件的构建前与执行后摘要不一致时失败；该检查不涵盖完整 SDK/Agent 依赖闭包，也不能检测期间改动后恢复原字节。测试窗口进程在成功、失败和 readiness 超时后均由 runner 回收。
+
+2026-10-07 `desktop-live-11/report.json` 的十一项检查全部通过，含选定 Computer 源码摘要一致与测试窗口位置稳定。本机为 3024×1964 capture 像素 / 1512×982 系统点、scale=2 的单块 Color LCD。该结果经过既有 ComputerTool 的参数校验、授权与 sequence/lowering；不包含完整 Agent dispatcher、hooks、durable journal 或真实 Provider transport。runner 等待专用测试窗口完成前台激活及位置稳定后，才公布测试目标坐标；较早的失败记录保留用于定位 AppKit 启动期间窗口摆放变化。屏幕截图属于本地验收材料，不应随源码发布。
+
+实际验收发现并修复了两个后端问题：异步鼠标移动后立即读取位置会使点击落在上一次坐标；Enigo 的时间计数器会把快速点击另一个目标误判为双击。持久输入 actor 现在等待目标位置被观察并让应用事件队列接收各路径点；点击使用明确的 CGEvent button、count、位置与本 actor 持有的 modifier，并继续遵循成功 Press 后登记所有权的规则。
+
+macOS 后端 18 项测试通过，包括 CGEvent 元数据、点击序号、失败时保留释放责任及 Retina 几何。SDK 干净候选的 all-targets check 和 458 项聚焦测试通过，但候选补入了共享依赖源码，不能等同于当前 main 的干净发布构建。
+
+### 干净主干交付审查
+
+此前 Computer scoped 提交引用了未提交的共享接口。只从两个仓库 main 导出源码，Harness 无法完整构建。按编译错误复制完整共享文件会带入 handback、Mods、fast mode 等其他功能；这份诊断闭包不属于 Computer-only 交付范围。Computer 后端修复、host profile 配置和验收入口已独立完成；共享基线现已由另一任务独立提交为 `18aa57f`，SDK Git rev 已更新；本轮仍未完成去掉路径 patch 后的 `--locked` 干净构建及 main 整合验收。不能把脏工作树通过或 sibling path patch 当作这项验收完成。
+
+当前无真实 Provider 凭据，也无第二块显示器。相应验收保持未完成；不得生成假的 VerifiedComputerProfile 或据此启用 native profile。
+
 ## 测试与验收命令
 
-以下是针对当前实现的可重复检查入口。Cargo 任务应串行执行，避免共享构建缓存/磁盘并发竞争。本文编辑没有运行 Cargo；最新具体通过结果以本轮根任务输出为准。
+以下是针对当前实现的可重复检查入口。Cargo 任务应串行执行，避免共享构建缓存/磁盘并发竞争。最新具体通过结果与源码范围以本轮验收日志为准。
 
 基线合并报告记录了早期验证。后续根任务验证结果：SDK 513 项（library 389、integration 124）、llm-runtime 1156 项、ComputerTool 83 项、macOS backend 11 项、native 跨层 13 项、Session 56 项全部通过。测试均使用实际本地 SDK 工作树；默认线程栈下 dispatcher 4 项、普通 MCP 及独立进程取消回归也已通过。这些结果不证明真实 Provider 或可见桌面验收。
 
