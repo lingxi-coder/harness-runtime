@@ -1,8 +1,8 @@
 use super::{
-    is_sha256, ConversationExport, ServerExposure,
-    ManagedServerPolicy, ServerExposureUpdate, ManagedServerResource, ManagedServerRuntime, ManagedServer,
-    McpCatalogChanged, McpCatalogKind, McpRegistry, MAX_EXPOSED_SERVERS,
-    MAX_IN_FLIGHT_PER_SERVER, MAX_IN_FLIGHT_PER_CONVERSATION,
+    is_sha256, ConversationExport, ManagedServer, ManagedServerPolicy, ManagedServerResource,
+    ManagedServerRuntime, McpCatalogChanged, McpCatalogKind, McpRegistry, ServerExposure,
+    ServerExposureUpdate, MAX_EXPOSED_SERVERS, MAX_IN_FLIGHT_PER_CONVERSATION,
+    MAX_IN_FLIGHT_PER_SERVER,
 };
 use crate::connection::McpConnectionState;
 use lingxi_core::host::McpError;
@@ -19,10 +19,7 @@ impl McpRegistry {
             .get()
             .ok_or_else(|| McpError::Internal("managed servers are not configured".into()))
     }
-    pub(super) async fn managed_server_connection_id(
-        &self,
-        server_name: &str,
-    ) -> McpConnectionId {
+    pub(super) async fn managed_server_connection_id(&self, server_name: &str) -> McpConnectionId {
         let connections = self.connections.read().await;
         match connections.get(server_name) {
             Some(McpConnectionState::Connected { connection_id, .. })

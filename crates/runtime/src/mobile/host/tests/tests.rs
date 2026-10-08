@@ -8804,8 +8804,9 @@ async fn mint_forks_from_the_recorded_origin_cwd_not_the_callers_cwd() {
         .await
         .expect("mint");
 
-    let workspace_cwd =
-        local_app_builder_service::broker::canonical_cwd_string(&data_root.join(&record.workspace_rel));
+    let workspace_cwd = local_app_builder_service::broker::canonical_cwd_string(
+        &data_root.join(&record.workspace_rel),
+    );
     let forked = std::fs::read_to_string(orchestrator::transcript_paths::main_transcript_path(
         &lingxi_home,
         &workspace_cwd,
@@ -8889,8 +8890,9 @@ async fn chat_origin_mint_forks_the_source_conversation() {
     // disagreed on where the catalog lived. Now it always canonicalises the
     // nearest existing ancestor, so on a symlink-split platform this is
     // `/private/var/...` where the raw join says `/var/...`.
-    let workspace_cwd =
-        local_app_builder_service::broker::canonical_cwd_string(&data_root.join(&record.workspace_rel));
+    let workspace_cwd = local_app_builder_service::broker::canonical_cwd_string(
+        &data_root.join(&record.workspace_rel),
+    );
     let fork_path = orchestrator::transcript_paths::main_transcript_path(
         &lingxi_home,
         &workspace_cwd,

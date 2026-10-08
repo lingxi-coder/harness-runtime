@@ -570,10 +570,9 @@ pub(crate) fn lower_details(
     Ok(AppDetailsDto {
         app: lower_record(root, record),
         manifest: load_manifest_snapshot(root, &record.id)?,
-        runtime_profile_status: local_app_builder_service::app_build::derive_runtime_profile_status(
-            root, record,
-        )
-        .map(lower_runtime_profile_status),
+        runtime_profile_status:
+            local_app_builder_service::app_build::derive_runtime_profile_status(root, record)
+                .map(lower_runtime_profile_status),
         runtime: lower_runtime_details(runtime),
         checkpoints: checkpoints.iter().map(lower_checkpoint).collect(),
     })

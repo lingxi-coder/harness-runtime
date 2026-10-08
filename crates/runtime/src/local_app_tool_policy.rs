@@ -258,11 +258,23 @@ mod tests {
         installed();
         for name in PLAN_SAFE_TOOLS {
             assert!(is_plan_safe_tool(name), "{name}");
-            assert_eq!(tool_default(name), PromptDefault::AllowByDefault, "{name} reads, so it is allowed");
+            assert_eq!(
+                tool_default(name),
+                PromptDefault::AllowByDefault,
+                "{name} reads, so it is allowed"
+            );
         }
-        for name in ["LocalAppBuild", "LocalAppRuntime", "LocalAppPrepare", "LocalAppScaffold"] {
+        for name in [
+            "LocalAppBuild",
+            "LocalAppRuntime",
+            "LocalAppPrepare",
+            "LocalAppScaffold",
+        ] {
             assert_eq!(tool_default(name), PromptDefault::AllowByDefault, "{name}");
-            assert!(!is_plan_safe_tool(name), "{name} acts, so Plan mode must still gate it");
+            assert!(
+                !is_plan_safe_tool(name),
+                "{name} acts, so Plan mode must still gate it"
+            );
         }
         assert!(permission::is_divergence_tool("LocalAppBuild"));
     }
@@ -270,9 +282,23 @@ mod tests {
     #[test]
     fn a_rule_is_keyed_on_the_apps_id() {
         let call = |tool: &str, input: serde_json::Value| rule_content(tool, &input);
-        assert_eq!(call("LocalAppMutateData", serde_json::json!({"app_id": "app-a"})).as_deref(), Some("app-a"));
-        assert_eq!(call("LocalAppMutateData", serde_json::json!({})), None, "a call naming no app matches no content rule");
-        assert_eq!(call("LocalAppMutateData", serde_json::json!({"app_id": 7})), None);
-        assert_eq!(call("Read", serde_json::json!({"app_id": "app-a"})), None, "only this product's tools");
+        assert_eq!(
+            call("LocalAppMutateData", serde_json::json!({"app_id": "app-a"})).as_deref(),
+            Some("app-a")
+        );
+        assert_eq!(
+            call("LocalAppMutateData", serde_json::json!({})),
+            None,
+            "a call naming no app matches no content rule"
+        );
+        assert_eq!(
+            call("LocalAppMutateData", serde_json::json!({"app_id": 7})),
+            None
+        );
+        assert_eq!(
+            call("Read", serde_json::json!({"app_id": "app-a"})),
+            None,
+            "only this product's tools"
+        );
     }
 }

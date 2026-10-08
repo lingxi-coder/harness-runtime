@@ -357,7 +357,10 @@ async fn an_unconfigured_registry_refuses_managed_servers() {
         .register_managed_server(scope, "1".repeat(64), true)
         .await
         .unwrap();
-    let error = registry.unregister_managed_server("app-0").await.unwrap_err();
+    let error = registry
+        .unregister_managed_server("app-0")
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("not configured"), "{error}");
     assert!(registry
         .expose_managed_server("conversation-1", "app-0", false)
@@ -403,13 +406,15 @@ async fn managed_servers_share_one_physical_hub_and_notify_changed_catalog_parti
         .unwrap();
     assert_eq!(changed.surface_generation, 2);
     let tools = events.recv().await.unwrap();
-    assert_eq!(tools.server_name, ConversationExport::new("app-0", "0".repeat(64)).unwrap().server_name());
+    assert_eq!(
+        tools.server_name,
+        ConversationExport::new("app-0", "0".repeat(64))
+            .unwrap()
+            .server_name()
+    );
     assert_eq!(tools.kind, McpCatalogKind::Tools);
     assert_eq!(events.recv().await.unwrap().kind, McpCatalogKind::Resources);
-    assert!(registry
-        .unregister_managed_server("app-0")
-        .await
-        .unwrap());
+    assert!(registry.unregister_managed_server("app-0").await.unwrap());
 }
 
 #[tokio::test]
@@ -427,7 +432,12 @@ async fn managed_server_catalog_refresh_notifies_resources_only() {
         .await
         .unwrap();
     let event = events.recv().await.unwrap();
-    assert_eq!(event.server_name, ConversationExport::new("app-0", "0".repeat(64)).unwrap().server_name());
+    assert_eq!(
+        event.server_name,
+        ConversationExport::new("app-0", "0".repeat(64))
+            .unwrap()
+            .server_name()
+    );
     assert_eq!(event.kind, McpCatalogKind::Resources);
     assert!(
         tokio::time::timeout(Duration::from_millis(10), events.recv())
@@ -447,10 +457,7 @@ async fn server_exposure_is_bounded_lru_and_pin_aware() {
             .unwrap();
     }
 
-    assert!(registry
-        .server_exposures("conversation")
-        .await
-        .is_empty());
+    assert!(registry.server_exposures("conversation").await.is_empty());
     for index in 0..8 {
         registry
             .expose_managed_server("conversation", &format!("app-{index}"), false)
@@ -596,10 +603,7 @@ async fn deleting_managed_server_removes_all_conversation_exposure() {
         .unregister_managed_server("delete-me")
         .await
         .unwrap());
-    assert!(registry
-        .server_exposures("conversation")
-        .await
-        .is_empty());
+    assert!(registry.server_exposures("conversation").await.is_empty());
 }
 
 #[tokio::test]
@@ -635,10 +639,7 @@ async fn disabling_managed_server_clears_exposure_and_emits_changes() {
         .await
         .unwrap();
     assert!(!runtime.enabled);
-    assert!(registry
-        .server_exposures("conversation")
-        .await
-        .is_empty());
+    assert!(registry.server_exposures("conversation").await.is_empty());
     assert_eq!(events.recv().await.unwrap().kind, McpCatalogKind::Tools);
     assert_eq!(events.recv().await.unwrap().kind, McpCatalogKind::Resources);
     let err = registry

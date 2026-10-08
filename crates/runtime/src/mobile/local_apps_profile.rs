@@ -111,7 +111,8 @@ pub(crate) struct ProfileApps {
     pub(crate) llm: Arc<SharedLlm>,
     /// Refreshed on every [`profile_apps`] call for the same reason as
     /// `llm`: the handles are one connection's Swift/Kotlin objects.
-    pub(crate) device: Arc<local_app_builder_service::device_capabilities::SharedDeviceCapabilities>,
+    pub(crate) device:
+        Arc<local_app_builder_service::device_capabilities::SharedDeviceCapabilities>,
 }
 
 impl ProfileApps {

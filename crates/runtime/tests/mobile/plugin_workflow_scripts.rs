@@ -1170,8 +1170,8 @@ fn mcp_promotion_uses_a_dedicated_tools_only_agent() {
         !workflow.contains("agentType: 'verifier', label: 'mcp-promote'"),
         "verifier must not own MCP promotion"
     );
-    let inventory =
-        std::fs::read_to_string(local_app_builder_plugin::inventory_path()).expect("plugin inventory");
+    let inventory = std::fs::read_to_string(local_app_builder_plugin::inventory_path())
+        .expect("plugin inventory");
     assert!(
         inventory
             .lines()

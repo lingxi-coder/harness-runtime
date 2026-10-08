@@ -752,8 +752,11 @@ pub(crate) struct MobileWorkflowStatusSink {
     active_session_uuid: Arc<std::sync::Mutex<String>>,
     /// Host-owned broker used to validate verified Local App build/use-test
     /// workflows. A weak reference avoids a broker↔workflow ownership cycle.
-    local_apps_host:
-        Arc<std::sync::OnceLock<std::sync::Weak<local_app_builder_service::broker::LocalAppsHostBroker>>>,
+    local_apps_host: Arc<
+        std::sync::OnceLock<
+            std::sync::Weak<local_app_builder_service::broker::LocalAppsHostBroker>,
+        >,
+    >,
     /// The bound registry is needed to resolve verified launch metadata and
     /// the handler-owned spool path without trusting workflow result JSON.
     task_registry: Arc<std::sync::OnceLock<Arc<tasks::registry::TaskRegistry>>>,
@@ -1145,8 +1148,7 @@ impl MobileWorkflowStatusSink {
                 registry,
                 &workflow.base.output_file,
                 outcome,
-                "completion_unverified: verified workflow result has no boolean ok:true"
-                    .into(),
+                "completion_unverified: verified workflow result has no boolean ok:true".into(),
             )
             .await;
             return (outcome, status, None);
@@ -1201,9 +1203,7 @@ impl MobileWorkflowStatusSink {
                     registry,
                     &workflow.base.output_file,
                     outcome,
-                    format!(
-                        "completion_unverified: cannot serialize checked result: {error}"
-                    ),
+                    format!("completion_unverified: cannot serialize checked result: {error}"),
                 )
                 .await;
                 return (outcome, status, None);
@@ -1731,7 +1731,8 @@ const AUTHORING_SPEC_SCHEMA_JSON: &str = local_app_builder_plugin::schemas::AUTH
 const QA_REPORT_SCHEMA_JSON: &str = local_app_builder_plugin::schemas::QA_REPORT;
 const USE_TEST_REPORT_SCHEMA_JSON: &str = local_app_builder_plugin::schemas::USE_TEST_REPORT;
 const MCP_PROPOSAL_SCHEMA_JSON: &str = local_app_builder_plugin::schemas::MCP_PROPOSAL;
-const WORKFLOW_AGENT_RESULTS_SCHEMA_JSON: &str = local_app_builder_plugin::schemas::WORKFLOW_AGENT_RESULTS;
+const WORKFLOW_AGENT_RESULTS_SCHEMA_JSON: &str =
+    local_app_builder_plugin::schemas::WORKFLOW_AGENT_RESULTS;
 
 fn checked_in_local_app_schemas() -> Result<Value, tool_workflow::WorkflowLaunchError> {
     let parse = |name: &str, source: &str| {
@@ -2135,19 +2136,20 @@ fn apply_materialized_local_app_collections_with_identity(
         )));
     }
     let active_authoring_contract =
-        local_app_builder_service::app_build::active_authoring_contract(&layout).map_err(|error| {
-            tool_workflow::WorkflowLaunchError(format!(
-                "cannot load active Local App authoring contract: {error}"
-            ))
-        })?;
-    let active_authoring_contract_sha256 =
-        local_app_builder_service::app_build::active_build_authoring_contract_sha256(&layout).map_err(
+        local_app_builder_service::app_build::active_authoring_contract(&layout).map_err(
             |error| {
                 tool_workflow::WorkflowLaunchError(format!(
-                    "cannot load active Local App authoring contract digest: {error}"
+                    "cannot load active Local App authoring contract: {error}"
                 ))
             },
         )?;
+    let active_authoring_contract_sha256 =
+        local_app_builder_service::app_build::active_build_authoring_contract_sha256(&layout)
+            .map_err(|error| {
+                tool_workflow::WorkflowLaunchError(format!(
+                    "cannot load active Local App authoring contract digest: {error}"
+                ))
+            })?;
     // The build receipt is the selector for the last successful Host build.
     // Keep its exact digest separate from the contract payload: the payload
     // intentionally has no digest field, while Plugin QA/update logic must
@@ -2681,13 +2683,11 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 .and_then(Value::as_str)
             {
                 local_app_scope = Some(if is_use_test_launch {
-                    tasks::scope::ManagedWorkflowScope::for_use_test(app_id).map_err(
-                        |error| {
-                            tool_workflow::WorkflowLaunchError(format!(
-                                "cannot authorize local-app use-test workflow: {error}"
-                            ))
-                        },
-                    )?
+                    tasks::scope::ManagedWorkflowScope::for_use_test(app_id).map_err(|error| {
+                        tool_workflow::WorkflowLaunchError(format!(
+                            "cannot authorize local-app use-test workflow: {error}"
+                        ))
+                    })?
                 } else {
                     tasks::scope::ManagedWorkflowScope::for_mcp_authoring(app_id).map_err(
                         |error| {
@@ -3018,26 +3018,27 @@ fn enrich_persisted_plugin_workflow_context(
     // Resolve the Host-owned scaffold/profile pair before any standalone
     // plugin workflow can mint an app scope. A valid-looking app_id and
     // manifest alone must not authorize a custom/torn shell.
-    let _build_target =
-        local_app_builder_service::app_build::detect_build_target(&layout).map_err(|error| {
+    let _build_target = local_app_builder_service::app_build::detect_build_target(&layout)
+        .map_err(|error| {
             tool_workflow::WorkflowLaunchError(format!(
                 "cannot validate persisted Local App runtime profile: {error}"
             ))
         })?;
     let active_authoring_contract =
-        local_app_builder_service::app_build::active_authoring_contract(&layout).map_err(|error| {
-            tool_workflow::WorkflowLaunchError(format!(
-                "cannot load active Local App authoring contract: {error}"
-            ))
-        })?;
-    let active_authoring_contract_sha256 =
-        local_app_builder_service::app_build::active_build_authoring_contract_sha256(&layout).map_err(
+        local_app_builder_service::app_build::active_authoring_contract(&layout).map_err(
             |error| {
                 tool_workflow::WorkflowLaunchError(format!(
-                    "cannot load active Local App authoring contract digest: {error}"
+                    "cannot load active Local App authoring contract: {error}"
                 ))
             },
         )?;
+    let active_authoring_contract_sha256 =
+        local_app_builder_service::app_build::active_build_authoring_contract_sha256(&layout)
+            .map_err(|error| {
+                tool_workflow::WorkflowLaunchError(format!(
+                    "cannot load active Local App authoring contract digest: {error}"
+                ))
+            })?;
     let catalog = crate::mobile::local_app_template_catalog::catalog_view(
         &crate::mobile::local_apps_adapters::CompiledPluginBundle,
     )
@@ -3275,10 +3276,11 @@ mod plugin_args_tests {
             version: local_apps::AUTHORING_SCHEMA_VERSION,
             revision: 1,
             app_id: "impact123".into(),
-            runtime_profile: local_app_builder_service::runtime_profiles::current_binding_for_family(
-                local_apps::AppRuntimeProfile::ReactDom,
-            )
-            .expect("runtime profile"),
+            runtime_profile:
+                local_app_builder_service::runtime_profiles::current_binding_for_family(
+                    local_apps::AppRuntimeProfile::ReactDom,
+                )
+                .expect("runtime profile"),
             spec: spec.clone(),
         };
         assert!(!update_ui_impact(&active, &spec_value).expect("same spec"));
@@ -3637,8 +3639,9 @@ mod run_id_tests {
         manifest: &mut local_apps::AppManifest,
         family: local_apps::AppRuntimeProfile,
     ) {
-        let binding = local_app_builder_service::runtime_profiles::current_binding_for_family(family)
-            .expect("published runtime profile");
+        let binding =
+            local_app_builder_service::runtime_profiles::current_binding_for_family(family)
+                .expect("published runtime profile");
         manifest.surface = Some(family.surface());
         manifest.runtime_profile = Some(binding.clone());
         manifest.template_origin = Some(local_apps::AppTemplateOrigin {
@@ -3657,8 +3660,9 @@ mod run_id_tests {
             lockfile_sha256: "2".repeat(64),
             dependency_tree_sha256: "3".repeat(64),
             sbom_sha256: "4".repeat(64),
-            toolchain_key: local_app_builder_service::runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
-                .to_string(),
+            toolchain_key:
+                local_app_builder_service::runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
+                    .to_string(),
             verified_profile_contract_sha256: binding.contract_sha256,
         });
     }
@@ -3666,9 +3670,10 @@ mod run_id_tests {
     fn fixture_authoring_spec(
         family: local_apps::AppRuntimeProfile,
     ) -> local_apps::AppAuthoringSpec {
-        let mut spec: local_apps::AppAuthoringSpec =
-            serde_json::from_str(local_app_builder_plugin::fixtures::AUTHORING_SPEC_VALID_NULL_CANVAS)
-                .expect("checked-in authoring fixture");
+        let mut spec: local_apps::AppAuthoringSpec = serde_json::from_str(
+            local_app_builder_plugin::fixtures::AUTHORING_SPEC_VALID_NULL_CANVAS,
+        )
+        .expect("checked-in authoring fixture");
         if family != local_apps::AppRuntimeProfile::ReactDom {
             spec.design.canvas = Some(local_apps::AppCanvasDesign {
                 scene: "A deterministic fixture scene".into(),
@@ -4523,8 +4528,9 @@ mod run_id_tests {
             lockfile_sha256: "2".repeat(64),
             dependency_tree_sha256: "3".repeat(64),
             sbom_sha256: "4".repeat(64),
-            toolchain_key: local_app_builder_service::runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
-                .to_string(),
+            toolchain_key:
+                local_app_builder_service::runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
+                    .to_string(),
             verified_profile_contract_sha256: "a".repeat(64),
         });
         manifest.template_origin = Some(local_apps::AppTemplateOrigin {
@@ -6336,9 +6342,11 @@ mod run_id_tests {
             );
             if operation == "update" {
                 let expected_digest =
-                    local_app_builder_service::app_build::active_build_authoring_contract_sha256(&layout)
-                        .expect("active build receipt")
-                        .expect("active authoring contract digest");
+                    local_app_builder_service::app_build::active_build_authoring_contract_sha256(
+                        &layout,
+                    )
+                    .expect("active build receipt")
+                    .expect("active authoring contract digest");
                 assert_eq!(
                     after_object
                         .get("host_context")

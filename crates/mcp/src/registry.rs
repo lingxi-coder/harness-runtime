@@ -21,8 +21,8 @@ use lingxi_core::types::{AgentId, McpConnectionId};
 // The scope of a managed-server conversation export (and the grammar of its names and keys)
 // is defined in `mcp-wire` so an out-of-tree service can bind one without this crate;
 // the old path stays.
-pub use mcp_wire::export::ConversationExport;
 use mcp_wire::export::is_sha256;
+pub use mcp_wire::export::ConversationExport;
 use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::OnceLock;

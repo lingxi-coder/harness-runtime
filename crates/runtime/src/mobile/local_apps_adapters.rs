@@ -848,9 +848,9 @@ mod tests {
 
     fn registry() -> Arc<mcp::McpRegistry> {
         Arc::new(mcp::McpRegistry::new(Arc::new(
-            local_app_builder_service::mcp_server::LocalAppsMcpTransport::new(std::path::PathBuf::from(
-                "/nonexistent-local-apps-root",
-            )),
+            local_app_builder_service::mcp_server::LocalAppsMcpTransport::new(
+                std::path::PathBuf::from("/nonexistent-local-apps-root"),
+            ),
         )))
     }
 

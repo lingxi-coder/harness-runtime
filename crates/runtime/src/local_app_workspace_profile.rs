@@ -43,7 +43,10 @@ impl WorkspaceProfile for LocalAppWorkspaceProfile {
     // Mobile Linux prompts use `/workspace/<id>`; older builds used `/workspace/local-app-<id>`. The
     // order is the order the aliases are tried and translated in.
     fn guest_prefixes(&self, id: &str) -> Vec<String> {
-        vec![format!("/workspace/local-app-{id}"), format!("/workspace/{id}")]
+        vec![
+            format!("/workspace/local-app-{id}"),
+            format!("/workspace/{id}"),
+        ]
     }
 
     // The local-app host operations are BUILTIN tools (`LocalApp*`), not an MCP server — see
@@ -67,7 +70,9 @@ impl WorkspaceProfile for LocalAppWorkspaceProfile {
     fn is_host_owned(&self, relative: &Path) -> bool {
         // Replacing the workspace root or the `lib/` directory would also replace host-managed descendants such
         // as the bridge and platform adapter.
-        relative.as_os_str().is_empty() || relative == Path::new("lib") || host_owned_relative(relative)
+        relative.as_os_str().is_empty()
+            || relative == Path::new("lib")
+            || host_owned_relative(relative)
     }
 }
 
@@ -439,8 +444,23 @@ mod tests {
         let max_len = "a".repeat(54);
         let too_long = "a".repeat(55);
         let corpus = [
-            "a", "0", "abc-123", "9-", max_len.as_str(), "", "-leading-dash", "Upper", "under_score",
-            "spa ce", "..", "../evil", "a/b", "a\\b", "a.b", "über", too_long.as_str(),
+            "a",
+            "0",
+            "abc-123",
+            "9-",
+            max_len.as_str(),
+            "",
+            "-leading-dash",
+            "Upper",
+            "under_score",
+            "spa ce",
+            "..",
+            "../evil",
+            "a/b",
+            "a\\b",
+            "a.b",
+            "über",
+            too_long.as_str(),
         ];
         let mut accepted = 0;
         for id in corpus {
@@ -454,7 +474,10 @@ mod tests {
             }
             accepted += usize::from(expected);
         }
-        assert_eq!(accepted, 5, "vacuity: the corpus must contain both valid and invalid ids");
+        assert_eq!(
+            accepted, 5,
+            "vacuity: the corpus must contain both valid and invalid ids"
+        );
     }
 
     /// The lease root is derived from the requested app, so a workflow cannot borrow the session cwd or
@@ -591,27 +614,21 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
         let fs = roots(&root);
 
-        assert!(
-            !registry().escapes_workspace(
-                "Bash",
-                &serde_json::json!({"command":"cat src/App.jsx"}),
-                &fs
-            )
-        );
-        assert!(
-            registry().escapes_workspace(
-                "Bash",
-                &serde_json::json!({"command":"cat /etc/passwd"}),
-                &fs
-            )
-        );
-        assert!(
-            registry().escapes_workspace(
-                "Bash",
-                &serde_json::json!({"command":"cd /tmp && cat src/App.jsx"}),
-                &fs
-            )
-        );
+        assert!(!registry().escapes_workspace(
+            "Bash",
+            &serde_json::json!({"command":"cat src/App.jsx"}),
+            &fs
+        ));
+        assert!(registry().escapes_workspace(
+            "Bash",
+            &serde_json::json!({"command":"cat /etc/passwd"}),
+            &fs
+        ));
+        assert!(registry().escapes_workspace(
+            "Bash",
+            &serde_json::json!({"command":"cd /tmp && cat src/App.jsx"}),
+            &fs
+        ));
     }
 
     #[test]
@@ -855,34 +872,26 @@ mod tests {
                 &fs,
             )
         );
-        assert!(
-            registry().denies_host_owned_for_workspace(
-                "Bash",
-                &serde_json::json!({"command":"npm install"}),
-                &fs,
-            )
-        );
-        assert!(
-            !registry().denies_host_owned_for_workspace(
-                "Bash",
-                &serde_json::json!({"command":"cat src/App.jsx"}),
-                &fs,
-            )
-        );
-        assert!(
-            registry().escapes_workspace(
-                "Edit",
-                &serde_json::json!({"file_path":"/workspace/local-app-app-a/link/new.txt"}),
-                &fs,
-            )
-        );
-        assert!(
-            !registry().escapes_workspace(
-                "Edit",
-                &serde_json::json!({"file_path":"/workspace/local-app-app-a/src/new.txt"}),
-                &fs,
-            )
-        );
+        assert!(registry().denies_host_owned_for_workspace(
+            "Bash",
+            &serde_json::json!({"command":"npm install"}),
+            &fs,
+        ));
+        assert!(!registry().denies_host_owned_for_workspace(
+            "Bash",
+            &serde_json::json!({"command":"cat src/App.jsx"}),
+            &fs,
+        ));
+        assert!(registry().escapes_workspace(
+            "Edit",
+            &serde_json::json!({"file_path":"/workspace/local-app-app-a/link/new.txt"}),
+            &fs,
+        ));
+        assert!(!registry().escapes_workspace(
+            "Edit",
+            &serde_json::json!({"file_path":"/workspace/local-app-app-a/src/new.txt"}),
+            &fs,
+        ));
     }
 
     #[test]

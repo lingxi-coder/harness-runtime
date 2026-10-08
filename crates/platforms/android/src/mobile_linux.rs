@@ -65,8 +65,10 @@ impl AndroidProotRuntime {
 fn product_build_profile() -> mobile_linux_android::IsolatedBuildProfile {
     mobile_linux_android::IsolatedBuildProfile {
         guest_root: local_app_builder_contracts::guest_paths::LOCAL_APP_BUILD_ROOT.into(),
-        project_directory: local_app_builder_contracts::guest_paths::LOCAL_APP_BUILD_PROJECT_DIR.into(),
-        dependency_store: local_app_builder_contracts::guest_paths::LOCAL_APP_DEPENDENCY_STORE.into(),
+        project_directory: local_app_builder_contracts::guest_paths::LOCAL_APP_BUILD_PROJECT_DIR
+            .into(),
+        dependency_store: local_app_builder_contracts::guest_paths::LOCAL_APP_DEPENDENCY_STORE
+            .into(),
         state_directory: ".lingxi-build-state".into(),
         host_apps_directory: "apps".into(),
         host_build_directory: "build".into(),
@@ -277,7 +279,10 @@ mod tests {
             product::local_app_build_project("abc-123", "store"),
             "/var/lingxi/local-app-build/abc-123/store/project"
         );
-        assert_eq!(sdk::writable_roots(), ["/root", "/tmp", "/var/tmp", "/workspace"]);
+        assert_eq!(
+            sdk::writable_roots(),
+            ["/root", "/tmp", "/var/tmp", "/workspace"]
+        );
     }
 
     #[test]

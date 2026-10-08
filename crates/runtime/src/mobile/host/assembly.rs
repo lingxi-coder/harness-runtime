@@ -309,7 +309,8 @@ pub(super) async fn build_mobile_inner_with_ask(
     // `ToolUseResult`, so the observation rides the same connection-scoped
     // listener the adapter sinks already use — no permission-gate decorator, no
     // second session read. See `crate::mobile::plan_approval`.
-    let plan_approval_log = Arc::new(local_app_builder_service::plan_approval::PlanApprovalLog::default());
+    let plan_approval_log =
+        Arc::new(local_app_builder_service::plan_approval::PlanApprovalLog::default());
     let observed_listener: Arc<dyn ClientEventListener> =
         Arc::new(crate::mobile::plan_approval::PlanApprovalWatcher::new(
             listener.clone(),
